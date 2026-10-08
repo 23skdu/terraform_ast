@@ -2,6 +2,7 @@ package ast
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/hashicorp/terraform-config-inspect/tfconfig"
@@ -137,10 +138,199 @@ func CheckTypeCompatibility(oldType, newType string) TypeCompatibilityResult {
 		}
 	}
 
+	// Deep Object Schema Comparison
+	if isObjectOrCollectionOfObject(normOld) && isObjectOrCollectionOfObject(normNew) {
+		containerOld, rawObjOld := splitObjectContainer(normOld)
+		containerNew, rawObjNew := splitObjectContainer(normNew)
+
+		if containerOld != containerNew {
+			return TypeCompatibilityResult{
+				Compatible: false,
+				IsBreaking: true,
+				Reason:     fmt.Sprintf("Container type changed incompatibly from '%s' to '%s'", containerOld, containerNew),
+			}
+		}
+
+		oldAttrs, okOld := ParseObjectSchema(rawObjOld)
+		newAttrs, okNew := ParseObjectSchema(rawObjNew)
+		if okOld && okNew {
+			return CheckObjectCompatibility(oldAttrs, newAttrs)
+		}
+	}
+
 	// Incompatible primitives or mismatched complex structures
 	return TypeCompatibilityResult{
 		Compatible: false,
 		IsBreaking: true,
 		Reason:     fmt.Sprintf("Type constraint changed incompatibly from '%s' to '%s'", oldType, newType),
+	}
+}
+
+// ObjectAttribute represents an attribute defined within an object schema.
+type ObjectAttribute struct {
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	IsOptional bool   `json:"is_optional"`
+}
+
+func isObjectOrCollectionOfObject(t string) bool {
+	return strings.Contains(t, "object({")
+}
+
+func splitObjectContainer(t string) (container string, rawObj string) {
+	if strings.HasPrefix(t, "object({") {
+		return "object", t
+	}
+	for _, prefix := range []string{"list(", "set(", "map("} {
+		if strings.HasPrefix(t, prefix) && strings.HasSuffix(t, ")") {
+			inner := strings.TrimSuffix(strings.TrimPrefix(t, prefix), ")")
+			if strings.HasPrefix(inner, "object({") {
+				return strings.TrimSuffix(prefix, "("), inner
+			}
+		}
+	}
+	return "unknown", t
+}
+
+// ParseObjectSchema parses an HCL object type expression like object({ foo = string, bar = optional(number) })
+func ParseObjectSchema(t string) (map[string]ObjectAttribute, bool) {
+	start := strings.Index(t, "object({")
+	if start == -1 {
+		return nil, false
+	}
+	end := strings.LastIndex(t, "})")
+	if end == -1 || end <= start+8 {
+		return nil, false
+	}
+	inner := t[start+8 : end]
+	attrs := make(map[string]ObjectAttribute)
+
+	parts := splitObjectAttributes(inner)
+	for _, part := range parts {
+		eqIdx := strings.Index(part, "=")
+		if eqIdx == -1 {
+			continue
+		}
+		name := strings.TrimSpace(part[:eqIdx])
+		typeExpr := strings.TrimSpace(part[eqIdx+1:])
+
+		isOptional := false
+		if strings.HasPrefix(typeExpr, "optional(") && strings.HasSuffix(typeExpr, ")") {
+			isOptional = true
+			typeExpr = strings.TrimSuffix(strings.TrimPrefix(typeExpr, "optional("), ")")
+			// Handle optional(type, default)
+			if commaIdx := strings.Index(typeExpr, ","); commaIdx != -1 {
+				typeExpr = strings.TrimSpace(typeExpr[:commaIdx])
+			}
+		}
+		attrs[name] = ObjectAttribute{
+			Name:       name,
+			Type:       typeExpr,
+			IsOptional: isOptional,
+		}
+	}
+	return attrs, true
+}
+
+func splitObjectAttributes(inner string) []string {
+	var parts []string
+	var current strings.Builder
+	depth := 0
+
+	for _, ch := range inner {
+		switch ch {
+		case '(', '{', '[':
+			depth++
+			current.WriteRune(ch)
+		case ')', '}', ']':
+			depth--
+			current.WriteRune(ch)
+		case ',', '\n':
+			if depth == 0 {
+				part := strings.TrimSpace(current.String())
+				if part != "" {
+					parts = append(parts, part)
+				}
+				current.Reset()
+			} else {
+				current.WriteRune(ch)
+			}
+		default:
+			current.WriteRune(ch)
+		}
+	}
+	if current.Len() > 0 {
+		part := strings.TrimSpace(current.String())
+		if part != "" {
+			parts = append(parts, part)
+		}
+	}
+	return parts
+}
+
+// CheckObjectCompatibility compares attributes between two object schemas.
+func CheckObjectCompatibility(oldAttrs, newAttrs map[string]ObjectAttribute) TypeCompatibilityResult {
+	// 1. Check for removed attributes from object schema in sorted order
+	var oldNames []string
+	for name := range oldAttrs {
+		oldNames = append(oldNames, name)
+	}
+	sort.Strings(oldNames)
+
+	for _, name := range oldNames {
+		if _, exists := newAttrs[name]; !exists {
+			return TypeCompatibilityResult{
+				Compatible: false,
+				IsBreaking: true,
+				Reason:     fmt.Sprintf("Attribute '%s' was removed from object schema", name),
+			}
+		}
+	}
+
+	// 2. Check for newly required attributes added to object schema in sorted order
+	var newNames []string
+	for name := range newAttrs {
+		newNames = append(newNames, name)
+	}
+	sort.Strings(newNames)
+
+	for _, name := range newNames {
+		newAttr := newAttrs[name]
+		oldAttr, exists := oldAttrs[name]
+		if !exists {
+			if !newAttr.IsOptional {
+				return TypeCompatibilityResult{
+					Compatible: false,
+					IsBreaking: true,
+					Reason:     fmt.Sprintf("New required attribute '%s' added to object schema", name),
+				}
+			}
+			continue
+		}
+
+		// Was optional, now required
+		if oldAttr.IsOptional && !newAttr.IsOptional {
+			return TypeCompatibilityResult{
+				Compatible: false,
+				IsBreaking: true,
+				Reason:     fmt.Sprintf("Object attribute '%s' changed from optional to required", name),
+			}
+		}
+
+		// Compare inner attribute types
+		subCompat := CheckTypeCompatibility(oldAttr.Type, newAttr.Type)
+		if subCompat.IsBreaking {
+			return TypeCompatibilityResult{
+				Compatible: false,
+				IsBreaking: true,
+				Reason:     fmt.Sprintf("Object attribute '%s' type changed incompatibly: %s", name, subCompat.Reason),
+			}
+		}
+	}
+
+	return TypeCompatibilityResult{
+		Compatible: true,
+		IsBreaking: false,
+		Reason:     "Object schemas are compatible",
 	}
 }

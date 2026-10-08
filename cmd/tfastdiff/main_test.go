@@ -393,3 +393,101 @@ func TestHelpers(t *testing.T) {
 	err := writeOutput("/invalid/directory/that/does/not/exist/out.txt", "hello", &buf)
 	assert.Error(t, err)
 }
+
+func TestExecute_SARIFFormat(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "x" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`variable "x" { type = list(string) }`), 0600))
+
+	var stdout, stderr bytes.Buffer
+
+	// Compare mode with SARIF
+	code := Execute([]string{"--old", dir1, "--new", dir2, "--format", "sarif"}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "sarif-schema-2.1.0.json")
+	assert.Contains(t, stdout.String(), "TF-DIFF-BREAKING-CHANGE")
+
+	// Wrapper mode with SARIF
+	wrapperDir := t.TempDir()
+	wrapperTF := `
+module "mod" {
+  source = "` + dir1 + `"
+  x      = "val"
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(wrapperTF), 0600))
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", dir2,
+		"--format", "sarif",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "sarif-schema-2.1.0.json")
+}
+
+func TestExecute_BlastRadiusAndRecreation(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`
+variable "ip_range_services" {
+  type = string
+}
+`), 0600))
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "gke" {
+  source = "` + upstreamDir + `"
+}
+`), 0600))
+
+	environmentsDir := t.TempDir()
+	envDev := filepath.Join(environmentsDir, "dev")
+	require.NoError(t, os.MkdirAll(envDev, 0750))
+	require.NoError(t, os.WriteFile(filepath.Join(envDev, "main.tf"), []byte(`
+module "my_wrapper" {
+  source = "` + wrapperDir + `"
+}
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+
+	// Test with blast-radius and markdown recreation
+	code := Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", upstreamDir,
+		"--blast-radius", environmentsDir,
+		"--format", "markdown",
+		"--check-recreation=true",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "Blast-Radius Downstream Consumer Analysis")
+
+	// Test with blast-radius and JSON format
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", upstreamDir,
+		"--blast-radius", environmentsDir,
+		"--format", "json",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "total_call_sites_scanned")
+
+	// Error scanning blast-radius
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", upstreamDir,
+		"--blast-radius", "/invalid/nonexistent/dir",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error scanning blast radius")
+}
+

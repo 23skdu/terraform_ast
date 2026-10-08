@@ -1,0 +1,226 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "terraform-ast-diff",
+          "version": "0.1.0",
+          "informationUri": "https://github.com/23skdu/terraform_ast",
+          "rules": [
+            {
+              "id": "TF-DIFF-BREAKING-CHANGE",
+              "shortDescription": {
+                "text": "Breaking API change in Terraform module"
+              },
+              "fullDescription": {
+                "text": "A breaking API change was detected between module versions (e.g. removed input, newly required input, or incompatible type change)."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              }
+            },
+            {
+              "id": "TF-DIFF-WARNING",
+              "shortDescription": {
+                "text": "Warning or widening change in Terraform module"
+              },
+              "fullDescription": {
+                "text": "A non-breaking change or type widening that may require verification."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              }
+            },
+            {
+              "id": "TF-DIFF-NEW-FEATURE",
+              "shortDescription": {
+                "text": "New feature or optional attribute added"
+              },
+              "fullDescription": {
+                "text": "A newly introduced optional variable or output is available."
+              },
+              "defaultConfiguration": {
+                "level": "note"
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "TF-DIFF-BREAKING-CHANGE",
+          "level": "error",
+          "message": {
+            "text": "[Output] legacy_network_tag: Output 'legacy_network_tag' was removed in upstream version (Remediation: Remove or replace references to output 'legacy_network_tag' in wrapper or downstream modules)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "terraform-google-modules/kubernetes-engine/google"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "TF-DIFF-BREAKING-CHANGE",
+          "level": "error",
+          "message": {
+            "text": "[Variable] cluster_autoscaling_profile: Newly introduced variable 'cluster_autoscaling_profile' is required and has no default value (Remediation: Provide a required value for 'cluster_autoscaling_profile' in wrapper module call)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "terraform-google-modules/kubernetes-engine/google"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "TF-DIFF-BREAKING-CHANGE",
+          "level": "error",
+          "message": {
+            "text": "[Variable] ip_range_services: Input variable 'ip_range_services' was removed in upstream version (Remediation: Remove variable 'ip_range_services' from wrapper or module callers before upgrading)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "terraform-google-modules/kubernetes-engine/google"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "TF-DIFF-BREAKING-CHANGE",
+          "level": "error",
+          "message": {
+            "text": "[VariableRequirement] grant_registry_access: Variable 'grant_registry_access' was optional (had default) but is now required with no default (Remediation: Explicitly supply a value for 'grant_registry_access' in the wrapper module call)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "terraform-google-modules/kubernetes-engine/google"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "TF-DIFF-BREAKING-CHANGE",
+          "level": "error",
+          "message": {
+            "text": "[VariableType] ip_range_pods: Type constraint for variable 'ip_range_pods' changed: Type constraint changed incompatibly from 'string' to 'list(string)' (Remediation: Update variable type definition in wrapper to 'list(string)')"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "terraform-google-modules/kubernetes-engine/google"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "TF-DIFF-WARNING",
+          "level": "warning",
+          "message": {
+            "text": "[TerraformCore] required_version: Terraform Core version constraint updated from '\u003e= 1.3.0' to '\u003e= 1.5.0' (Remediation: Ensure execution environment meets new Terraform Core requirement)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "terraform-google-modules/kubernetes-engine/google"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "TF-DIFF-WARNING",
+          "level": "warning",
+          "message": {
+            "text": "[VariableType] zones: Type constraint for variable 'zones' widened: Type converted from list to set (Terraform automatically coerces list to set, but ordering is not preserved) (Remediation: Verify variable values remain valid under widened type)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "terraform-google-modules/kubernetes-engine/google"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "TF-DIFF-NEW-FEATURE",
+          "level": "note",
+          "message": {
+            "text": "[Output] cost_allocation_status: New output 'cost_allocation_status' available in upstream"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "terraform-google-modules/kubernetes-engine/google"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "TF-DIFF-NEW-FEATURE",
+          "level": "note",
+          "message": {
+            "text": "[Variable] enable_cost_allocation: New optional variable 'enable_cost_allocation' available in upstream"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "terraform-google-modules/kubernetes-engine/google"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -3,16 +3,31 @@ package gitops
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/23skdu/terraform_ast/pkg/semverutil"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
+// CloneConfig configures git clone operations.
+type CloneConfig struct {
+	Shallow      bool
+	Depth        int
+	SingleBranch bool
+	RefName      string
+}
+
 // CloneOrOpen opens a local git repository in-place if targetDir is empty or matches path,
 // or clones the repository into targetDir.
 func CloneOrOpen(repoURLOrPath, targetDir string) (*git.Repository, error) {
+	return CloneOrOpenWithOptions(repoURLOrPath, targetDir, CloneConfig{})
+}
+
+// CloneOrOpenWithOptions opens or clones a repository with optional shallow cloning.
+func CloneOrOpenWithOptions(repoURLOrPath, targetDir string, cfg CloneConfig) (*git.Repository, error) {
 	if targetDir == "" || targetDir == repoURLOrPath {
 		if fi, err := os.Stat(repoURLOrPath); err == nil && fi.IsDir() {
 			repo, err := git.PlainOpen(repoURLOrPath)
@@ -30,9 +45,33 @@ func CloneOrOpen(repoURLOrPath, targetDir string) (*git.Repository, error) {
 		}
 	}
 
-	repo, err := git.PlainClone(targetDir, false, &git.CloneOptions{
+	cloneOpts := &git.CloneOptions{
 		URL: repoURLOrPath,
-	})
+	}
+
+	if cfg.Shallow {
+		depth := cfg.Depth
+		if depth <= 0 {
+			depth = 1
+		}
+		cloneOpts.Depth = depth
+		cloneOpts.SingleBranch = cfg.SingleBranch
+		if cfg.RefName != "" {
+			if strings.HasPrefix(cfg.RefName, "refs/") {
+				cloneOpts.ReferenceName = plumbing.ReferenceName(cfg.RefName)
+			} else {
+				cloneOpts.ReferenceName = plumbing.NewTagReferenceName(cfg.RefName)
+			}
+		}
+	}
+
+	repo, err := git.PlainClone(targetDir, false, cloneOpts)
+	if err != nil && cfg.Shallow {
+		// Fallback to full clone if shallow clone failed on specific ref
+		repo, err = git.PlainClone(targetDir, false, &git.CloneOptions{
+			URL: repoURLOrPath,
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to clone repository %s: %w", repoURLOrPath, err)
 	}
@@ -127,6 +166,9 @@ func FindNextVersion(repo *git.Repository, currentVersion string) (string, error
 
 // ExtractVersionToDir clones or copies a repository and checks out the specified ref into destDir.
 func ExtractVersionToDir(repoURLOrPath, refName, destDir string) error {
+	if fi, err := os.Stat(repoURLOrPath); err == nil && fi.IsDir() && !isGitRepo(repoURLOrPath) {
+		return copyDir(repoURLOrPath, destDir)
+	}
 	repo, err := CloneOrOpen(repoURLOrPath, destDir)
 	if err != nil {
 		return err
@@ -136,3 +178,124 @@ func ExtractVersionToDir(repoURLOrPath, refName, destDir string) error {
 	}
 	return CheckoutRef(repo, refName)
 }
+
+// ExtractVersionToDirShallow clones or copies a repository using shallow cloning if possible.
+func ExtractVersionToDirShallow(repoURLOrPath, refName, destDir string) error {
+	if fi, err := os.Stat(repoURLOrPath); err == nil && fi.IsDir() && !isGitRepo(repoURLOrPath) {
+		return copyDir(repoURLOrPath, destDir)
+	}
+	repo, err := CloneOrOpenWithOptions(repoURLOrPath, destDir, CloneConfig{
+		Shallow:      true,
+		Depth:        1,
+		SingleBranch: true,
+		RefName:      refName,
+	})
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(refName) == "" {
+		return nil
+	}
+	return CheckoutRef(repo, refName)
+}
+
+func copyDir(src, dst string) error {
+	cleanDst := filepath.Clean(dst)
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(cleanDst, rel)
+		if !strings.HasPrefix(filepath.Clean(target), cleanDst) {
+			return fmt.Errorf("path traversal in copy: %s", target)
+		}
+		if info.IsDir() {
+			return os.MkdirAll(target, 0750)
+		}
+		// #nosec G122, G304
+		data, err := os.ReadFile(filepath.Clean(path))
+		if err != nil {
+			return err
+		}
+		// #nosec G703 -- target is verified within cleanDst
+		return os.WriteFile(filepath.Clean(target), data, 0600)
+	})
+}
+
+func isGitRepo(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil || !fi.IsDir() {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(path, ".git"))
+	return err == nil
+}
+
+// RepositoryCache provides thread-safe caching of extracted repositories.
+type RepositoryCache struct {
+	mu    sync.RWMutex
+	cache map[string]string // key: "repoURL@ref" -> cachedDir
+}
+
+// NewRepositoryCache creates an in-memory repository cache.
+func NewRepositoryCache() *RepositoryCache {
+	return &RepositoryCache{
+		cache: make(map[string]string),
+	}
+}
+
+// GlobalCache is the default global in-memory repository cache.
+var GlobalCache = NewRepositoryCache()
+
+// GetOrExtract retrieves the version from cache or extracts it into a cached directory.
+func (c *RepositoryCache) GetOrExtract(repoURLOrPath, refName string) (string, error) {
+	key := fmt.Sprintf("%s@%s", repoURLOrPath, refName)
+
+	c.mu.RLock()
+	cachedDir, found := c.cache[key]
+	c.mu.RUnlock()
+
+	if found {
+		if fi, err := os.Stat(cachedDir); err == nil && fi.IsDir() {
+			return cachedDir, nil
+		}
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Double-check under write lock
+	if cachedDir, found := c.cache[key]; found {
+		if fi, err := os.Stat(cachedDir); err == nil && fi.IsDir() {
+			return cachedDir, nil
+		}
+	}
+
+	tmpDir, err := os.MkdirTemp("", "tf_git_cache_*")
+	if err != nil {
+		return "", err
+	}
+
+	if err := ExtractVersionToDirShallow(repoURLOrPath, refName, tmpDir); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return "", err
+	}
+
+	c.cache[key] = tmpDir
+	return tmpDir, nil
+}
+
+// Clear removes all cached repositories.
+func (c *RepositoryCache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, dir := range c.cache {
+		_ = os.RemoveAll(dir)
+	}
+	c.cache = make(map[string]string)
+}
+

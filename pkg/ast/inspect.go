@@ -118,7 +118,8 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 		}
 
 		filePath := filepath.Join(dir, name)
-		src, err := os.ReadFile(filePath)
+		// #nosec G304 -- directory entry read within inspected module
+		src, err := os.ReadFile(filepath.Clean(filePath))
 		if err != nil {
 			continue
 		}
@@ -150,11 +151,12 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 					exprBytes := src[attr.Expr.Range().Start.Byte:attr.Expr.Range().End.Byte]
 					exprStr := strings.TrimSpace(string(exprBytes))
 
-					if attrName == "source" {
+					switch attrName {
+					case "source":
 						mc.Source = strings.Trim(exprStr, `"'`)
-					} else if attrName == "version" {
+					case "version":
 						mc.Version = strings.Trim(exprStr, `"'`)
-					} else {
+					default:
 						passed = append(passed, attrName)
 						mc.InputExpressions[attrName] = exprStr
 					}

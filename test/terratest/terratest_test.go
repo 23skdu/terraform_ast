@@ -2,10 +2,15 @@ package terratest
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
+	"github.com/23skdu/terraform_ast/pkg/blastradius"
 	"github.com/23skdu/terraform_ast/pkg/diff"
+	"github.com/23skdu/terraform_ast/pkg/gitops"
+	"github.com/23skdu/terraform_ast/pkg/recreation"
+	"github.com/23skdu/terraform_ast/pkg/registry"
 	"github.com/23skdu/terraform_ast/pkg/report"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
 	"github.com/gruntwork-io/terratest/modules/terraform"
@@ -23,6 +28,9 @@ func TestTerratest_ValidateFixtures(t *testing.T) {
 		"../fixtures/upstream_eks_v19",
 		"../fixtures/upstream_eks_v20",
 		"../fixtures/eks_wrapper",
+		"../fixtures/downstream_consumer",
+		"../fixtures/object_schema_v1",
+		"../fixtures/object_schema_v2",
 	}
 
 	for _, relDir := range fixtureDirs {
@@ -214,3 +222,139 @@ func TestEKS_WrapperAuditAndGolden(t *testing.T) {
 	mdData := []byte(report.RenderWrapperMarkdown(wrapperAudit))
 	report.AssertGoldenMatch(t, goldenMDPath, mdData, false)
 }
+
+// TestTerratest_DeepObjectSchemaDiff verifies deep object schema diffing with nested attribute level checks.
+func TestTerratest_DeepObjectSchemaDiff(t *testing.T) {
+	v1Dir, err := filepath.Abs("../fixtures/object_schema_v1")
+	require.NoError(t, err)
+	v2Dir, err := filepath.Abs("../fixtures/object_schema_v2")
+	require.NoError(t, err)
+
+	modV1, err := ast.Inspect(v1Dir)
+	require.NoError(t, err)
+	modV2, err := ast.Inspect(v2Dir)
+	require.NoError(t, err)
+
+	diffReport := diff.Compare(modV1, modV2, "v1.0.0", "v2.0.0")
+	assert.False(t, diffReport.CanSafelyUpdate)
+	assert.Equal(t, "BREAKING_CHANGES", diffReport.Verdict)
+	assert.GreaterOrEqual(t, diffReport.TotalBreaking, 1)
+
+	// Verify deep object attribute incompatibility is detected
+	var foundObjectBreaking bool
+	for _, item := range diffReport.BreakingChanges {
+		if item.Name == "node_config" && (strings.Contains(item.Description, "spot") || strings.Contains(item.Description, "tags")) {
+			foundObjectBreaking = true
+			assert.Contains(t, item.Description, "object schema")
+		}
+	}
+	assert.True(t, foundObjectBreaking, "Expected breaking change detected for object schema variable node_config")
+}
+
+// TestTerratest_RecreationHazardsAndSARIF verifies detection of ForceNew destruction hazards and SARIF v2.1.0 generation.
+func TestTerratest_RecreationHazardsAndSARIF(t *testing.T) {
+	gkeV1Dir, err := filepath.Abs("../fixtures/upstream_gke_v1")
+	require.NoError(t, err)
+	gkeV2Dir, err := filepath.Abs("../fixtures/upstream_gke_v2")
+	require.NoError(t, err)
+
+	modV1, err := ast.Inspect(gkeV1Dir)
+	require.NoError(t, err)
+	modV2, err := ast.Inspect(gkeV2Dir)
+	require.NoError(t, err)
+
+	diffReport := diff.Compare(modV1, modV2, "v29.0.0", "v30.0.0")
+	diffReport.ModuleName = "terraform-google-modules/kubernetes-engine/google"
+
+	// 1. Recreation Hazards validation
+	hazards := recreation.AnalyzeHazards(diffReport)
+	assert.NotEmpty(t, hazards)
+
+	var foundServicesHazard, foundPodsHazard bool
+	for _, h := range hazards {
+		if h.Variable == "ip_range_services" {
+			foundServicesHazard = true
+			assert.Equal(t, "google_container_cluster", h.Resource)
+		}
+		if h.Variable == "ip_range_pods" {
+			foundPodsHazard = true
+		}
+	}
+	assert.True(t, foundServicesHazard, "ip_range_services must be detected as ForceNew recreation hazard")
+	assert.True(t, foundPodsHazard, "ip_range_pods must be detected as ForceNew recreation hazard")
+
+	// 2. SARIF generation validation
+	sarifBytes, err := report.RenderSARIF(diffReport)
+	require.NoError(t, err)
+	assert.Contains(t, string(sarifBytes), "sarif-schema-2.1.0.json")
+	assert.Contains(t, string(sarifBytes), "TF-DIFF-BREAKING-CHANGE")
+
+	// Golden file testing: SARIF
+	goldenSARIFPath, err := filepath.Abs("../golden/gke_sarif.golden.json")
+	require.NoError(t, err)
+	report.AssertGoldenMatch(t, goldenSARIFPath, sarifBytes, false)
+}
+
+// TestTerratest_BlastRadiusConsumerAnalysis verifies downstream root module blast radius analysis.
+func TestTerratest_BlastRadiusConsumerAnalysis(t *testing.T) {
+	wrapperDir, err := filepath.Abs("../fixtures/gke_wrapper")
+	require.NoError(t, err)
+	consumerDir, err := filepath.Abs("../fixtures/downstream_consumer")
+	require.NoError(t, err)
+	gkeV1Dir, err := filepath.Abs("../fixtures/upstream_gke_v1")
+	require.NoError(t, err)
+	gkeV2Dir, err := filepath.Abs("../fixtures/upstream_gke_v2")
+	require.NoError(t, err)
+
+	wrapperMod, err := ast.Inspect(wrapperDir)
+	require.NoError(t, err)
+	gkeV1, err := ast.Inspect(gkeV1Dir)
+	require.NoError(t, err)
+	gkeV2, err := ast.Inspect(gkeV2Dir)
+	require.NoError(t, err)
+
+	wrapperAudit := wrapper.AnalyzeWrapper(wrapperMod, gkeV2, gkeV1, "v30.0.0", "v29.0.0")
+	wrapperAudit.WrapperPath = "test/fixtures/gke_wrapper"
+
+	blastReport, err := blastradius.ScanDirectory(consumerDir, "gke_wrapper", wrapperMod, wrapperAudit)
+	require.NoError(t, err)
+	assert.Equal(t, 1, blastReport.TotalCallSitesScanned)
+	assert.False(t, blastReport.CanSafelyUpdateAll)
+	assert.Equal(t, "CRITICAL", blastReport.HighestRisk)
+
+	impact := blastReport.ImpactedRootModules[0]
+	assert.Equal(t, "primary_cluster", impact.ModuleName)
+	assert.Contains(t, impact.RemovedOutputsReferenced, "legacy_network_tag")
+
+	// Golden file testing: Blast Radius JSON
+	goldenBlastPath, err := filepath.Abs("../golden/blast_radius.golden.json")
+	require.NoError(t, err)
+	blastJSON, err := blastReport.RenderJSON()
+	require.NoError(t, err)
+	report.AssertGoldenMatch(t, goldenBlastPath, blastJSON, false)
+}
+
+// TestTerratest_GitShallowAndRegistryProtocols verifies shallow extraction and registry protocol detection.
+func TestTerratest_GitShallowAndRegistryProtocols(t *testing.T) {
+	// Registry source detection
+	assert.True(t, registry.IsRegistrySource("terraform-google-modules/kubernetes-engine/google"))
+	assert.True(t, registry.IsRegistrySource("terraform-aws-modules/eks/aws"))
+	assert.False(t, registry.IsRegistrySource("./local/module"))
+	assert.False(t, registry.IsRegistrySource("git@github.com:org/repo.git"))
+
+	host, ns, name, prov, err := registry.ParseRegistrySource("terraform-google-modules/kubernetes-engine/google")
+	require.NoError(t, err)
+	assert.Equal(t, "registry.terraform.io", host)
+	assert.Equal(t, "terraform-google-modules", ns)
+	assert.Equal(t, "kubernetes-engine", name)
+	assert.Equal(t, "google", prov)
+
+	// Shallow extraction on local git fixture
+	gkeV1Dir, err := filepath.Abs("../fixtures/upstream_gke_v1")
+	require.NoError(t, err)
+
+	destDir := t.TempDir()
+	err = gitops.ExtractVersionToDirShallow(gkeV1Dir, "", destDir)
+	require.NoError(t, err)
+}
+

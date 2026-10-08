@@ -198,3 +198,96 @@ func TestExtractVersionToDir(t *testing.T) {
 	err = ExtractVersionToDir("/non/existent/path", "v1.0.0", t.TempDir())
 	assert.Error(t, err)
 }
+
+func TestCloneOrOpenWithOptions_Shallow(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
+	cloneDir := t.TempDir()
+
+	repo, err := CloneOrOpenWithOptions("file://"+repoDir, cloneDir, CloneConfig{
+		Shallow:      true,
+		Depth:        1,
+		SingleBranch: true,
+		RefName:      "v1.0.0",
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, repo)
+
+	// Test with refs/ prefix
+	cloneDir2 := t.TempDir()
+	repo2, err := CloneOrOpenWithOptions("file://"+repoDir, cloneDir2, CloneConfig{
+		Shallow:      true,
+		Depth:        1,
+		SingleBranch: true,
+		RefName:      "refs/tags/v1.0.0",
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, repo2)
+}
+
+func TestExtractVersionToDirShallow(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
+	destDir := t.TempDir()
+
+	err := ExtractVersionToDirShallow("file://"+repoDir, "v1.0.0", destDir)
+	require.NoError(t, err)
+
+	// Empty ref
+	destDir2 := t.TempDir()
+	err = ExtractVersionToDirShallow("file://"+repoDir, "", destDir2)
+	require.NoError(t, err)
+
+	// Invalid repo
+	err = ExtractVersionToDirShallow("/invalid/path", "v1.0.0", t.TempDir())
+	assert.Error(t, err)
+}
+
+func TestRepositoryCache(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
+	cache := NewRepositoryCache()
+	defer cache.Clear()
+
+	// Initial extraction
+	cachedDir1, err := cache.GetOrExtract("file://"+repoDir, "v1.0.0")
+	require.NoError(t, err)
+	assert.DirExists(t, cachedDir1)
+
+	// Second extraction should hit cache
+	cachedDir2, err := cache.GetOrExtract("file://"+repoDir, "v1.0.0")
+	require.NoError(t, err)
+	assert.Equal(t, cachedDir1, cachedDir2)
+
+	// Test error branch
+	_, err = cache.GetOrExtract("/invalid/repo", "v1.0.0")
+	assert.Error(t, err)
+
+	// Clear cache
+	cache.Clear()
+	assert.Empty(t, cache.cache)
+
+	// GlobalCache test
+	dir, err := GlobalCache.GetOrExtract("file://"+repoDir, "v1.0.0")
+	require.NoError(t, err)
+	assert.DirExists(t, dir)
+	GlobalCache.Clear()
+}
+
+func TestRepositoryCache_Concurrent(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
+	cache := NewRepositoryCache()
+	defer cache.Clear()
+
+	done := make(chan bool)
+	for i := 0; i < 5; i++ {
+		go func() {
+			d, err := cache.GetOrExtract("file://"+repoDir, "v1.0.0")
+			assert.NoError(t, err)
+			assert.NotEmpty(t, d)
+			done <- true
+		}()
+	}
+
+	for i := 0; i < 5; i++ {
+		<-done
+	}
+}
+

@@ -218,14 +218,15 @@ func AssertGoldenMatch(t *testing.T, goldenPath string, actual []byte, updateGol
 	}
 
 	if updateGolden {
-		err := os.MkdirAll(filepath.Dir(goldenPath), 0755)
+		err := os.MkdirAll(filepath.Dir(goldenPath), 0750)
 		require.NoError(t, err)
-		err = os.WriteFile(goldenPath, actual, 0644)
+		err = os.WriteFile(filepath.Clean(goldenPath), actual, 0600)
 		require.NoError(t, err)
 		return
 	}
 
-	expected, err := os.ReadFile(goldenPath)
+	// #nosec G304 -- test golden verification path
+	expected, err := os.ReadFile(filepath.Clean(goldenPath))
 	require.NoError(t, err, "golden file %s missing. Run with UPDATE_GOLDEN=true to generate", goldenPath)
 	assert.Equal(t, string(expected), string(actual), "golden file mismatch for %s", goldenPath)
 }

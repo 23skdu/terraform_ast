@@ -11,7 +11,12 @@
 ## Key Features
 
 - **AST Inspection & Parsing**: Uses [`github.com/hashicorp/terraform-config-inspect`](https://github.com/hashicorp/terraform-config-inspect) and HCL parsing to extract variables, outputs, module calls, provider requirements, and type constraints.
-- **Git Integration & Version Discovery**: Uses [`github.com/go-git/go-git/v5`](https://github.com/go-git/go-git) to clone, inspect, and check out remote tags or commit hashes.
+- **Terraform Registry Protocol**: Directly downloads and inspects modules from the Terraform Registry (e.g. `terraform-google-modules/kubernetes-engine/google`, `terraform-aws-modules/eks/aws`).
+- **Deep Structural Object Schema Diffing**: Analyzes nested `object({ ... })` type constraints attribute-by-attribute (attribute additions, removals, optional-to-required transitions, and type shifts).
+- **Blast-Radius & Consumer Analysis**: Recursively scans downstream root modules and environment directories to evaluate consumer-level impact (`--blast-radius ./environments`).
+- **State Destruction & Recreation Heuristics**: Flags `ForceNew` destruction hazards on critical immutable cloud resources (GKE cluster name, project ID, location, secondary subnet CIDRs, EKS cluster name, VPC ID).
+- **OASIS SARIF v2.1.0 Export**: Generates industry-standard SARIF reports (`--format sarif`) for direct integration with GitHub Code Scanning.
+- **Git Optimization & In-Memory Caching**: Implements shallow cloning (`--depth 1`) and thread-safe repository caching to maximize analysis speed.
 - **Semantic Versioning & Pinning**: Uses [`golang.org/x/mod/semver`](https://pkg.go.dev/golang.org/x/mod/semver) to detect major breaking bumps, minor additions, patch updates, and downgrade hazards.
 - **Breaking Change Detection**:
   - **Removed inputs**: Arguments passed to upstream that are no longer supported.
@@ -24,8 +29,8 @@
   - Detects broken output delegations (`module.<name>.<output>`).
   - Generates recommended pinning constraints (e.g. `version = "30.0.0"`).
   - Outlines exact remediation steps for engineers.
-- **Multi-Format Output**: Terminal text with visual indicators, GitHub-flavored Markdown for PR comments, and machine-readable JSON for CI/CD gates.
-- **100% Test Coverage**: Validated via [Terratest](test/terratest/) on realistic GKE/EKS fixtures and [Golden Image / Golden File](test/golden/) methodology.
+- **Multi-Format Output**: Terminal text with visual indicators, GitHub-flavored Markdown for PR comments, machine-readable JSON for CI/CD gates, and SARIF for code scanning.
+- **Enterprise Test Coverage**: Validated via [Terratest](test/terratest/) on realistic GKE/EKS fixtures and [Golden Image / Golden File](test/golden/) methodology.
 
 ---
 
@@ -109,6 +114,7 @@ Full architectural and technical specifications are available under [`docs/`](do
 - [CLI Reference & CI/CD Guide](docs/CLI_USAGE.md): Complete flag reference, exit codes, and GitHub Actions integration.
 - [Compatibility Rules](docs/COMPATIBILITY_RULES.md): Detailed classification taxonomy for breaking changes, downgrades, and new features.
 - [Testing Methodology](docs/TESTING_METHODOLOGY.md): Terratest validation, golden file verification, and 100% coverage guidelines.
+- [Strategic Roadmap](docs/ROADMAP.md): Evolution plan covering pre-commit hooks, codemods, and multi-version planning.
 
 ---
 
