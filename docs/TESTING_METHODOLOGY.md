@@ -26,6 +26,11 @@ This repository maintains **100% test statement coverage** across all packages t
 +-------------------------------------------------------------+
                                |
 +-------------------------------------------------------------+
+|          DevSecOps & Container Security Validation          |
+|    (Static linting, distroless non-root, read-only runtime) |
++-------------------------------------------------------------+
+                               |
++-------------------------------------------------------------+
 |               Unit Tests & Error Branch Coverage            |
 |       (Guarantees 100% branch and statement coverage)       |
 +-------------------------------------------------------------+
@@ -88,7 +93,33 @@ UPDATE_GOLDEN=true go test -v ./test/terratest
 
 ---
 
-## 4. 100% Statement Coverage Verification
+## 4. DevSecOps & Container Security Validation
+
+The container test suite in `test/docker/` enforces compliance with cloud security baselines and container hardening best practices:
+
+### Static DevSecOps Rules (`TestDockerfile_DevSecOpsStaticAnalysis`)
+- **Multi-Stage Build**: Asserts separation of compile environment (`builder`) and runtime image.
+- **Supply Chain Integrity**: Validates checksum verification (`go mod verify`).
+- **Binary Hardening**: Asserts static CGO disabling (`CGO_ENABLED=0`), path disclosure prevention (`-trimpath`), and symbol/debug stripping (`-ldflags="-s -w"`).
+- **Distroless Base**: Enforces `gcr.io/distroless/static-debian12:nonroot`.
+- **Non-Root Execution**: Enforces `USER 65532:65532`.
+- **OCI Metadata Labels**: Verifies `org.opencontainers.image.*` specifications.
+- **Context Hygiene**: Validates `.dockerignore` exclusions (`.git`, `test/`, credentials, caches).
+
+### Dynamic Runtime Security (`TestDockerfile_BuildAndRuntimeSecurity`)
+- **Metadata Inspection**: Dynamically inspects built image configuration via `docker inspect` to verify UID/GID, working directory, and entrypoint.
+- **Read-Only Root Filesystem Execution**: Runs analysis with `--read-only` rootfs and `--security-opt no-new-privileges:true`.
+- **Exit Code Enforcement**: Verifies that breaking changes propagate as exit code 1 inside the container runtime.
+- **Attack Surface Neutralization**: Directly confirms that no shell (`/bin/sh` or `/bin/bash`) exists within the container.
+
+Run the container test suite:
+```bash
+go test -v ./test/docker
+```
+
+---
+
+## 5. 100% Statement Coverage Verification
 
 Run all test suites and verify coverage:
 

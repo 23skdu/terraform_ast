@@ -44,7 +44,26 @@ cd terraform_ast
 go build -o bin/tfastdiff cmd/tfastdiff/main.go
 ```
 
-### 2. Auditing a Wrapper Module
+### 2. Running via Docker (DevSecOps Hardened)
+
+A hardened, minimal distroless image (~5.7MB, non-root, read-only rootfs compatible) is provided:
+
+```bash
+# Build the minimal container
+docker build -t tfastdiff:latest .
+
+# Run module analysis securely
+docker run --rm \
+  --read-only \
+  --security-opt no-new-privileges:true \
+  -v $(pwd):/workspace:ro \
+  tfastdiff:latest \
+  --old ./modules/upstream-v19 \
+  --new ./modules/upstream-v20 \
+  --format markdown
+```
+
+### 3. Auditing a Wrapper Module
 
 Audit a wrapper module against a target upstream release:
 
@@ -57,7 +76,7 @@ Audit a wrapper module against a target upstream release:
   --exit-code
 ```
 
-### 3. Comparing Two Upstream Module Versions
+### 4. Comparing Two Upstream Module Versions
 
 Directly compare two versions of an upstream module:
 
@@ -132,6 +151,12 @@ Run Terratest validation against local Terraform engine:
 
 ```bash
 go test -v ./test/terratest
+```
+
+Run Docker DevSecOps static analysis and container security tests:
+
+```bash
+go test -v ./test/docker
 ```
 
 Regenerate canonical golden test artifacts:

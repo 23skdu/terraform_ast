@@ -1,0 +1,36 @@
+# Version control and IDE
+.git
+.gitignore
+.github
+.idea
+.vscode
+
+# Documentation and notes
+docs/
+*.md
+LICENSE
+
+# Test artifacts and fixtures
+test/
+*.out
+*.coverprofile
+coverage.*
+profile.cov
+*.test
+
+# Local binaries and scratch
+bin/
+scratch/
+tmp/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Terraform state and cache
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.terraform.lock.hcl
+crash.log

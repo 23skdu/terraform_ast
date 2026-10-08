@@ -41,10 +41,12 @@ Audits a local wrapper module (such as a Google GKE or AWS EKS wrapper) against 
 
 #### Flags:
 - `--wrapper <dir>`: Path to local wrapper module root.
-- `--upstream <dir|git-url>`: Upstream module path or Git URL (inferred from `module` block `source` if omitted).
-- `--new-version <tag>`: Target upstream Git version or tag to pin.
+- `--upstream <dir|git-url|registry>`: Upstream module path, Git URL, or Terraform Registry identifier (e.g. `terraform-google-modules/kubernetes-engine/google`). Inferred from `module` block `source` if omitted.
+- `--new-version <tag>`: Target upstream Git version or Registry version to pin (e.g. `v30.0.0` or `30.0.0`).
 - `--old-version <tag>`: Currently pinned upstream Git version (enables side-by-side upstream diff).
-- `--format <text|markdown|json>`: Output format (default: `text`).
+- `--blast-radius <dir>`: Optional root directory (e.g. `./environments`) to recursively scan for downstream consumer root modules affected by breaking changes.
+- `--check-recreation`: Enables or disables state destruction and `ForceNew` hazard detection heuristics (default: `true`).
+- `--format <text|markdown|json|sarif>`: Output format (default: `text`). Use `sarif` for GitHub Code Scanning.
 - `--output <file>`: Write report to destination file.
 - `--exit-code`: Returns non-zero exit code (1) if breaking changes are detected.
 
@@ -71,18 +73,77 @@ Compares two versions of an upstream module directly:
   --new https://github.com/terraform-google-modules/terraform-google-kubernetes-engine.git \
   --old-version v29.0.0 \
   --new-version v30.0.0 \
-  --format markdown \
-  --output diff_report.md
+  --format sarif \
+  --output results.sarif
+```
+
+```bash
+# Compare versions directly from the Terraform Registry
+./bin/tfastdiff \
+  --old terraform-aws-modules/eks/aws \
+  --new terraform-aws-modules/eks/aws \
+  --old-version 19.21.0 \
+  --new-version 20.0.0 \
+  --format markdown
 ```
 
 #### Flags:
-- `--old <dir|git-url>`: Old/current upstream module source.
-- `--new <dir|git-url>`: New/target upstream module source.
-- `--old-version <tag>`: Old Git tag or reference.
-- `--new-version <tag>`: New Git tag or reference.
-- `--format <text|markdown|json>`: Output format (`text`, `markdown`, `json`).
+- `--old <dir|git-url|registry>`: Old/current upstream module source.
+- `--new <dir|git-url|registry>`: New/target upstream module source.
+- `--old-version <tag>`: Old Git tag or Registry release version.
+- `--new-version <tag>`: New Git tag or Registry release version.
+- `--check-recreation`: Evaluates immutable resource destruction hazards (default: `true`).
+- `--format <text|markdown|json|sarif>`: Output format (`text`, `markdown`, `json`, `sarif`).
 - `--output <file>`: Path to file destination.
 - `--exit-code`: Exits with code 1 if breaking changes exist.
+
+---
+
+## Containerized Execution (Docker & DevSecOps)
+
+A minimal distroless image (~5.7MB) is available for secure containerized environments. It enforces:
+- **Non-root execution** as UID/GID `65532:65532`.
+- **Zero OS shell access** (no `/bin/sh` or `/bin/bash` in runtime image).
+- **Read-only root filesystem compatibility** (`--read-only`).
+- **No privilege escalation** (`--security-opt no-new-privileges:true`).
+
+### Building the Image
+
+```bash
+docker build -t tfastdiff:latest .
+```
+
+### Running Secure Scans
+
+Mount module directories as read-only volumes (`:ro`) into the default `/workspace` directory:
+
+```bash
+# Audit wrapper module inside a hardened container
+docker run --rm \
+  --read-only \
+  --security-opt no-new-privileges:true \
+  -v $(pwd):/workspace:ro \
+  tfastdiff:latest \
+  --wrapper /workspace/my-gke-wrapper \
+  --upstream https://github.com/terraform-google-modules/terraform-google-kubernetes-engine.git \
+  --new-version v30.0.0 \
+  --format markdown \
+  --exit-code
+```
+
+```bash
+# Generate SARIF report for GitHub Code Scanning
+docker run --rm \
+  --read-only \
+  --security-opt no-new-privileges:true \
+  -v $(pwd)/modules:/workspace/modules:ro \
+  -v $(pwd)/reports:/reports \
+  tfastdiff:latest \
+  --old /workspace/modules/upstream-v1 \
+  --new /workspace/modules/upstream-v2 \
+  --format sarif \
+  --output /reports/tfastdiff.sarif
+```
 
 ---
 
@@ -98,49 +159,79 @@ Compares two versions of an upstream module directly:
 
 ## CI/CD Pipeline Automation
 
-### GitHub Actions Pull Request Check
+### GitHub Actions Pull Request & Code Scanning Check
+
+This workflow runs `tfastdiff` via the hardened Docker container, generates both a PR Markdown comment and a SARIF report, and automatically uploads findings to **GitHub Code Scanning**:
 
 ```yaml
-name: Terraform Wrapper Compatibility Check
+name: Terraform Wrapper Compatibility & Security Audit
 
 on:
   pull_request:
     paths:
-      - 'modules/gke-wrapper/**'
+      - 'modules/**'
 
 jobs:
-  check-wrapper:
+  audit:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.27'
+      - name: Build DevSecOps Container
+        run: docker build -t tfastdiff:latest .
 
-      - name: Build tfastdiff
-        run: go build -o /tmp/tfastdiff ./cmd/tfastdiff/main.go
-
-      - name: Run Wrapper Compatibility Audit
-        id: audit
+      - name: Run Wrapper Audit (Markdown & Exit Code Gate)
         run: |
-          /tmp/tfastdiff \
-            --wrapper ./modules/gke-wrapper \
+          docker run --rm \
+            --read-only \
+            --security-opt no-new-privileges:true \
+            -v ${{ github.workspace }}:/workspace:ro \
+            -v ${{ runner.temp }}:/out \
+            tfastdiff:latest \
+            --wrapper /workspace/modules/gke-wrapper \
             --upstream https://github.com/terraform-google-modules/terraform-google-kubernetes-engine.git \
             --new-version v30.0.0 \
+            --blast-radius /workspace/environments \
             --format markdown \
-            --output report.md \
+            --output /out/report.md \
             --exit-code
 
-      - name: Post PR Comment
+      - name: Generate SARIF Security Report
+        if: always()
+        run: |
+          docker run --rm \
+            --read-only \
+            --security-opt no-new-privileges:true \
+            -v ${{ github.workspace }}:/workspace:ro \
+            -v ${{ runner.temp }}:/out \
+            tfastdiff:latest \
+            --wrapper /workspace/modules/gke-wrapper \
+            --upstream https://github.com/terraform-google-modules/terraform-google-kubernetes-engine.git \
+            --new-version v30.0.0 \
+            --format sarif \
+            --output /out/results.sarif
+
+      - name: Upload SARIF to GitHub Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ runner.temp }}/results.sarif
+
+      - name: Post PR Summary Comment
         if: always()
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            if (fs.existsSync('report.md')) {
-              const body = fs.readFileSync('report.md', 'utf8');
+            const reportPath = '${{ runner.temp }}/report.md';
+            if (fs.existsSync(reportPath)) {
+              const body = fs.readFileSync(reportPath, 'utf8');
               github.rest.issues.createComment({
                 issue_number: context.issue.number,
                 owner: context.repo.owner,

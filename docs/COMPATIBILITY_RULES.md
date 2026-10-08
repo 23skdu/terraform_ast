@@ -90,3 +90,35 @@ Subtle behavioral shifts that do not break the HCL parser but may require operat
 
 ### Provider & Core Requirement Shifts
 - **Condition**: Upstream updates minimum Terraform core version (e.g. `>= 1.3.0` to `>= 1.5.0`) or updates provider constraint boundaries.
+
+---
+
+## 5. State Destruction & ForceNew Hazards (`HAZARD`)
+
+Modifications that evaluate cleanly in static HCL but trigger cloud infrastructure destruction and recreation cycles during `terraform apply`:
+
+### Immutable Cluster & VPC Identifiers
+- **Condition**: Modifications affecting immutable resource attributes:
+  - **Google GKE**: `name`, `project_id`, `location`, `regional`, `ip_range_pods`, `ip_range_services`.
+  - **AWS EKS**: `cluster_name`, `vpc_id`, `subnets`.
+- **Impact**: Terraform cloud providers mark the resource as `(forces new resource)`, triggering teardown of production clusters and control planes.
+- **Remediation**: Use Terraform `moved {}` blocks, state manipulation scripts (`terraform state mv`), or blue/green cluster provisioning rather than in-place module version bumps.
+
+---
+
+## 6. Deep Structural Object Schema Rules (`OBJECT_SCHEMA`)
+
+When comparing input variables or outputs typed as complex structural objects (`object({ ... })`):
+
+### Removed Object Attributes
+- **Condition**: An object attribute required by downstream configurations is removed from the upstream object definition.
+- **Verdict**: `BREAKING`. Callers passing the removed attribute or accessing it from outputs fail validation.
+
+### Newly Required Object Attributes
+- **Condition**: An attribute within `object({ ... })` is introduced without an optional marker (`optional(...)`).
+- **Verdict**: `BREAKING`. Existing callers passing object literals without this attribute encounter immediate schema errors.
+
+### Optional Attribute Introduction
+- **Condition**: An attribute is added with `optional(type, default)`.
+- **Verdict**: `NEW_FEATURE` (backwards-compatible expansion).
+
