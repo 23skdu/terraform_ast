@@ -1,0 +1,29 @@
+# Terraform Wrapper Compatibility Audit
+
+- **Wrapper Path**: `test/fixtures/eks_wrapper`
+- **Target Module**: `eks`
+- **Target Version**: `v20.0.0`
+- **Recommended Pin**: `version = "20.0.0"`
+- **Verdict**: `BREAKING_CHANGES_DETECTED`
+
+> [!CAUTION]
+> **CANNOT SAFELY PIN: Wrapper has 4 breaking issue(s) with upstream v20.0.0. Resolve remediation steps before pinning.**
+
+### 🚨 Compatibility Issues (5)
+
+| Category | Target | Description | Remediation |
+| :--- | :--- | :--- | :--- |
+| `BrokenOutputDelegation` | `aws_auth` | Wrapper output 'aws_auth' references module.eks.aws_auth_configmap_yaml, but output 'aws_auth_configmap_yaml' was removed in target upstream v20.0.0 | Update or remove output "aws_auth" in wrapper outputs.tf |
+| `MissingRequiredInput` | `authentication_mode` | Target upstream v20.0.0 requires input 'authentication_mode' (no default), but wrapper call 'eks' does not provide it | Add argument 'authentication_mode = ...' to module "eks" block in wrapper |
+| `PassedRemovedInput` | `legacy_security_group_id` | Wrapper passes argument 'legacy_security_group_id' to child module 'eks', but 'legacy_security_group_id' is not an accepted input in target upstream v20.0.0 | Remove argument 'legacy_security_group_id' from module "eks" block in wrapper |
+| `PassedRemovedInput` | `manage_aws_auth_configmap` | Wrapper passes argument 'manage_aws_auth_configmap' to child module 'eks', but 'manage_aws_auth_configmap' is not an accepted input in target upstream v20.0.0 | Remove argument 'manage_aws_auth_configmap' from module "eks" block in wrapper |
+| `TypeMismatch` | `subnet_ids` | Wrapper variable 'subnet_ids' type 'list(string)' differs from upstream 'set(string)': Type converted from list to set (Terraform automatically coerces list to set, but ordering is not preserved) | Align variable "subnet_ids" with upstream type |
+
+### 💡 Available Upstream Features (3)
+
+| Category | Target | Description |
+| :--- | :--- | :--- |
+| `OptionalVariableAvailable` | `cluster_endpoint_public_access` | New optional upstream parameter 'cluster_endpoint_public_access' (type bool) can be exposed in wrapper |
+| `OptionalVariableAvailable` | `cluster_version` | New optional upstream parameter 'cluster_version' (type string) can be exposed in wrapper |
+| `OptionalVariableAvailable` | `enable_cluster_creator_admin_permissions` | New optional upstream parameter 'enable_cluster_creator_admin_permissions' (type bool) can be exposed in wrapper |
+
