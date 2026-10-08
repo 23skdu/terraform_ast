@@ -1,6 +1,8 @@
 package terratest
 
 import (
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -42,6 +44,10 @@ func TestTerratest_ValidateFixtures(t *testing.T) {
 				TerraformDir: dir,
 				NoColor:      true,
 			}
+			t.Cleanup(func() {
+				_ = os.RemoveAll(filepath.Join(dir, ".terraform"))
+				_ = os.Remove(filepath.Join(dir, ".terraform.lock.hcl"))
+			})
 			terraform.InitAndValidate(t, opts)
 		})
 	}
@@ -357,4 +363,122 @@ func TestTerratest_GitShallowAndRegistryProtocols(t *testing.T) {
 	err = gitops.ExtractVersionToDirShallow(gkeV1Dir, "", destDir)
 	require.NoError(t, err)
 }
+
+// TestTerratest_PlanFixtures executes terraform init and plan via Terratest on fixtures.
+func TestTerratest_PlanFixtures(t *testing.T) {
+	planDirs := []string{
+		"../fixtures/object_schema_v1",
+		"../fixtures/object_schema_v2",
+		"../fixtures/downstream_consumer",
+	}
+
+	for _, relDir := range planDirs {
+		dir, err := filepath.Abs(relDir)
+		require.NoError(t, err)
+
+		t.Run(filepath.Base(dir), func(t *testing.T) {
+			opts := &terraform.Options{
+				TerraformDir: dir,
+				NoColor:      true,
+			}
+			if filepath.Base(dir) == "object_schema_v2" {
+				opts.Vars = map[string]interface{}{
+					"node_config": map[string]interface{}{
+						"machine_type": "e2-medium",
+						"disk_size_gb": 50,
+						"tags":         []string{"web"},
+						"spot":         true,
+					},
+				}
+			}
+			t.Cleanup(func() {
+				_ = os.RemoveAll(filepath.Join(dir, ".terraform"))
+				_ = os.Remove(filepath.Join(dir, ".terraform.lock.hcl"))
+			})
+			planOutput := terraform.InitAndPlan(t, opts)
+			assert.NotEmpty(t, planOutput)
+		})
+	}
+}
+
+// TestTerratest_CLI_EndToEnd runs the compiled tfastdiff CLI binary against real Terratest fixtures.
+func TestTerratest_CLI_EndToEnd(t *testing.T) {
+	tmpBin := filepath.Join(t.TempDir(), "tfastdiff")
+	cmdBuild := exec.Command("go", "build", "-o", tmpBin, "../../cmd/tfastdiff")
+	require.NoError(t, cmdBuild.Run(), "Failed to build tfastdiff binary for Terratest E2E")
+
+	gkeV1Dir, _ := filepath.Abs("../fixtures/upstream_gke_v1")
+	gkeV2Dir, _ := filepath.Abs("../fixtures/upstream_gke_v2")
+	gkeWrapperDir, _ := filepath.Abs("../fixtures/gke_wrapper")
+	consumerDir, _ := filepath.Abs("../fixtures/downstream_consumer")
+
+	// 1. Compare Mode: markdown output with state recreation hazard detection
+	cmdCompare := exec.Command(tmpBin,
+		"--old", gkeV1Dir,
+		"--new", gkeV2Dir,
+		"--format", "markdown",
+		"--check-recreation=true",
+	)
+	outCompare, err := cmdCompare.CombinedOutput()
+	require.NoError(t, err)
+	assert.Contains(t, string(outCompare), "Terraform AST Compatibility Diff Report")
+	assert.Contains(t, string(outCompare), "State Destruction & Recreation Hazards")
+
+	// 2. Wrapper Mode: json output with blast-radius scanning
+	cmdWrapper := exec.Command(tmpBin,
+		"--wrapper", gkeWrapperDir,
+		"--upstream", gkeV2Dir,
+		"--blast-radius", consumerDir,
+		"--format", "json",
+	)
+	outWrapper, err := cmdWrapper.CombinedOutput()
+	require.NoError(t, err)
+	assert.Contains(t, string(outWrapper), "can_safely_update")
+	assert.Contains(t, string(outWrapper), "total_call_sites_scanned")
+
+	// 3. Wrapper Mode with --exit-code enforcement: returns exit code 1 on breaking changes
+	cmdExitCode := exec.Command(tmpBin,
+		"--wrapper", gkeWrapperDir,
+		"--upstream", gkeV2Dir,
+		"--exit-code",
+	)
+	err = cmdExitCode.Run()
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 1, exitErr.ExitCode())
+}
+
+// TestTerratest_WrapperRecreationHazardsAndSARIF validates SARIF v2.1.0 reporting and hazard detection on wrappers.
+func TestTerratest_WrapperRecreationHazardsAndSARIF(t *testing.T) {
+	wrapperDir, err := filepath.Abs("../fixtures/gke_wrapper")
+	require.NoError(t, err)
+	gkeV1Dir, err := filepath.Abs("../fixtures/upstream_gke_v1")
+	require.NoError(t, err)
+	gkeV2Dir, err := filepath.Abs("../fixtures/upstream_gke_v2")
+	require.NoError(t, err)
+
+	wMod, err := ast.Inspect(wrapperDir)
+	require.NoError(t, err)
+	g1, err := ast.Inspect(gkeV1Dir)
+	require.NoError(t, err)
+	g2, err := ast.Inspect(gkeV2Dir)
+	require.NoError(t, err)
+
+	audit := wrapper.AnalyzeWrapper(wMod, g2, g1, "v30.0.0", "v29.0.0")
+
+	// 1. AnalyzeWrapperHazards
+	hazards := recreation.AnalyzeWrapperHazards(audit)
+	assert.NotEmpty(t, hazards)
+	formattedHazards := recreation.FormatHazardsMarkdown(hazards)
+	assert.Contains(t, formattedHazards, "State Destruction & Recreation Hazards (ForceNew)")
+	assert.Contains(t, formattedHazards, "google_container_cluster")
+
+	// 2. RenderWrapperSARIF
+	sarifBytes, err := report.RenderWrapperSARIF(audit)
+	require.NoError(t, err)
+	assert.Contains(t, string(sarifBytes), "sarif-schema-2.1.0.json")
+	assert.Contains(t, string(sarifBytes), "TF-DIFF-BREAKING-CHANGE")
+	assert.Contains(t, string(sarifBytes), "PassedRemovedInput")
+}
+
 

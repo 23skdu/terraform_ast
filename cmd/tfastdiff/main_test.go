@@ -499,6 +499,7 @@ module "my_wrapper" {
 }
 
 func setupMockRegistryServer(t *testing.T) (*httptest.Server, func()) {
+	t.Helper()
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gw)
