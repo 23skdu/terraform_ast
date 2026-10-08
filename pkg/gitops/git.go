@@ -199,13 +199,19 @@ func ExtractVersionToDirShallow(repoURLOrPath, refName, destDir string) error {
 	return CheckoutRef(repo, refName)
 }
 
+var (
+	mkdirTemp        = os.MkdirTemp
+	preWriteLockHook func()
+	relPath          = filepath.Rel
+)
+
 func copyDir(src, dst string) error {
 	cleanDst := filepath.Clean(dst)
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(src, path)
+		rel, err := relPath(src, path)
 		if err != nil {
 			return err
 		}
@@ -265,6 +271,9 @@ func (c *RepositoryCache) GetOrExtract(repoURLOrPath, refName string) (string, e
 		}
 	}
 
+	if preWriteLockHook != nil {
+		preWriteLockHook()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -275,7 +284,7 @@ func (c *RepositoryCache) GetOrExtract(repoURLOrPath, refName string) (string, e
 		}
 	}
 
-	tmpDir, err := os.MkdirTemp("", "tf_git_cache_*")
+	tmpDir, err := mkdirTemp("", "tf_git_cache_*")
 	if err != nil {
 		return "", err
 	}

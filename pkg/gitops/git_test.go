@@ -1,6 +1,7 @@
 package gitops
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -290,4 +291,146 @@ func TestRepositoryCache_Concurrent(t *testing.T) {
 		<-done
 	}
 }
+
+func TestExtractVersionToDir_NonGitDir(t *testing.T) {
+	plainDir := t.TempDir()
+	subDir := filepath.Join(plainDir, "sub")
+	require.NoError(t, os.MkdirAll(subDir, 0750))
+	require.NoError(t, os.WriteFile(filepath.Join(subDir, "main.tf"), []byte(`resource "null_resource" "a" {}`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(plainDir, "root.tf"), []byte(`variable "x" {}`), 0600))
+
+	dest1 := t.TempDir()
+	err := ExtractVersionToDir(plainDir, "", dest1)
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(dest1, "sub", "main.tf"))
+	assert.FileExists(t, filepath.Join(dest1, "root.tf"))
+
+	dest2 := t.TempDir()
+	err = ExtractVersionToDirShallow(plainDir, "", dest2)
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(dest2, "sub", "main.tf"))
+}
+
+func TestCopyDir_Errors(t *testing.T) {
+	// Source does not exist
+	err := copyDir("/nonexistent/path", t.TempDir())
+	assert.Error(t, err)
+
+	// Unreadable file in source
+	src := t.TempDir()
+	badFile := filepath.Join(src, "bad.txt")
+	require.NoError(t, os.WriteFile(badFile, []byte("secret"), 0600))
+	require.NoError(t, os.Chmod(badFile, 0000))
+	defer func() { _ = os.Chmod(badFile, 0600) }()
+	err = copyDir(src, t.TempDir())
+	assert.Error(t, err)
+}
+
+func TestIsGitRepo(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
+	assert.True(t, isGitRepo(repoDir))
+
+	plainDir := t.TempDir()
+	assert.False(t, isGitRepo(plainDir))
+
+	file := filepath.Join(plainDir, "file.txt")
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0600))
+	assert.False(t, isGitRepo(file))
+
+	assert.False(t, isGitRepo("/nonexistent/path"))
+}
+
+func TestCloneOrOpenWithOptions_NotGitRepo(t *testing.T) {
+	plainDir := t.TempDir()
+	_, err := CloneOrOpenWithOptions(plainDir, t.TempDir(), CloneConfig{})
+	assert.Error(t, err)
+}
+
+func TestCloneOrOpenWithOptions_DefaultDepth(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
+	cloneDir := t.TempDir()
+
+	repo, err := CloneOrOpenWithOptions("file://"+repoDir, cloneDir, CloneConfig{
+		Shallow:      true,
+		Depth:        0, // triggers depth = 1
+		SingleBranch: true,
+		RefName:      "v1.0.0",
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, repo)
+}
+
+func TestRepositoryCache_HitUnderLock(t *testing.T) {
+	cache := NewRepositoryCache()
+	defer cache.Clear()
+	cachedDir := t.TempDir()
+	key := "/repo@v1.0.0"
+	cache.cache[key] = cachedDir
+
+	res, err := cache.GetOrExtract("/repo", "v1.0.0")
+	require.NoError(t, err)
+	assert.Equal(t, cachedDir, res)
+
+	// Remove dir from disk and verify it re-extracts
+	require.NoError(t, os.RemoveAll(cachedDir))
+	repoDir, _ := createTestRepoWithTags(t)
+	reExtracted, err := cache.GetOrExtract("file://"+repoDir, "v1.0.0")
+	require.NoError(t, err)
+	assert.DirExists(t, reExtracted)
+}
+
+func TestCopyDir_RelAndTraversalErrors(t *testing.T) {
+	origRel := relPath
+	defer func() { relPath = origRel }()
+
+	src := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(src, "test.txt"), []byte("data"), 0600))
+
+	// Mock relPath error
+	relPath = func(basepath, targpath string) (string, error) {
+		return "", errors.New("rel path failure")
+	}
+	err := copyDir(src, t.TempDir())
+	assert.Error(t, err)
+
+	// Mock path traversal error
+	relPath = func(basepath, targpath string) (string, error) {
+		return "../evil_escape", nil
+	}
+	err = copyDir(src, t.TempDir())
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "path traversal")
+}
+
+func TestRepositoryCache_HitUnderWriteLock(t *testing.T) {
+	cache := NewRepositoryCache()
+	defer cache.Clear()
+
+	validDir := t.TempDir()
+	key := "myrepo@v1.0.0"
+
+	preWriteLockHook = func() {
+		cache.cache[key] = validDir
+	}
+	defer func() { preWriteLockHook = nil }()
+
+	res, err := cache.GetOrExtract("myrepo", "v1.0.0")
+	require.NoError(t, err)
+	assert.Equal(t, validDir, res)
+}
+
+func TestRepositoryCache_MkdirTempFailure(t *testing.T) {
+	orig := mkdirTemp
+	defer func() { mkdirTemp = orig }()
+
+	mkdirTemp = func(dir, pattern string) (string, error) {
+		return "", errors.New("disk full")
+	}
+
+	cache := NewRepositoryCache()
+	_, err := cache.GetOrExtract("file:///any", "v1.0.0")
+	assert.Error(t, err)
+}
+
+
 

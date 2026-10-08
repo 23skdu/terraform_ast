@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
+	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/recreation"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
 	"github.com/hashicorp/hcl/v2"
@@ -132,13 +133,9 @@ func discoverCallSites(searchDir, wrapperIdentifier string) ([]CallSite, error) 
 			return nil
 		}
 
-		body, ok := file.Body.(*hclsyntax.Body)
-		if !ok {
-			return nil
-		}
-
-		// Extract all module.<name>.<output> references in this file
-		refs := extractModuleReferences(src)
+		if body, ok := file.Body.(*hclsyntax.Body); ok {
+			// Extract all module.<name>.<output> references in this file
+			refs := extractModuleReferences(src)
 
 		for _, block := range body.Blocks {
 			if block.Type != "module" || len(block.Labels) == 0 {
@@ -173,6 +170,7 @@ func discoverCallSites(searchDir, wrapperIdentifier string) ([]CallSite, error) 
 				OutputsReferenced: refs[modName],
 			}
 			callSites = append(callSites, cs)
+		}
 		}
 
 		return nil
@@ -231,26 +229,32 @@ func evaluateCallSiteImpact(
 
 	// 1. Check for removed inputs passed by this caller
 	for _, issue := range audit.Issues {
-		if strings.Contains(issue.Description, "removed") && strings.HasPrefix(issue.Category, "Variable") {
+		if (strings.Contains(issue.Description, "removed") || issue.Category == "PassedRemovedInput") && (strings.HasPrefix(issue.Category, "Variable") || issue.Category == "PassedRemovedInput") {
 			if _, passed := cs.PassedInputs[issue.Target]; passed {
 				impact.RemovedInputsPassed = append(impact.RemovedInputsPassed, issue.Target)
 				impact.CanSafelyUpdate = false
 			}
 		}
 		// 2. Check for missing required inputs
-		if strings.Contains(issue.Description, "required") && strings.HasPrefix(issue.Category, "Variable") {
+		if (strings.Contains(issue.Description, "required") || issue.Category == "MissingRequiredInput") && (strings.HasPrefix(issue.Category, "Variable") || issue.Category == "MissingRequiredInput") {
 			if _, passed := cs.PassedInputs[issue.Target]; !passed {
 				impact.MissingRequiredInputs = append(impact.MissingRequiredInputs, issue.Target)
 				impact.CanSafelyUpdate = false
 			}
 		}
 		// 3. Check for removed outputs referenced by this caller
-		if strings.Contains(issue.Description, "output") || strings.HasPrefix(issue.Category, "Output") {
+		if strings.Contains(issue.Description, "output") || strings.HasPrefix(issue.Category, "Output") || issue.Category == "BrokenOutputDelegation" {
 			for _, ref := range cs.OutputsReferenced {
 				if ref == issue.Target {
 					impact.RemovedOutputsReferenced = append(impact.RemovedOutputsReferenced, issue.Target)
 					impact.CanSafelyUpdate = false
 				}
+			}
+		}
+		// 4. Check for other breaking modifications on passed inputs (e.g. type changes)
+		if !strings.Contains(issue.Description, "removed") && (strings.HasPrefix(issue.Category, "Variable") || issue.Category == "TypeMismatch") && issue.Severity == diff.SeverityBreaking {
+			if _, passed := cs.PassedInputs[issue.Target]; passed {
+				impact.CanSafelyUpdate = false
 			}
 		}
 	}

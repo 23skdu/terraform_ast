@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -273,3 +274,74 @@ func TestExtractTarGz_PathTraversalProtection(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "illegal file path in tar archive")
 }
+
+func TestExtractTarGz_Errors(t *testing.T) {
+	// Corrupt tar in valid gzip
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	_, _ = gw.Write([]byte("not a tar file content"))
+	_ = gw.Close()
+	err := extractTarGz(&buf, t.TempDir())
+	assert.Error(t, err)
+
+	// Read-only directory where MkdirAll / OpenFile fails
+	validTar := createTestTarGz(t, map[string]string{"foo.tf": "var"})
+	roDir := filepath.Join(t.TempDir(), "ro")
+	require.NoError(t, os.MkdirAll(roDir, 0750))
+	require.NoError(t, os.Chmod(roDir, 0500))
+	defer func() { _ = os.Chmod(roDir, 0750) }()
+	err = extractTarGz(bytes.NewReader(validTar), roDir)
+	assert.Error(t, err)
+
+	// Directory entry creation failure (file already exists where dir should be)
+	conflictDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(conflictDir, "subfolder"), []byte("blocking file"), 0600))
+	err = extractTarGz(bytes.NewReader(validTar), conflictDir)
+	assert.Error(t, err)
+
+	// Dir conflict for regular file parent directory
+	nestedTar := createTestTarGz(t, map[string]string{"parent/child.tf": "var"})
+	conflictFileParentDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(conflictFileParentDir, "parent"), []byte("blocking file"), 0600))
+	err = extractTarGz(bytes.NewReader(nestedTar), conflictFileParentDir)
+	assert.Error(t, err)
+
+	// Truncated file in tar (tar header says 500 bytes, but stream ends prematurely)
+	var truncBuf bytes.Buffer
+	gwTrunc := gzip.NewWriter(&truncBuf)
+	twTrunc := tar.NewWriter(gwTrunc)
+	_ = twTrunc.WriteHeader(&tar.Header{
+		Name:     "trunc.tf",
+		Mode:     0600,
+		Size:     500,
+		Typeflag: tar.TypeReg,
+	})
+	_, _ = twTrunc.Write([]byte("only 10 bytes"))
+	_ = gwTrunc.Close()
+	err = extractTarGz(&truncBuf, t.TempDir())
+	assert.Error(t, err)
+}
+
+func TestRegistryClient_RequestCreationErrors(t *testing.T) {
+	client := NewClient(nil)
+	client.BaseURL = "http://bad-url\x7f"
+	ctx := context.Background()
+
+	_, err := client.ListVersions(ctx, "hashicorp/consul/aws")
+	assert.Error(t, err)
+
+	err = client.DownloadModule(ctx, "hashicorp/consul/aws", "1.0.0", t.TempDir())
+	assert.Error(t, err)
+
+	// Invalid X-Terraform-Get URL
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Terraform-Get", "::invalid-url")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	badClient := NewClient(server.Client())
+	badClient.BaseURL = server.URL
+	err = badClient.DownloadModule(ctx, "hashicorp/consul/aws", "1.0.0", t.TempDir())
+	assert.Error(t, err)
+}
+

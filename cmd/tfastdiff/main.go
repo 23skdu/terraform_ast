@@ -20,8 +20,11 @@ import (
 )
 
 var (
-	osExit    = os.Exit
-	mkdirTemp = os.MkdirTemp
+	osExit            = os.Exit
+	mkdirTemp         = os.MkdirTemp
+	newRegistryClient = func() *registry.Client {
+		return registry.NewClient(nil)
+	}
 )
 
 func main() {
@@ -118,7 +121,7 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 			return 1
 		}
 		cleanupDirs = append(cleanupDirs, tmpTarget)
-		client := registry.NewClient(nil)
+		client := newRegistryClient()
 		ver := newVersion
 		if ver == "" {
 			ver, err = client.GetLatestVersion(context.Background(), upstreamPath)
@@ -159,7 +162,7 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 			tmpPinned, err := mkdirTemp("", "tf_registry_pinned_*")
 			if err == nil {
 				cleanupDirs = append(cleanupDirs, tmpPinned)
-				client := registry.NewClient(nil)
+				client := newRegistryClient()
 				if err := client.DownloadModule(context.Background(), upstreamPath, oldVersion, tmpPinned); err == nil {
 					pinnedDir = tmpPinned
 				}
@@ -253,7 +256,7 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 			return 1
 		}
 		cleanupDirs = append(cleanupDirs, tmpOld)
-		client := registry.NewClient(nil)
+		client := newRegistryClient()
 		ver := oldVersion
 		if ver == "" {
 			ver, _ = client.GetLatestVersion(context.Background(), oldPath)
@@ -285,7 +288,7 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 			return 1
 		}
 		cleanupDirs = append(cleanupDirs, tmpNew)
-		client := registry.NewClient(nil)
+		client := newRegistryClient()
 		ver := newVersion
 		if ver == "" {
 			ver, _ = client.GetLatestVersion(context.Background(), newPath)

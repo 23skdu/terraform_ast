@@ -39,6 +39,8 @@ func TestCheckTypeCompatibility(t *testing.T) {
 		{"object inner attribute type changed breaking", "object({a=string})", "object({a=number})", false, true},
 		{"nested list object compatible", "list(object({name=string}))", "list(object({name=string,tags=optional(map(string))}))", true, false},
 		{"malformed object schema", "object(invalid", "object(invalid", true, false},
+		{"unknown container object", "tuple([object({a=string})])", "list(object({a=string}))", false, true},
+		{"unparseable object old", "object({invalid)", "object({a=string})", false, true},
 	}
 
 	for _, tt := range tests {

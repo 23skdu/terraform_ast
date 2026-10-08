@@ -6,8 +6,13 @@
     {
       "dir": "<WORKSPACE>/test/fixtures/downstream_consumer",
       "module_name": "primary_cluster",
-      "missing_required_inputs": null,
-      "removed_inputs_passed": null,
+      "missing_required_inputs": [
+        "cluster_autoscaling_profile",
+        "grant_registry_access"
+      ],
+      "removed_inputs_passed": [
+        "ip_range_services"
+      ],
       "removed_outputs_referenced": [
         "legacy_network_tag"
       ],

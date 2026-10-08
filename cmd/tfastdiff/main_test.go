@@ -1,12 +1,19 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/23skdu/terraform_ast/pkg/registry"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/stretchr/testify/assert"
@@ -490,4 +497,293 @@ module "my_wrapper" {
 	assert.Equal(t, 1, code)
 	assert.Contains(t, stderr.String(), "Error scanning blast radius")
 }
+
+func setupMockRegistryServer(t *testing.T) (*httptest.Server, func()) {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	content := []byte(`variable "cluster_name" { type = string }`)
+	_ = tw.WriteHeader(&tar.Header{
+		Name:     "main.tf",
+		Mode:     0600,
+		Size:     int64(len(content)),
+		Typeflag: tar.TypeReg,
+	})
+	_, _ = tw.Write(content)
+	_ = tw.Close()
+	_ = gw.Close()
+	tarData := buf.Bytes()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/versions") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"modules": [{"versions": [{"version": "1.0.0"}, {"version": "0.9.0"}]}]
+			}`))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/download") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(tarData)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+
+	origClient := newRegistryClient
+	newRegistryClient = func() *registry.Client {
+		c := registry.NewClient(server.Client())
+		c.BaseURL = server.URL
+		return c
+	}
+
+	cleanup := func() {
+		server.Close()
+		newRegistryClient = origClient
+	}
+	return server, cleanup
+}
+
+func TestExecute_RegistrySources_WrapperMode(t *testing.T) {
+	_, cleanup := setupMockRegistryServer(t)
+	defer cleanup()
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "upstream" {
+  source = "hashicorp/consul/aws"
+  cluster_name = "test"
+}
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+
+	// 1. With explicit new and old version
+	code := Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", "hashicorp/consul/aws",
+		"--old-version", "0.9.0",
+		"--new-version", "1.0.0",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "TERRAFORM WRAPPER COMPATIBILITY & PIN AUDIT")
+
+	// 2. With omitted version (latest version deduced) and deduced upstream source
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir,
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+}
+
+func TestExecute_RegistrySources_CompareMode(t *testing.T) {
+	_, cleanup := setupMockRegistryServer(t)
+	defer cleanup()
+
+	var stdout, stderr bytes.Buffer
+
+	// 1. Explicit versions
+	code := Execute([]string{
+		"--old", "hashicorp/consul/aws",
+		"--new", "hashicorp/consul/aws",
+		"--old-version", "0.9.0",
+		"--new-version", "1.0.0",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "TERRAFORM AST COMPATIBILITY DIFF REPORT")
+
+	// 2. Omitted versions
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", "hashicorp/consul/aws",
+		"--new", "hashicorp/consul/aws",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+}
+
+func TestExecute_RegistryDownloadErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	origClient := newRegistryClient
+	newRegistryClient = func() *registry.Client {
+		c := registry.NewClient(server.Client())
+		c.BaseURL = server.URL
+		return c
+	}
+	defer func() { newRegistryClient = origClient }()
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "m" { source = "hashicorp/consul/aws" }
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+
+	// Get latest version fails in wrapper mode
+	code := Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", "hashicorp/consul/aws",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error checking out target upstream version")
+
+	// Download fails with explicit version in wrapper mode
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", "hashicorp/consul/aws",
+		"--new-version", "1.0.0",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+
+	// Compare mode old download fails
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", "hashicorp/consul/aws",
+		"--new", "hashicorp/consul/aws",
+		"--old-version", "1.0.0",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+}
+
+func TestExecute_BlastRadius_Exit1(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`
+variable "new_required" {
+  type = string
+}
+`), 0600))
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "gke" {
+  source = "` + upstreamDir + `"
+}
+`), 0600))
+
+	environmentsDir := t.TempDir()
+	envDev := filepath.Join(environmentsDir, "dev")
+	require.NoError(t, os.MkdirAll(envDev, 0750))
+	require.NoError(t, os.WriteFile(filepath.Join(envDev, "main.tf"), []byte(`
+module "my_wrapper" {
+  source = "` + wrapperDir + `"
+}
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", upstreamDir,
+		"--blast-radius", environmentsDir,
+		"--exit-code",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+}
+
+func TestExecute_CompareMode_HazardsMarkdown(t *testing.T) {
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(oldDir, "main.tf"), []byte(`
+variable "ip_range_services" {
+  type    = string
+  default = "10.0.0.0/20"
+}
+`), 0600))
+
+	require.NoError(t, os.WriteFile(filepath.Join(newDir, "main.tf"), []byte(`
+variable "ip_range_services" {
+  type = list(string)
+}
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--old", oldDir,
+		"--new", newDir,
+		"--format", "markdown",
+		"--check-recreation=true",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "State Destruction & Recreation Hazards")
+}
+
+func TestExecute_RegistryMkdirTempFailures(t *testing.T) {
+	origMkdir := mkdirTemp
+	defer func() { mkdirTemp = origMkdir }()
+
+	mkdirTemp = func(dir, pattern string) (string, error) {
+		return "", errors.New("mkdir failure")
+	}
+
+	var stdout, stderr bytes.Buffer
+	// Wrapper mode
+	code := Execute([]string{
+		"--wrapper", t.TempDir(),
+		"--upstream", "hashicorp/consul/aws",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error creating temp dir")
+
+	// Compare mode old
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", "hashicorp/consul/aws",
+		"--new", t.TempDir(),
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+
+	// Compare mode new
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", t.TempDir(),
+		"--new", "hashicorp/consul/aws",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+}
+
+func TestExecute_CompareMode_NewDownloadFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "versions") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"modules": [{"versions": [{"version": "1.0.0"}]}]}`))
+			return
+		}
+		http.Error(w, "download failed", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	origClient := newRegistryClient
+	newRegistryClient = func() *registry.Client {
+		c := registry.NewClient(server.Client())
+		c.BaseURL = server.URL
+		return c
+	}
+	defer func() { newRegistryClient = origClient }()
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--old", t.TempDir(),
+		"--new", "hashicorp/consul/aws",
+		"--new-version", "1.0.0",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error checking out new version")
+}
+
+func TestDefaultRegistryClient(t *testing.T) {
+	c := newRegistryClient()
+	assert.NotNil(t, c)
+}
+
+
 
