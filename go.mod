@@ -1,8 +1,9 @@
 module github.com/23skdu/terraform_ast
 
-go 1.27.0
+go 1.27.2
 
 require (
+	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/gruntwork-io/terratest v1.0.1
 	github.com/hashicorp/hcl/v2 v2.25.0
