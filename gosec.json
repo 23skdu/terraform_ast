@@ -1,0 +1,581 @@
+{
+	"Golang errors": {
+		"/home/rsd/REPOS/terraform_ast/cmd/tfastdiff/main.go": [
+			{
+				"line": 4,
+				"column": 2,
+				"error": "could not import context (reading /home/rsd/.cache/go-build/41/41d67d96fdf88c15f43105afc462adb50a63abff76967ef9379637d341edea8b-d: internal error in importing \"context\" (cannot decode \"context\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 5,
+				"column": 2,
+				"error": "could not import flag (reading /home/rsd/.cache/go-build/a2/a23c4176bbbd84d786986ed304710eb4ce19d64c09e1dfa4f60c0e06aa686321-d: internal error in importing \"flag\" (cannot decode \"flag\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 6,
+				"column": 2,
+				"error": "could not import fmt (reading /home/rsd/.cache/go-build/5e/5e6fbb12e5dd3335f5b04e691a3c047a6433691b6eea2fbddbdefb6370743cb3-d: internal error in importing \"fmt\" (cannot decode \"fmt\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 7,
+				"column": 2,
+				"error": "could not import io (reading /home/rsd/.cache/go-build/0b/0b9595e2a41539ad650e5acd2462c6f01393341905c263e1d4c18983d0cb27b5-d: internal error in importing \"io\" (cannot decode \"io\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 8,
+				"column": 2,
+				"error": "could not import os (reading /home/rsd/.cache/go-build/ee/eeef14e09e2fc7bdc6614b5390cc8319fe70d2de988805d90d053a3fd7ca0956-d: internal error in importing \"os\" (cannot decode \"os\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 9,
+				"column": 2,
+				"error": "could not import path/filepath (reading /home/rsd/.cache/go-build/df/df2414643f1f059c3da2ed797c1504da0a7c56aacebc0c8723fb585d8891a0ac-d: internal error in importing \"path/filepath\" (cannot decode \"path/filepath\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 10,
+				"column": 2,
+				"error": "could not import strings (reading /home/rsd/.cache/go-build/a9/a94925eb285abb679a38956adab26fbe10091976d68ff1ef0b8406579050aa51-d: internal error in importing \"strings\" (cannot decode \"strings\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 12,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/ast (reading /home/rsd/.cache/go-build/42/422298635fba9a14d709bd28dafac6a0a192dbcc6590ff3c36bd716919be0a0c-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/ast\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/ast\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 13,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/blastradius (reading /home/rsd/.cache/go-build/cd/cd114777c87b79e6a00d2148c8c0d9491a114c193687c39c275aa9df637e964c-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/blastradius\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/blastradius\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 14,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/diff (reading /home/rsd/.cache/go-build/74/746af1ae8c2499f8e3fee75a7c7d0251df322e458a4f91bfe2144b5616387b5e-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/diff\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/diff\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 15,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/gitops (reading /home/rsd/.cache/go-build/98/9814a2a7b24857160a07de5f5b3bc90060c917c9d2eb1f77b11f9803886af6d5-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/gitops\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/gitops\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 16,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/recreation (reading /home/rsd/.cache/go-build/1a/1a6fcf2fe702d070c62ef361c4c88ee8d72accc4953cc7bdd5ede5e809c73f5d-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/recreation\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/recreation\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 17,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/registry (reading /home/rsd/.cache/go-build/bb/bb9c0c4906067c4c23c0a5c4c36b3cfa12d9a8bd77e4f7b577d0398c20cc3459-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/registry\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/registry\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 18,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/report (reading /home/rsd/.cache/go-build/90/90fc2215d518f945667587343d196ec883311839035a39a4ab9eb6c75bfc576e-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/report\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/report\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 19,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/wrapper (reading /home/rsd/.cache/go-build/a9/a9f7d4b81c3ff0c11515ce2ad9a2d582cc9ff191b5ab8c34ec4c23cafa58c6c5-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/wrapper\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/wrapper\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			}
+		],
+		"/home/rsd/REPOS/terraform_ast/pkg/ast/inspect.go": [
+			{
+				"line": 4,
+				"column": 2,
+				"error": "could not import fmt (reading /home/rsd/.cache/go-build/5e/5e6fbb12e5dd3335f5b04e691a3c047a6433691b6eea2fbddbdefb6370743cb3-d: internal error in importing \"fmt\" (cannot decode \"fmt\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 5,
+				"column": 2,
+				"error": "could not import os (reading /home/rsd/.cache/go-build/ee/eeef14e09e2fc7bdc6614b5390cc8319fe70d2de988805d90d053a3fd7ca0956-d: internal error in importing \"os\" (cannot decode \"os\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 6,
+				"column": 2,
+				"error": "could not import path/filepath (reading /home/rsd/.cache/go-build/df/df2414643f1f059c3da2ed797c1504da0a7c56aacebc0c8723fb585d8891a0ac-d: internal error in importing \"path/filepath\" (cannot decode \"path/filepath\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 7,
+				"column": 2,
+				"error": "could not import regexp (reading /home/rsd/.cache/go-build/2f/2f970c344de794bdac6f28d715114cdffcaa0d5a3eb3dab9caaf96eac784c778-d: internal error in importing \"regexp\" (cannot decode \"regexp\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 8,
+				"column": 2,
+				"error": "could not import sort (reading /home/rsd/.cache/go-build/d1/d1a5e83a615f684b8238c1db67e1b4b0da3135519bfd4a8cc29efe0f472311cd-d: internal error in importing \"sort\" (cannot decode \"sort\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 9,
+				"column": 2,
+				"error": "could not import strings (reading /home/rsd/.cache/go-build/a9/a94925eb285abb679a38956adab26fbe10091976d68ff1ef0b8406579050aa51-d: internal error in importing \"strings\" (cannot decode \"strings\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 11,
+				"column": 2,
+				"error": "could not import github.com/hashicorp/hcl/v2 (reading /home/rsd/.cache/go-build/97/979f0b90edc4f4b108d3c0272bb722967cb739c0481671ec13a6fd69d3b6525e-d: internal error in importing \"github.com/hashicorp/hcl/v2\" (cannot decode \"github.com/hashicorp/hcl/v2\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 12,
+				"column": 2,
+				"error": "could not import github.com/hashicorp/hcl/v2/hclsyntax (reading /home/rsd/.cache/go-build/97/97352fef51ece143a749a9a6a65e1b463ddff668450c210e18cf8bcd91acf64b-d: internal error in importing \"github.com/hashicorp/hcl/v2/hclsyntax\" (cannot decode \"github.com/hashicorp/hcl/v2/hclsyntax\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 13,
+				"column": 2,
+				"error": "could not import github.com/hashicorp/terraform-config-inspect/tfconfig (reading /home/rsd/.cache/go-build/51/517b0f4f6b728b1883ae272e42bb80b65199bc55e2ae5f36707fa57f96dbc087-d: internal error in importing \"github.com/hashicorp/terraform-config-inspect/tfconfig\" (cannot decode \"github.com/hashicorp/terraform-config-inspect/tfconfig\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 127,
+				"column": 55,
+				"error": "undefined: hcl"
+			}
+		],
+		"/home/rsd/REPOS/terraform_ast/pkg/blastradius/scanner.go": [
+			{
+				"line": 4,
+				"column": 2,
+				"error": "could not import encoding/json (reading /home/rsd/.cache/go-build/00/00d85f21c53e3a8dddf97c4ff17eb5947ff9b0736ba5260358346502b709be63-d: internal error in importing \"encoding/json\" (cannot decode \"encoding/json\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 5,
+				"column": 2,
+				"error": "could not import fmt (reading /home/rsd/.cache/go-build/5e/5e6fbb12e5dd3335f5b04e691a3c047a6433691b6eea2fbddbdefb6370743cb3-d: internal error in importing \"fmt\" (cannot decode \"fmt\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 6,
+				"column": 2,
+				"error": "could not import os (reading /home/rsd/.cache/go-build/ee/eeef14e09e2fc7bdc6614b5390cc8319fe70d2de988805d90d053a3fd7ca0956-d: internal error in importing \"os\" (cannot decode \"os\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 7,
+				"column": 2,
+				"error": "could not import path/filepath (reading /home/rsd/.cache/go-build/df/df2414643f1f059c3da2ed797c1504da0a7c56aacebc0c8723fb585d8891a0ac-d: internal error in importing \"path/filepath\" (cannot decode \"path/filepath\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 8,
+				"column": 2,
+				"error": "could not import regexp (reading /home/rsd/.cache/go-build/2f/2f970c344de794bdac6f28d715114cdffcaa0d5a3eb3dab9caaf96eac784c778-d: internal error in importing \"regexp\" (cannot decode \"regexp\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 9,
+				"column": 2,
+				"error": "could not import sort (reading /home/rsd/.cache/go-build/d1/d1a5e83a615f684b8238c1db67e1b4b0da3135519bfd4a8cc29efe0f472311cd-d: internal error in importing \"sort\" (cannot decode \"sort\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 10,
+				"column": 2,
+				"error": "could not import strings (reading /home/rsd/.cache/go-build/a9/a94925eb285abb679a38956adab26fbe10091976d68ff1ef0b8406579050aa51-d: internal error in importing \"strings\" (cannot decode \"strings\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 12,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/ast (reading /home/rsd/.cache/go-build/42/422298635fba9a14d709bd28dafac6a0a192dbcc6590ff3c36bd716919be0a0c-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/ast\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/ast\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 13,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/diff (reading /home/rsd/.cache/go-build/74/746af1ae8c2499f8e3fee75a7c7d0251df322e458a4f91bfe2144b5616387b5e-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/diff\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/diff\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 14,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/recreation (reading /home/rsd/.cache/go-build/1a/1a6fcf2fe702d070c62ef361c4c88ee8d72accc4953cc7bdd5ede5e809c73f5d-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/recreation\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/recreation\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 15,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/wrapper (reading /home/rsd/.cache/go-build/a9/a9f7d4b81c3ff0c11515ce2ad9a2d582cc9ff191b5ab8c34ec4c23cafa58c6c5-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/wrapper\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/wrapper\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 16,
+				"column": 2,
+				"error": "could not import github.com/hashicorp/hcl/v2 (reading /home/rsd/.cache/go-build/97/979f0b90edc4f4b108d3c0272bb722967cb739c0481671ec13a6fd69d3b6525e-d: internal error in importing \"github.com/hashicorp/hcl/v2\" (cannot decode \"github.com/hashicorp/hcl/v2\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 17,
+				"column": 2,
+				"error": "could not import github.com/hashicorp/hcl/v2/hclsyntax (reading /home/rsd/.cache/go-build/97/97352fef51ece143a749a9a6a65e1b463ddff668450c210e18cf8bcd91acf64b-d: internal error in importing \"github.com/hashicorp/hcl/v2/hclsyntax\" (cannot decode \"github.com/hashicorp/hcl/v2/hclsyntax\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 131,
+				"column": 51,
+				"error": "undefined: hcl"
+			}
+		],
+		"/home/rsd/REPOS/terraform_ast/pkg/changelog/aggregator.go": [
+			{
+				"line": 4,
+				"column": 2,
+				"error": "could not import context (reading /home/rsd/.cache/go-build/41/41d67d96fdf88c15f43105afc462adb50a63abff76967ef9379637d341edea8b-d: internal error in importing \"context\" (cannot decode \"context\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			}
+		],
+		"/home/rsd/REPOS/terraform_ast/pkg/diff/diff.go": [
+			{
+				"line": 4,
+				"column": 2,
+				"error": "could not import fmt (reading /home/rsd/.cache/go-build/5e/5e6fbb12e5dd3335f5b04e691a3c047a6433691b6eea2fbddbdefb6370743cb3-d: internal error in importing \"fmt\" (cannot decode \"fmt\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 5,
+				"column": 2,
+				"error": "could not import sort (reading /home/rsd/.cache/go-build/d1/d1a5e83a615f684b8238c1db67e1b4b0da3135519bfd4a8cc29efe0f472311cd-d: internal error in importing \"sort\" (cannot decode \"sort\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 6,
+				"column": 2,
+				"error": "could not import strings (reading /home/rsd/.cache/go-build/a9/a94925eb285abb679a38956adab26fbe10091976d68ff1ef0b8406579050aa51-d: internal error in importing \"strings\" (cannot decode \"strings\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 8,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/ast (reading /home/rsd/.cache/go-build/42/422298635fba9a14d709bd28dafac6a0a192dbcc6590ff3c36bd716919be0a0c-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/ast\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/ast\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 9,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/semverutil (reading /home/rsd/.cache/go-build/5d/5dad2f4d7d5f0e7b7781c2dde735febe4d6d9e5e28161cd1ad5e0f58d72bf450-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/semverutil\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/semverutil\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			}
+		],
+		"/home/rsd/REPOS/terraform_ast/pkg/gitops/git.go": [
+			{
+				"line": 4,
+				"column": 2,
+				"error": "could not import fmt (reading /home/rsd/.cache/go-build/5e/5e6fbb12e5dd3335f5b04e691a3c047a6433691b6eea2fbddbdefb6370743cb3-d: internal error in importing \"fmt\" (cannot decode \"fmt\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 5,
+				"column": 2,
+				"error": "could not import os (reading /home/rsd/.cache/go-build/ee/eeef14e09e2fc7bdc6614b5390cc8319fe70d2de988805d90d053a3fd7ca0956-d: internal error in importing \"os\" (cannot decode \"os\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 6,
+				"column": 2,
+				"error": "could not import path/filepath (reading /home/rsd/.cache/go-build/df/df2414643f1f059c3da2ed797c1504da0a7c56aacebc0c8723fb585d8891a0ac-d: internal error in importing \"path/filepath\" (cannot decode \"path/filepath\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 7,
+				"column": 2,
+				"error": "could not import strings (reading /home/rsd/.cache/go-build/a9/a94925eb285abb679a38956adab26fbe10091976d68ff1ef0b8406579050aa51-d: internal error in importing \"strings\" (cannot decode \"strings\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 8,
+				"column": 2,
+				"error": "could not import sync (reading /home/rsd/.cache/go-build/2e/2e2202e0525ee27ee2f819d71337347fa3699d52e6783900b4802a1a8e300a21-d: internal error in importing \"sync\" (cannot decode \"sync\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 10,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/semverutil (reading /home/rsd/.cache/go-build/5d/5dad2f4d7d5f0e7b7781c2dde735febe4d6d9e5e28161cd1ad5e0f58d72bf450-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/semverutil\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/semverutil\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 11,
+				"column": 2,
+				"error": "could not import github.com/go-git/go-git/v5 (reading /home/rsd/.cache/go-build/b9/b980eb427a434236633887e42483023a7dcfec2205918c261a33f31eadec4001-d: internal error in importing \"github.com/go-git/go-git/v5\" (cannot decode \"github.com/go-git/go-git/v5\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 12,
+				"column": 2,
+				"error": "could not import github.com/go-git/go-git/v5/plumbing (reading /home/rsd/.cache/go-build/c9/c969bde2c4a44e1b48fa50f6373888416db9666f12c8ca113c5d40a6b5bc9460-d: internal error in importing \"github.com/go-git/go-git/v5/plumbing\" (cannot decode \"github.com/go-git/go-git/v5/plumbing\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 25,
+				"column": 53,
+				"error": "undefined: git"
+			},
+			{
+				"line": 30,
+				"column": 81,
+				"error": "undefined: git"
+			},
+			{
+				"line": 33,
+				"column": 17,
+				"error": "undefined: git"
+			},
+			{
+				"line": 43,
+				"column": 19,
+				"error": "undefined: git"
+			},
+			{
+				"line": 48,
+				"column": 16,
+				"error": "undefined: git"
+			},
+			{
+				"line": 68,
+				"column": 15,
+				"error": "undefined: git"
+			},
+			{
+				"line": 71,
+				"column": 15,
+				"error": "undefined: git"
+			},
+			{
+				"line": 71,
+				"column": 49,
+				"error": "undefined: git"
+			},
+			{
+				"line": 83,
+				"column": 27,
+				"error": "undefined: git"
+			},
+			{
+				"line": 103,
+				"column": 24,
+				"error": "undefined: git"
+			},
+			{
+				"line": 120,
+				"column": 22,
+				"error": "undefined: git"
+			},
+			{
+				"line": 128,
+				"column": 22,
+				"error": "undefined: git"
+			},
+			{
+				"line": 135,
+				"column": 21,
+				"error": "undefined: git"
+			},
+			{
+				"line": 141,
+				"column": 30,
+				"error": "undefined: git"
+			},
+			{
+				"line": 153,
+				"column": 28,
+				"error": "undefined: git"
+			}
+		],
+		"/home/rsd/REPOS/terraform_ast/pkg/planner/planner.go": [
+			{
+				"line": 4,
+				"column": 2,
+				"error": "could not import context (reading /home/rsd/.cache/go-build/41/41d67d96fdf88c15f43105afc462adb50a63abff76967ef9379637d341edea8b-d: internal error in importing \"context\" (cannot decode \"context\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 5,
+				"column": 2,
+				"error": "could not import fmt (reading /home/rsd/.cache/go-build/5e/5e6fbb12e5dd3335f5b04e691a3c047a6433691b6eea2fbddbdefb6370743cb3-d: internal error in importing \"fmt\" (cannot decode \"fmt\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 6,
+				"column": 2,
+				"error": "could not import github.com/Masterminds/semver/v3 (reading /home/rsd/.cache/go-build/30/30137950ce7240346ddbeb3f755d51f988c25d1dbc3fb367f1bb3f8dc42ba0ed-d: internal error in importing \"github.com/Masterminds/semver/v3\" (cannot decode \"github.com/Masterminds/semver/v3\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 20,
+				"column": 15,
+				"error": "undefined: semver"
+			},
+			{
+				"line": 25,
+				"column": 13,
+				"error": "undefined: semver"
+			}
+		],
+		"/home/rsd/REPOS/terraform_ast/pkg/recreation/heuristics.go": [
+			{
+				"line": 4,
+				"column": 2,
+				"error": "could not import fmt (reading /home/rsd/.cache/go-build/5e/5e6fbb12e5dd3335f5b04e691a3c047a6433691b6eea2fbddbdefb6370743cb3-d: internal error in importing \"fmt\" (cannot decode \"fmt\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 5,
+				"column": 2,
+				"error": "could not import strings (reading /home/rsd/.cache/go-build/a9/a94925eb285abb679a38956adab26fbe10091976d68ff1ef0b8406579050aa51-d: internal error in importing \"strings\" (cannot decode \"strings\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 7,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/diff (reading /home/rsd/.cache/go-build/74/746af1ae8c2499f8e3fee75a7c7d0251df322e458a4f91bfe2144b5616387b5e-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/diff\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/diff\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 8,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/wrapper (reading /home/rsd/.cache/go-build/a9/a9f7d4b81c3ff0c11515ce2ad9a2d582cc9ff191b5ab8c34ec4c23cafa58c6c5-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/wrapper\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/wrapper\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			}
+		],
+		"/home/rsd/REPOS/terraform_ast/pkg/registry/client.go": [
+			{
+				"line": 4,
+				"column": 2,
+				"error": "could not import archive/tar (reading /home/rsd/.cache/go-build/13/13109a34ea5c8f8e98a8baec2cf34af54c6e6cd6d6211a2fb26bda4b2b08f098-d: internal error in importing \"archive/tar\" (cannot decode \"archive/tar\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 5,
+				"column": 2,
+				"error": "could not import compress/gzip (reading /home/rsd/.cache/go-build/00/001e26be56f6e86cec788d3f9471bfe797e20bb664d854e2132e8ea190299490-d: internal error in importing \"compress/gzip\" (cannot decode \"compress/gzip\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 6,
+				"column": 2,
+				"error": "could not import context (reading /home/rsd/.cache/go-build/41/41d67d96fdf88c15f43105afc462adb50a63abff76967ef9379637d341edea8b-d: internal error in importing \"context\" (cannot decode \"context\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 7,
+				"column": 2,
+				"error": "could not import encoding/json (reading /home/rsd/.cache/go-build/00/00d85f21c53e3a8dddf97c4ff17eb5947ff9b0736ba5260358346502b709be63-d: internal error in importing \"encoding/json\" (cannot decode \"encoding/json\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 8,
+				"column": 2,
+				"error": "could not import fmt (reading /home/rsd/.cache/go-build/5e/5e6fbb12e5dd3335f5b04e691a3c047a6433691b6eea2fbddbdefb6370743cb3-d: internal error in importing \"fmt\" (cannot decode \"fmt\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 9,
+				"column": 2,
+				"error": "could not import io (reading /home/rsd/.cache/go-build/0b/0b9595e2a41539ad650e5acd2462c6f01393341905c263e1d4c18983d0cb27b5-d: internal error in importing \"io\" (cannot decode \"io\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 10,
+				"column": 2,
+				"error": "could not import net/http (reading /home/rsd/.cache/go-build/94/94401b85726799c0f4f3e619d0063fcd3e18b91845f42b33054732004f68c1e1-d: internal error in importing \"net/http\" (cannot decode \"net/http\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 11,
+				"column": 2,
+				"error": "could not import os (reading /home/rsd/.cache/go-build/ee/eeef14e09e2fc7bdc6614b5390cc8319fe70d2de988805d90d053a3fd7ca0956-d: internal error in importing \"os\" (cannot decode \"os\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 12,
+				"column": 2,
+				"error": "could not import path/filepath (reading /home/rsd/.cache/go-build/df/df2414643f1f059c3da2ed797c1504da0a7c56aacebc0c8723fb585d8891a0ac-d: internal error in importing \"path/filepath\" (cannot decode \"path/filepath\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 13,
+				"column": 2,
+				"error": "could not import strings (reading /home/rsd/.cache/go-build/a9/a94925eb285abb679a38956adab26fbe10091976d68ff1ef0b8406579050aa51-d: internal error in importing \"strings\" (cannot decode \"strings\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 14,
+				"column": 2,
+				"error": "could not import time (reading /home/rsd/.cache/go-build/9b/9b2f288b43782f7fdd1f5c73ec75433b7b89c28769b3e966f7caf80652ffe69a-d: internal error in importing \"time\" (cannot decode \"time\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 16,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/semverutil (reading /home/rsd/.cache/go-build/5d/5dad2f4d7d5f0e7b7781c2dde735febe4d6d9e5e28161cd1ad5e0f58d72bf450-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/semverutil\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/semverutil\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			}
+		],
+		"/home/rsd/REPOS/terraform_ast/pkg/report/report.go": [
+			{
+				"line": 4,
+				"column": 2,
+				"error": "could not import encoding/json (reading /home/rsd/.cache/go-build/00/00d85f21c53e3a8dddf97c4ff17eb5947ff9b0736ba5260358346502b709be63-d: internal error in importing \"encoding/json\" (cannot decode \"encoding/json\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 5,
+				"column": 2,
+				"error": "could not import fmt (reading /home/rsd/.cache/go-build/5e/5e6fbb12e5dd3335f5b04e691a3c047a6433691b6eea2fbddbdefb6370743cb3-d: internal error in importing \"fmt\" (cannot decode \"fmt\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 6,
+				"column": 2,
+				"error": "could not import os (reading /home/rsd/.cache/go-build/ee/eeef14e09e2fc7bdc6614b5390cc8319fe70d2de988805d90d053a3fd7ca0956-d: internal error in importing \"os\" (cannot decode \"os\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 7,
+				"column": 2,
+				"error": "could not import path/filepath (reading /home/rsd/.cache/go-build/df/df2414643f1f059c3da2ed797c1504da0a7c56aacebc0c8723fb585d8891a0ac-d: internal error in importing \"path/filepath\" (cannot decode \"path/filepath\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 8,
+				"column": 2,
+				"error": "could not import strings (reading /home/rsd/.cache/go-build/a9/a94925eb285abb679a38956adab26fbe10091976d68ff1ef0b8406579050aa51-d: internal error in importing \"strings\" (cannot decode \"strings\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 9,
+				"column": 2,
+				"error": "could not import testing (reading /home/rsd/.cache/go-build/bb/bbb22cdcdbf5754167dd318c58ca8a9736d05cb21ed290019184f13742aeaf0f-d: internal error in importing \"testing\" (cannot decode \"testing\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 11,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/diff (reading /home/rsd/.cache/go-build/74/746af1ae8c2499f8e3fee75a7c7d0251df322e458a4f91bfe2144b5616387b5e-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/diff\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/diff\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 12,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/wrapper (reading /home/rsd/.cache/go-build/a9/a9f7d4b81c3ff0c11515ce2ad9a2d582cc9ff191b5ab8c34ec4c23cafa58c6c5-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/wrapper\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/wrapper\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 13,
+				"column": 2,
+				"error": "could not import github.com/stretchr/testify/assert (reading /home/rsd/.cache/go-build/9e/9ebc0f2b6e382802df71f02ed1131856c9d9196d237e4f92e37bf3b9d9731d4e-d: internal error in importing \"github.com/stretchr/testify/assert\" (cannot decode \"github.com/stretchr/testify/assert\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 14,
+				"column": 2,
+				"error": "could not import github.com/stretchr/testify/require (reading /home/rsd/.cache/go-build/27/27a05c606d6a647b69bde53adf92b3d20ab4c9658ab0d7903c5437f44aba5c05-d: internal error in importing \"github.com/stretchr/testify/require\" (cannot decode \"github.com/stretchr/testify/require\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			}
+		],
+		"/home/rsd/REPOS/terraform_ast/pkg/semverutil/semver.go": [
+			{
+				"line": 4,
+				"column": 2,
+				"error": "could not import fmt (reading /home/rsd/.cache/go-build/5e/5e6fbb12e5dd3335f5b04e691a3c047a6433691b6eea2fbddbdefb6370743cb3-d: internal error in importing \"fmt\" (cannot decode \"fmt\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 5,
+				"column": 2,
+				"error": "could not import sort (reading /home/rsd/.cache/go-build/d1/d1a5e83a615f684b8238c1db67e1b4b0da3135519bfd4a8cc29efe0f472311cd-d: internal error in importing \"sort\" (cannot decode \"sort\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 6,
+				"column": 2,
+				"error": "could not import strings (reading /home/rsd/.cache/go-build/a9/a94925eb285abb679a38956adab26fbe10091976d68ff1ef0b8406579050aa51-d: internal error in importing \"strings\" (cannot decode \"strings\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 8,
+				"column": 2,
+				"error": "could not import golang.org/x/mod/semver (reading /home/rsd/.cache/go-build/dc/dcd6c4249282825112625a25c112890d030cef9935ca24f6e3416699051e239b-d: internal error in importing \"golang.org/x/mod/semver\" (cannot decode \"golang.org/x/mod/semver\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			}
+		],
+		"/home/rsd/REPOS/terraform_ast/pkg/wrapper/analyzer.go": [
+			{
+				"line": 4,
+				"column": 2,
+				"error": "could not import fmt (reading /home/rsd/.cache/go-build/5e/5e6fbb12e5dd3335f5b04e691a3c047a6433691b6eea2fbddbdefb6370743cb3-d: internal error in importing \"fmt\" (cannot decode \"fmt\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 5,
+				"column": 2,
+				"error": "could not import sort (reading /home/rsd/.cache/go-build/d1/d1a5e83a615f684b8238c1db67e1b4b0da3135519bfd4a8cc29efe0f472311cd-d: internal error in importing \"sort\" (cannot decode \"sort\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 6,
+				"column": 2,
+				"error": "could not import strings (reading /home/rsd/.cache/go-build/a9/a94925eb285abb679a38956adab26fbe10091976d68ff1ef0b8406579050aa51-d: internal error in importing \"strings\" (cannot decode \"strings\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 8,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/ast (reading /home/rsd/.cache/go-build/42/422298635fba9a14d709bd28dafac6a0a192dbcc6590ff3c36bd716919be0a0c-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/ast\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/ast\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 9,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/diff (reading /home/rsd/.cache/go-build/74/746af1ae8c2499f8e3fee75a7c7d0251df322e458a4f91bfe2144b5616387b5e-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/diff\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/diff\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			},
+			{
+				"line": 10,
+				"column": 2,
+				"error": "could not import github.com/23skdu/terraform_ast/pkg/semverutil (reading /home/rsd/.cache/go-build/5d/5dad2f4d7d5f0e7b7781c2dde735febe4d6d9e5e28161cd1ad5e0f58d72bf450-d: internal error in importing \"github.com/23skdu/terraform_ast/pkg/semverutil\" (cannot decode \"github.com/23skdu/terraform_ast/pkg/semverutil\", export data version 5 is greater than maximum supported version 4); please report an issue)"
+			}
+		]
+	},
+	"Issues": [],
+	"Stats": {
+		"files": 15,
+		"lines": 3328,
+		"nosec": 6,
+		"found": 0
+	},
+	"GosecVersion": "2.29.0"
+}

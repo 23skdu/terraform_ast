@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/23skdu/terraform_ast/pkg/semverutil"
+	"github.com/cenkalti/backoff/v4"
 )
 
 // ModuleVersionsResponse represents the Terraform Registry response for module versions.
@@ -76,6 +77,28 @@ func ParseRegistrySource(source string) (host, namespace, name, provider string,
 	return "", "", "", "", fmt.Errorf("invalid registry module source format: %s", source)
 }
 
+func (c *Client) doRequestWithBackoff(req *http.Request) (*http.Response, error) {
+	var resp *http.Response
+	operation := func() error {
+		var err error
+		resp, err = c.HTTPClient.Do(req)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode <= 599) {
+			resp.Body.Close()
+			return fmt.Errorf("temporary registry error: %d", resp.StatusCode)
+		}
+		return nil
+	}
+
+	b := backoff.NewExponentialBackOff()
+	b.MaxElapsedTime = 2 * time.Minute
+
+	err := backoff.Retry(operation, backoff.WithContext(b, req.Context()))
+	return resp, err
+}
+
 // ListVersions retrieves all available semantic versions for the given module from the registry.
 func (c *Client) ListVersions(ctx context.Context, source string) ([]string, error) {
 	host, namespace, name, provider, err := ParseRegistrySource(source)
@@ -89,7 +112,7 @@ func (c *Client) ListVersions(ctx context.Context, source string) ([]string, err
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.doRequestWithBackoff(req)
 	if err != nil {
 		return nil, fmt.Errorf("registry API request failed: %w", err)
 	}
@@ -152,7 +175,7 @@ func (c *Client) DownloadModule(ctx context.Context, source, version, destDir st
 		return fmt.Errorf("failed to create download request: %w", err)
 	}
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.doRequestWithBackoff(req)
 	if err != nil {
 		return fmt.Errorf("download request failed: %w", err)
 	}
@@ -177,7 +200,7 @@ func (c *Client) DownloadModule(ctx context.Context, source, version, destDir st
 		if err != nil {
 			return fmt.Errorf("failed to create archive fetch request: %w", err)
 		}
-		dlResp, err := c.HTTPClient.Do(dlReq)
+		dlResp, err := c.doRequestWithBackoff(dlReq)
 		if err != nil {
 			return fmt.Errorf("failed to fetch archive from %s: %w", downloadURL, err)
 		}

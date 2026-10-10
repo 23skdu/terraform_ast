@@ -41,11 +41,10 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 # Open Containers Initiative (OCI) image metadata labels
 LABEL org.opencontainers.image.title="terraform-ast-diff" \
-      org.opencontainers.image.description="AST-level semantic difference engine & wrapper compatibility auditor for Terraform modules" \
-      org.opencontainers.image.version="0.1.0" \
-      org.opencontainers.image.vendor="23skdu" \
-      org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.source="https://github.com/23skdu/terraform_ast"
+    org.opencontainers.image.description="AST-level semantic difference engine & wrapper compatibility auditor for Terraform modules" \
+    org.opencontainers.image.version="0.1.0" \
+    org.opencontainers.image.vendor="23skdu" \
+    org.opencontainers.image.source="https://github.com/23skdu/terraform_ast"
 
 # Working directory for module analysis
 WORKDIR /workspace

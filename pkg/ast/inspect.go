@@ -16,7 +16,13 @@ import (
 var moduleOutputRefRegex = regexp.MustCompile(`module\.([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_-]+)`)
 
 // Inspect parses and extracts the normalized AST for a Terraform module at the given directory.
-func Inspect(dir string) (*ModuleInfo, error) {
+func Inspect(dir string) (info *ModuleInfo, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic during AST parsing of module %s: %v", dir, r)
+		}
+	}()
+
 	fi, err := os.Stat(dir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to access module path %s: %w", dir, err)
@@ -30,7 +36,7 @@ func Inspect(dir string) (*ModuleInfo, error) {
 		return nil, fmt.Errorf("diagnostics error loading module %s: %s", dir, diags.Error())
 	}
 
-	info := &ModuleInfo{
+	info = &ModuleInfo{
 		Path:                    dir,
 		Variables:               make(map[string]VariableDef),
 		Outputs:                 make(map[string]OutputDef),

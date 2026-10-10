@@ -17,6 +17,7 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/registry"
 	"github.com/23skdu/terraform_ast/pkg/report"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
+	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -312,15 +313,29 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 		actualNew = tmpNew
 	}
 
-	oldInfo, err := ast.Inspect(actualOld)
-	if err != nil {
-		fmt.Fprintf(stderr, "Error inspecting old module %s: %v\n", actualOld, err)
-		return 1
-	}
+	var oldInfo, newInfo *ast.ModuleInfo
+	g, _ := errgroup.WithContext(context.Background())
 
-	newInfo, err := ast.Inspect(actualNew)
-	if err != nil {
-		fmt.Fprintf(stderr, "Error inspecting new module %s: %v\n", actualNew, err)
+	g.Go(func() error {
+		var err error
+		oldInfo, err = ast.Inspect(actualOld)
+		if err != nil {
+			return fmt.Errorf("error inspecting old module %s: %v", actualOld, err)
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		var err error
+		newInfo, err = ast.Inspect(actualNew)
+		if err != nil {
+			return fmt.Errorf("error inspecting new module %s: %v", actualNew, err)
+		}
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
 		return 1
 	}
 
