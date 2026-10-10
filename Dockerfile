@@ -45,7 +45,7 @@ LABEL org.opencontainers.image.title="terraform-ast-diff" \
     org.opencontainers.image.version="0.1.0" \
     org.opencontainers.image.vendor="23skdu" \
     org.opencontainers.image.source="https://github.com/23skdu/terraform_ast" \
-    org.opencontainers.image.licenses="Apache-2.0"
+    org.opencontainers.image.licenses="Unlicense"
 
 # Working directory for module analysis
 WORKDIR /workspace
