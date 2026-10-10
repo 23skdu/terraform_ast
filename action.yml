@@ -1,0 +1,26 @@
+name: 'Terraform AST Diff'
+description: 'Automated refactoring and blast radius analysis for Terraform modules'
+inputs:
+  target_dir:
+    description: 'The target directory to scan'
+    required: true
+    default: '.'
+  format:
+    description: 'Output format (text, json, sarif)'
+    required: false
+    default: 'sarif'
+  exit_code:
+    description: 'Exit with non-zero code on breaking changes'
+    required: false
+    default: 'true'
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  args:
+    - ${{ inputs.target_dir }}
+    - --format
+    - ${{ inputs.format }}
+    - --exit-code=${{ inputs.exit_code }}
+branding:
+  icon: 'shield'
+  color: 'blue'
