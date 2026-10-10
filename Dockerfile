@@ -1,7 +1,7 @@
 # ==============================================================================
 # Build Stage: Secure Multi-Stage Go Builder
 # ==============================================================================
-FROM golang:alpine AS builder
+FROM golang:1.27.2-alpine AS builder
 
 # Install ca-certificates and git for secure Go module retrieval
 RUN apk --no-cache add ca-certificates git
@@ -44,7 +44,8 @@ LABEL org.opencontainers.image.title="terraform-ast-diff" \
     org.opencontainers.image.description="AST-level semantic difference engine & wrapper compatibility auditor for Terraform modules" \
     org.opencontainers.image.version="0.1.0" \
     org.opencontainers.image.vendor="23skdu" \
-    org.opencontainers.image.source="https://github.com/23skdu/terraform_ast"
+    org.opencontainers.image.source="https://github.com/23skdu/terraform_ast" \
+    org.opencontainers.image.licenses="Apache-2.0"
 
 # Working directory for module analysis
 WORKDIR /workspace

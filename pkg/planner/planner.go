@@ -3,16 +3,24 @@ package planner
 import (
 	"context"
 	"fmt"
+
+	"github.com/23skdu/terraform_ast/pkg/registry"
+	"github.com/23skdu/terraform_ast/pkg/semverutil"
 	"github.com/Masterminds/semver/v3"
 )
 
 // UpgradePlanner is responsible for analyzing multi-version jumps
 type UpgradePlanner struct {
-	RegistryClient interface{} // Placeholder for registry client
+	RegistryClient *registry.Client
 }
 
-func NewUpgradePlanner() *UpgradePlanner {
-	return &UpgradePlanner{}
+func NewUpgradePlanner(rc *registry.Client) *UpgradePlanner {
+	if rc == nil {
+		rc = registry.NewClient(nil)
+	}
+	return &UpgradePlanner{
+		RegistryClient: rc,
+	}
 }
 
 // PlanUpgrade computes the intermediate "safe harbor" versions for an upgrade
@@ -31,6 +39,30 @@ func (p *UpgradePlanner) PlanUpgrade(ctx context.Context, moduleSource string, f
 		return []string{fromVersion}, nil
 	}
 
-	// TODO: Fetch intermediate versions from registry and analyze transitive diffs
-	return []string{fromVersion, toVersion}, nil
+	if !registry.IsRegistrySource(moduleSource) {
+		return []string{fromVersion, toVersion}, nil
+	}
+
+	versions, err := p.RegistryClient.ListVersions(ctx, moduleSource)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch versions from registry: %w", err)
+	}
+
+	var plan []string
+	for _, vStr := range versions {
+		v, err := semver.NewVersion(vStr)
+		if err != nil {
+			continue
+		}
+		if (v.GreaterThan(from) || v.Equal(from)) && (v.LessThan(to) || v.Equal(to)) {
+			plan = append(plan, vStr)
+		}
+	}
+
+	if len(plan) == 0 {
+		return []string{fromVersion, toVersion}, nil
+	}
+	
+	plan = semverutil.Sort(plan)
+	return plan, nil
 }

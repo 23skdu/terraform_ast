@@ -320,7 +320,7 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 		var err error
 		oldInfo, err = ast.Inspect(actualOld)
 		if err != nil {
-			return fmt.Errorf("error inspecting old module %s: %v", actualOld, err)
+			return fmt.Errorf("Error inspecting old module %s: %v", actualOld, err)
 		}
 		return nil
 	})
@@ -329,7 +329,7 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 		var err error
 		newInfo, err = ast.Inspect(actualNew)
 		if err != nil {
-			return fmt.Errorf("error inspecting new module %s: %v", actualNew, err)
+			return fmt.Errorf("Error inspecting new module %s: %v", actualNew, err)
 		}
 		return nil
 	})
