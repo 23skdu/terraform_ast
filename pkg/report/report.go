@@ -209,6 +209,24 @@ func RenderWrapperJSON(w *wrapper.WrapperCompatibilityReport) ([]byte, error) {
 	return json.MarshalIndent(w, "", "  ")
 }
 
+func getRepoRoot() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
+}
+
 // AssertGoldenMatch verifies that actual output matches the canonical golden file at goldenPath.
 // If updateGolden is true or UPDATE_GOLDEN environment variable is set to true, it writes/updates the golden file.
 func AssertGoldenMatch(t *testing.T, goldenPath string, actual []byte, updateGolden bool) {
@@ -217,10 +235,19 @@ func AssertGoldenMatch(t *testing.T, goldenPath string, actual []byte, updateGol
 		updateGolden = true
 	}
 
+	root := getRepoRoot()
+	actualStr := string(actual)
+	if root != "" {
+		// Replace both native OS path and slash-normalized path
+		actualStr = strings.ReplaceAll(actualStr, root, "<WORKSPACE>")
+		actualStr = strings.ReplaceAll(actualStr, filepath.ToSlash(root), "<WORKSPACE>")
+	}
+	actualSanitized := []byte(actualStr)
+
 	if updateGolden {
 		err := os.MkdirAll(filepath.Dir(goldenPath), 0750)
 		require.NoError(t, err)
-		err = os.WriteFile(filepath.Clean(goldenPath), actual, 0600)
+		err = os.WriteFile(filepath.Clean(goldenPath), actualSanitized, 0600)
 		require.NoError(t, err)
 		return
 	}
@@ -228,5 +255,5 @@ func AssertGoldenMatch(t *testing.T, goldenPath string, actual []byte, updateGol
 	// #nosec G304 -- test golden verification path
 	expected, err := os.ReadFile(filepath.Clean(goldenPath))
 	require.NoError(t, err, "golden file %s missing. Run with UPDATE_GOLDEN=true to generate", goldenPath)
-	assert.Equal(t, string(expected), string(actual), "golden file mismatch for %s", goldenPath)
+	assert.Equal(t, string(expected), string(actualSanitized), "golden file mismatch for %s", goldenPath)
 }
