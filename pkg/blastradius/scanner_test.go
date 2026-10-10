@@ -236,4 +236,7 @@ func TestRenderMarkdown_WithSafeConsumer(t *testing.T) {
 	assert.Contains(t, md, "None")
 }
 
-
+func TestTrackCrossModule(t *testing.T) {
+	err := TrackCrossModule("consumer", []string{"wrapper"}, "base")
+	assert.NoError(t, err)
+}
