@@ -6,6 +6,8 @@
   "is_downgrade": false,
   "can_safely_update": false,
   "verdict": "BREAKING_CHANGES",
+  "safe_pin_version": "v29.0.0",
+  "safe_pin_rationale": "Keep the currently analyzed version pinned until the breaking changes are resolved.",
   "breaking_changes": [
     {
       "category": "Output",

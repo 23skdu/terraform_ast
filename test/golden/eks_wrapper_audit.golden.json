@@ -81,6 +81,8 @@
     "is_downgrade": false,
     "can_safely_update": false,
     "verdict": "BREAKING_CHANGES",
+    "safe_pin_version": "v19.0.0",
+    "safe_pin_rationale": "Keep the currently analyzed version pinned until the breaking changes are resolved.",
     "breaking_changes": [
       {
         "category": "Output",
@@ -166,6 +168,8 @@
     "summary": "CANNOT SAFELY UPDATE: Detected 4 breaking change(s) between v19.0.0 and v20.0.0. Wrapper must be updated before pinning."
   },
   "recommended_pin": "version = \"20.0.0\"",
+  "safe_pin_version": "v19.0.0",
+  "safe_pin_rationale": "Keep the currently pinned upstream version until the wrapper compatibility issues are resolved.",
   "remediation_steps": [
     "Update or remove output \"aws_auth\" in wrapper outputs.tf",
     "Add argument 'authentication_mode = ...' to module \"eks\" block in wrapper",

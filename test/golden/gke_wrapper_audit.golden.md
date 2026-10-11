@@ -4,6 +4,7 @@
 - **Target Module**: `gke`
 - **Target Version**: `v30.0.0`
 - **Recommended Pin**: `version = "30.0.0"`
+- **Safest Known Pin**: `v29.0.0` — Keep the currently pinned upstream version until the wrapper compatibility issues are resolved.
 - **Verdict**: `BREAKING_CHANGES_DETECTED`
 
 > [!CAUTION]

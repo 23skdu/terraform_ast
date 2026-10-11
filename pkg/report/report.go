@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/23skdu/terraform_ast/pkg/diff"
+	"github.com/23skdu/terraform_ast/pkg/policy"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,6 +28,9 @@ func RenderText(r *diff.DiffReport) string {
 	sb.WriteString(fmt.Sprintf("Transition:  %s -> %s (%s)\n", r.OldVersion, r.NewVersion, r.BumpType))
 	sb.WriteString(fmt.Sprintf("Verdict:     %s\n", r.Verdict))
 	sb.WriteString(fmt.Sprintf("Summary:     %s\n", r.Summary))
+	if r.SafePinVersion != "" {
+		sb.WriteString(fmt.Sprintf("Safest pin:   %s (%s)\n", r.SafePinVersion, r.SafePinRationale))
+	}
 	sb.WriteString("----------------------------------------------------------------------\n")
 
 	if len(r.BreakingChanges) > 0 {
@@ -58,6 +62,7 @@ func RenderText(r *diff.DiffReport) string {
 		}
 		sb.WriteString("\n")
 	}
+	writePolicyViolations(&sb, r.PolicyViolations)
 
 	sb.WriteString("======================================================================\n")
 	return sb.String()
@@ -73,6 +78,9 @@ func RenderMarkdown(r *diff.DiffReport) string {
 	sb.WriteString(fmt.Sprintf("- **Module**: `%s`\n", r.ModuleName))
 	sb.WriteString(fmt.Sprintf("- **Version Transition**: `%s` -> `%s` (`%s`)\n", r.OldVersion, r.NewVersion, r.BumpType))
 	sb.WriteString(fmt.Sprintf("- **Verdict**: `%s`\n\n", r.Verdict))
+	if r.SafePinRationale != "" {
+		sb.WriteString(fmt.Sprintf("- **Safest Known Pin**: `%s` — %s\n\n", r.SafePinVersion, r.SafePinRationale))
+	}
 
 	if r.IsDowngrade || len(r.BreakingChanges) > 0 {
 		sb.WriteString(fmt.Sprintf("> [!CAUTION]\n> **%s**\n\n", r.Summary))
@@ -111,6 +119,7 @@ func RenderMarkdown(r *diff.DiffReport) string {
 		}
 		sb.WriteString("\n")
 	}
+	writePolicyViolations(&sb, r.PolicyViolations)
 
 	return sb.String()
 }
@@ -127,6 +136,17 @@ func confidenceSuffix(score int) string {
 		return ""
 	}
 	return fmt.Sprintf(" (confidence: %d/10)", score)
+}
+
+func writePolicyViolations(sb *strings.Builder, violations []policy.Violation) {
+	if len(violations) == 0 {
+		return
+	}
+	sb.WriteString(fmt.Sprintf("🚫 POLICY VIOLATIONS (%d):\n", len(violations)))
+	for _, violation := range violations {
+		sb.WriteString(fmt.Sprintf("  • [%s] %s\n", violation.Rule, violation.Message))
+	}
+	sb.WriteString("\n")
 }
 
 // RenderJSON serializes a DiffReport into JSON bytes.
@@ -149,6 +169,8 @@ func RenderWrapperText(w *wrapper.WrapperCompatibilityReport) string {
 	sb.WriteString(fmt.Sprintf("Recommended Pin:  %s\n", w.RecommendedPin))
 	sb.WriteString(fmt.Sprintf("Verdict:          %s\n", w.Verdict))
 	sb.WriteString(fmt.Sprintf("Summary:          %s\n", w.Summary))
+	sb.WriteString(fmt.Sprintf("Safest Known Pin: %s\n", w.SafePinVersion))
+	sb.WriteString(fmt.Sprintf("Pin Rationale:    %s\n", w.SafePinRationale))
 	sb.WriteString("----------------------------------------------------------------------\n")
 
 	if len(w.Issues) > 0 {
@@ -169,6 +191,7 @@ func RenderWrapperText(w *wrapper.WrapperCompatibilityReport) string {
 		}
 		sb.WriteString("\n")
 	}
+	writePolicyViolations(&sb, w.PolicyViolations)
 
 	sb.WriteString("======================================================================\n")
 	return sb.String()
@@ -185,6 +208,7 @@ func RenderWrapperMarkdown(w *wrapper.WrapperCompatibilityReport) string {
 	sb.WriteString(fmt.Sprintf("- **Target Module**: `%s`\n", w.TargetModuleName))
 	sb.WriteString(fmt.Sprintf("- **Target Version**: `%s`\n", w.TargetVersion))
 	sb.WriteString(fmt.Sprintf("- **Recommended Pin**: `%s`\n", w.RecommendedPin))
+	sb.WriteString(fmt.Sprintf("- **Safest Known Pin**: `%s` — %s\n", w.SafePinVersion, w.SafePinRationale))
 	sb.WriteString(fmt.Sprintf("- **Verdict**: `%s`\n\n", w.Verdict))
 
 	if w.TotalBreaking > 0 {
@@ -214,6 +238,7 @@ func RenderWrapperMarkdown(w *wrapper.WrapperCompatibilityReport) string {
 		}
 		sb.WriteString("\n")
 	}
+	writePolicyViolations(&sb, w.PolicyViolations)
 
 	return sb.String()
 }

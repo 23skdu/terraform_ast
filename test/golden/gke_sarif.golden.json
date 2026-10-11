@@ -44,6 +44,18 @@
               "defaultConfiguration": {
                 "level": "note"
               }
+            },
+            {
+              "id": "TF-POLICY-VIOLATION",
+              "shortDescription": {
+                "text": "Configured Terraform upgrade policy was violated"
+              },
+              "fullDescription": {
+                "text": "The analysis result violates a configured policy gate."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              }
             }
           ]
         }

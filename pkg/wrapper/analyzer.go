@@ -7,6 +7,7 @@ import (
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/23skdu/terraform_ast/pkg/diff"
+	"github.com/23skdu/terraform_ast/pkg/policy"
 	"github.com/23skdu/terraform_ast/pkg/semverutil"
 )
 
@@ -22,20 +23,23 @@ type WrapperIssue struct {
 
 // WrapperCompatibilityReport contains the verdict and findings for updating a wrapper module.
 type WrapperCompatibilityReport struct {
-	WrapperPath         string           `json:"wrapper_path"`
-	TargetModuleName    string           `json:"target_module_name"`
-	TargetVersion       string           `json:"target_version"`
-	PinnedVersion       string           `json:"pinned_version,omitempty"`
-	CanSafelyUpdate     bool             `json:"can_safely_update"`
-	Verdict             string           `json:"verdict"`
-	Issues              []WrapperIssue   `json:"issues"`
-	NewFeatureAdoptions []WrapperIssue   `json:"new_feature_adoptions"`
-	UpstreamDiff        *diff.DiffReport `json:"upstream_diff,omitempty"`
-	RecommendedPin      string           `json:"recommended_pin"`
-	RemediationSteps    []string         `json:"remediation_steps"`
-	TotalBreaking       int              `json:"total_breaking"`
-	TotalWarnings       int              `json:"total_warnings"`
-	Summary             string           `json:"summary"`
+	WrapperPath         string             `json:"wrapper_path"`
+	TargetModuleName    string             `json:"target_module_name"`
+	TargetVersion       string             `json:"target_version"`
+	PinnedVersion       string             `json:"pinned_version,omitempty"`
+	CanSafelyUpdate     bool               `json:"can_safely_update"`
+	Verdict             string             `json:"verdict"`
+	Issues              []WrapperIssue     `json:"issues"`
+	NewFeatureAdoptions []WrapperIssue     `json:"new_feature_adoptions"`
+	UpstreamDiff        *diff.DiffReport   `json:"upstream_diff,omitempty"`
+	RecommendedPin      string             `json:"recommended_pin"`
+	SafePinVersion      string             `json:"safe_pin_version,omitempty"`
+	SafePinRationale    string             `json:"safe_pin_rationale"`
+	RemediationSteps    []string           `json:"remediation_steps"`
+	TotalBreaking       int                `json:"total_breaking"`
+	TotalWarnings       int                `json:"total_warnings"`
+	PolicyViolations    []policy.Violation `json:"policy_violations,omitempty"`
+	Summary             string             `json:"summary"`
 }
 
 // AnalyzeWrapper verifies whether a wrapper module can safely update and pin to targetUpstream.
@@ -71,7 +75,13 @@ func AnalyzeWrapper(
 
 	// 1. Identify child module call in wrapper (e.g. "gke" or "eks")
 	var targetCall *ast.ModuleCallDef
-	for _, mc := range wrapperMod.ModuleCalls {
+	moduleCallNames := make([]string, 0, len(wrapperMod.ModuleCalls))
+	for name := range wrapperMod.ModuleCalls {
+		moduleCallNames = append(moduleCallNames, name)
+	}
+	sort.Strings(moduleCallNames)
+	for _, name := range moduleCallNames {
+		mc := wrapperMod.ModuleCalls[name]
 		m := mc
 		targetCall = &m
 		report.TargetModuleName = mc.Name
@@ -219,14 +229,24 @@ func AnalyzeWrapper(
 		report.CanSafelyUpdate = false
 		report.Verdict = "BREAKING_CHANGES_DETECTED"
 		report.Summary = fmt.Sprintf("CANNOT SAFELY PIN: Wrapper has %d breaking issue(s) with upstream %s. Resolve remediation steps before pinning.", report.TotalBreaking, targetVersion)
+		if pinnedVersion != "" {
+			report.SafePinVersion = pinnedVersion
+			report.SafePinRationale = "Keep the currently pinned upstream version until the wrapper compatibility issues are resolved."
+		} else {
+			report.SafePinRationale = "No current pin was supplied, so there is no verified safe version to recommend."
+		}
 	} else if report.TotalWarnings > 0 {
 		report.CanSafelyUpdate = true
 		report.Verdict = "SAFE_WITH_WARNINGS"
 		report.Summary = fmt.Sprintf("CAN SAFELY PIN WITH WARNINGS: No syntax or type errors preventing upgrade to %s, but %d warning(s) detected.", targetVersion, report.TotalWarnings)
+		report.SafePinVersion = targetVersion
+		report.SafePinRationale = "No breaking compatibility issues were detected; review warnings before pinning."
 	} else {
 		report.CanSafelyUpdate = true
 		report.Verdict = "SAFE_TO_PIN"
 		report.Summary = fmt.Sprintf("SAFE TO PIN: Wrapper is fully compatible with upstream version %s. Pin to %s.", targetVersion, report.RecommendedPin)
+		report.SafePinVersion = targetVersion
+		report.SafePinRationale = "No compatibility issues were detected for the target version."
 	}
 
 	return report

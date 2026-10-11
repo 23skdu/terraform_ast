@@ -1,0 +1,6 @@
+- id: tfastdiff
+  name: Terraform module compatibility audit
+  description: Audit a Terraform wrapper against the upstream module it calls
+  entry: tfastdiff
+  language: system
+  pass_filenames: false

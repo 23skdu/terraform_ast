@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/23skdu/terraform_ast/pkg/diff"
+	"github.com/23skdu/terraform_ast/pkg/policy"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
 )
 
@@ -108,6 +109,12 @@ var defaultRules = []SARIFRule{
 		FullDescription:  SARIFMessageText{Text: "A newly introduced optional variable or output is available."},
 		DefaultConfig:    SARIFRuleConfig{Level: "note"},
 	},
+	{
+		ID:               "TF-POLICY-VIOLATION",
+		ShortDescription: SARIFMessageText{Text: "Configured Terraform upgrade policy was violated"},
+		FullDescription:  SARIFMessageText{Text: "The analysis result violates a configured policy gate."},
+		DefaultConfig:    SARIFRuleConfig{Level: "error"},
+	},
 }
 
 // RenderSARIF formats a DiffReport into standard OASIS SARIF v2.1.0 JSON.
@@ -175,6 +182,7 @@ func RenderSARIF(r *diff.DiffReport) ([]byte, error) {
 			},
 		})
 	}
+	results = appendPolicyResults(results, r.PolicyViolations, r.ModuleName)
 
 	log := SARIFLog{
 		Schema:  sarifSchema,
@@ -237,6 +245,7 @@ func RenderWrapperSARIF(res *wrapper.WrapperCompatibilityReport) ([]byte, error)
 			},
 		})
 	}
+	results = appendPolicyResults(results, res.PolicyViolations, res.WrapperPath)
 
 	log := SARIFLog{
 		Schema:  sarifSchema,
@@ -257,4 +266,26 @@ func RenderWrapperSARIF(res *wrapper.WrapperCompatibilityReport) ([]byte, error)
 	}
 
 	return json.MarshalIndent(log, "", "  ")
+}
+
+func appendPolicyResults(results []SARIFResult, violations []policy.Violation, artifact string) []SARIFResult {
+	if artifact == "" {
+		artifact = "main.tf"
+	}
+	for _, violation := range violations {
+		results = append(results, SARIFResult{
+			RuleID: "TF-POLICY-VIOLATION",
+			Level:  "error",
+			Message: SARIFMessageText{
+				Text: fmt.Sprintf("[%s] %s", violation.Rule, violation.Message),
+			},
+			Locations: []SARIFLocation{{
+				PhysicalLocation: SARIFPhysicalLocation{
+					ArtifactLocation: SARIFArtifactLocation{URI: artifact},
+					Region:           SARIFRegion{StartLine: 1},
+				},
+			}},
+		})
+	}
+	return results
 }

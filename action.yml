@@ -1,25 +1,40 @@
 name: 'Terraform AST Diff'
-description: 'Automated refactoring and blast radius analysis for Terraform modules'
+description: 'Audit Terraform module compatibility and enforce upgrade policies'
 inputs:
-  target_dir:
-    description: 'The target directory to scan'
+  wrapper_path:
+    description: 'Path to the Terraform wrapper module'
     required: true
-    default: '.'
+  upstream:
+    description: 'Upstream module path, Git URL, or Terraform Registry identifier'
+    required: true
+  new_version:
+    description: 'Target upstream tag or version'
+    required: true
   format:
-    description: 'Output format (text, json, sarif)'
+    description: 'Output format (text, markdown, json, sarif)'
     required: false
     default: 'sarif'
+  blast_radius:
+    description: 'Optional directory containing downstream consumers'
+    required: false
   exit_code:
-    description: 'Exit with non-zero code on breaking changes'
+    description: 'Fail the action when compatibility issues are detected'
     required: false
     default: 'true'
 runs:
   using: 'docker'
   image: 'Dockerfile'
   args:
-    - ${{ inputs.target_dir }}
+    - --wrapper
+    - ${{ inputs.wrapper_path }}
+    - --upstream
+    - ${{ inputs.upstream }}
+    - --new-version
+    - ${{ inputs.new_version }}
     - --format
     - ${{ inputs.format }}
+    - --blast-radius
+    - ${{ inputs.blast_radius }}
     - --exit-code=${{ inputs.exit_code }}
 branding:
   icon: 'shield'

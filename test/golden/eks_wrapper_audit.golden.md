@@ -4,6 +4,7 @@
 - **Target Module**: `eks`
 - **Target Version**: `v20.0.0`
 - **Recommended Pin**: `version = "20.0.0"`
+- **Safest Known Pin**: `v19.0.0` — Keep the currently pinned upstream version until the wrapper compatibility issues are resolved.
 - **Verdict**: `BREAKING_CHANGES_DETECTED`
 
 > [!CAUTION]

@@ -49,6 +49,21 @@ Audits a local wrapper module (such as a Google GKE or AWS EKS wrapper) against 
 - `--format <text|markdown|json|sarif>`: Output format (default: `text`). Use `sarif` for GitHub Code Scanning.
 - `--output <file>`: Write report to destination file.
 - `--exit-code`: Returns non-zero exit code (1) if breaking changes are detected.
+- `--policy <file>`: Apply an optional JSON CI policy. Policy violations are included in text, Markdown, JSON, and SARIF output and return exit code 1.
+- `--fix-preview`: Emit a preview-only unified patch for removed arguments passed by the wrapper. Currently supports removal of direct module-call arguments; it does not change files or apply other remediation types.
+
+Example policy:
+
+```json
+{
+  "block_breaking": true,
+  "block_warnings": false,
+  "block_downgrades": true,
+  "max_bump": "MINOR"
+}
+```
+
+`max_bump` accepts `PATCH`, `MINOR`, or `MAJOR`. Unspecified rules are disabled. A policy violation enforces a failing exit code even when `--exit-code` is not supplied.
 
 ---
 
@@ -87,6 +102,18 @@ Compares two versions of an upstream module directly:
   --format markdown
 ```
 
+```bash
+# Review each tagged release before moving across a major-version jump
+./bin/tfastdiff \
+  --old https://github.com/terraform-google-modules/terraform-google-kubernetes-engine.git \
+  --new https://github.com/terraform-google-modules/terraform-google-kubernetes-engine.git \
+  --old-version v29.0.0 \
+  --new-version v31.0.0 \
+  --upgrade-path \
+  --format markdown \
+  --exit-code
+```
+
 #### Flags:
 - `--old <dir|git-url|registry>`: Old/current upstream module source.
 - `--new <dir|git-url|registry>`: New/target upstream module source.
@@ -96,6 +123,8 @@ Compares two versions of an upstream module directly:
 - `--format <text|markdown|json|sarif>`: Output format (`text`, `markdown`, `json`, `sarif`).
 - `--output <file>`: Path to file destination.
 - `--exit-code`: Exits with code 1 if breaking changes exist.
+- `--policy <file>`: Applies the same JSON policy gates as wrapper audit mode.
+- `--upgrade-path`: Inspects each intermediate semantic-version Git tag or Registry release and reports adjacent compatibility transitions. Requires both version flags, the same source for `--old` and `--new`, and text, Markdown, or JSON output. For local directories, only the supplied endpoint snapshots are available.
 
 ---
 

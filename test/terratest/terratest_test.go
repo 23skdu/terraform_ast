@@ -11,6 +11,7 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/blastradius"
 	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/gitops"
+	"github.com/23skdu/terraform_ast/pkg/planner"
 	"github.com/23skdu/terraform_ast/pkg/recreation"
 	"github.com/23skdu/terraform_ast/pkg/registry"
 	"github.com/23skdu/terraform_ast/pkg/report"
@@ -288,8 +289,30 @@ func TestTerratest_DeepObjectSchemaDiff(t *testing.T) {
 			foundObjectBreaking = true
 			assert.Contains(t, item.Description, "object schema")
 		}
+
 	}
 	assert.True(t, foundObjectBreaking, "Expected breaking change detected for object schema variable node_config")
+}
+
+func TestTerratest_MultiVersionUpgradePathRecommendation(t *testing.T) {
+	v1Dir, err := filepath.Abs("../fixtures/upstream_gke_v1")
+	require.NoError(t, err)
+	v2Dir, err := filepath.Abs("../fixtures/upstream_gke_v2")
+	require.NoError(t, err)
+	v1, err := ast.Inspect(v1Dir)
+	require.NoError(t, err)
+	v2, err := ast.Inspect(v2Dir)
+	require.NoError(t, err)
+
+	path, err := planner.AnalyzeUpgradePath([]planner.VersionSnapshot{
+		{Version: "v29.0.0", Module: v1},
+		{Version: "v30.0.0", Module: v2},
+	})
+	require.NoError(t, err)
+	assert.False(t, path.CanSafelyUpdateAll)
+	assert.Equal(t, "v29.0.0", path.RecommendedVersion)
+	require.Len(t, path.Steps, 1)
+	assert.Equal(t, "BREAKING_CHANGES", path.Steps[0].Diff.Verdict)
 }
 
 // TestTerratest_RecreationHazardsAndSARIF verifies detection of ForceNew destruction hazards and SARIF v2.1.0 generation.
@@ -458,6 +481,23 @@ func TestTerratest_CLI_EndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(outCompare), "Terraform AST Compatibility Diff Report")
 	assert.Contains(t, string(outCompare), "State Destruction & Recreation Hazards")
+
+	// 1b. Preview-only codemod for removed wrapper arguments
+	wrapperMainPath := filepath.Join(gkeWrapperDir, "main.tf")
+	wrapperBefore, err := os.ReadFile(wrapperMainPath)
+	require.NoError(t, err)
+	cmdFixPreview := exec.Command(tmpBin,
+		"--wrapper", gkeWrapperDir,
+		"--upstream", gkeV2Dir,
+		"--fix-preview",
+	)
+	outPreview, err := cmdFixPreview.CombinedOutput()
+	require.NoError(t, err, string(outPreview))
+	assert.Contains(t, string(outPreview), "--- a/main.tf")
+	assert.Contains(t, string(outPreview), "ip_range_services")
+	wrapperAfter, err := os.ReadFile(wrapperMainPath)
+	require.NoError(t, err)
+	assert.Equal(t, wrapperBefore, wrapperAfter, "preview mode must not modify Terraform files")
 
 	// 2. Wrapper Mode: json output with blast-radius scanning
 	cmdWrapper := exec.Command(tmpBin,

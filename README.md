@@ -31,6 +31,8 @@
   - Generates recommended pinning constraints (e.g. `version = "30.0.0"`).
   - Outlines exact remediation steps for engineers.
 - **Multi-Format Output**: Terminal text with visual indicators, GitHub-flavored Markdown for PR comments, machine-readable JSON for CI/CD gates, and SARIF for code scanning.
+- **Policy & Remediation Previews**: Enforce JSON-defined breaking-change, warning, downgrade, and maximum-bump rules; preview a unified patch for removed wrapper arguments without modifying Terraform files.
+- **Upgrade-Path Analysis**: Compare adjacent semantic-version Git tags or Registry releases across a major-version jump, identify the last continuously safe version, and emit text, Markdown, or JSON reports.
 - **Enterprise Test Coverage**: Validated via [Terratest](test/terratest/) on realistic GKE/EKS fixtures and [Golden Image / Golden File](test/golden/) methodology.
 
 ---
@@ -88,6 +90,46 @@ Directly compare two versions of an upstream module:
   --old-version v19.0.0 \
   --new-version v20.0.0 \
   --format text
+```
+
+### 4. GitHub Action and Pre-Commit
+
+Use the Docker-based GitHub Action with explicit module inputs:
+
+```yaml
+- uses: 23skdu/terraform_ast@main
+  with:
+    wrapper_path: ./modules/gke-wrapper
+    upstream: terraform-google-modules/kubernetes-engine/google
+    new_version: v30.0.0
+    format: sarif
+    exit_code: true
+```
+
+For a reusable pull-request report workflow, call `.github/workflows/tfastdiff-audit.yml` from your repository workflow:
+
+```yaml
+jobs:
+  terraform-compatibility:
+    uses: 23skdu/terraform_ast/.github/workflows/tfastdiff-audit.yml@main
+    with:
+      wrapper_path: ./modules/gke-wrapper
+      upstream: terraform-google-modules/kubernetes-engine/google
+      new_version: v30.0.0
+      blast_radius: ./environments
+```
+
+The reusable workflow uploads SARIF and upserts one summary comment on pull requests. Its caller must allow `pull-requests: write` and `security-events: write`.
+
+For local checks, add the repository hook to `.pre-commit-config.yaml` after installing `tfastdiff`:
+
+```yaml
+repos:
+  - repo: https://github.com/23skdu/terraform_ast
+    rev: v0.1.0
+    hooks:
+      - id: tfastdiff
+        args: [--wrapper, ./modules/gke-wrapper, --exit-code]
 ```
 
 ---

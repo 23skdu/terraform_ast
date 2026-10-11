@@ -21,6 +21,8 @@ func TestCompare_Downgrade(t *testing.T) {
 	assert.True(t, report.IsDowngrade)
 	assert.Equal(t, "DOWNGRADE", report.Verdict)
 	assert.Contains(t, report.Summary, "DOWNGRADE HAZARD")
+	assert.Equal(t, "2.0.0", report.SafePinVersion)
+	assert.Contains(t, report.SafePinRationale, "downgrade")
 }
 
 func TestCompare_BreakingChanges(t *testing.T) {
@@ -85,6 +87,8 @@ func TestCompare_BreakingChanges(t *testing.T) {
 	assert.Equal(t, "BREAKING_CHANGES", report.Verdict)
 	assert.Equal(t, 6, report.TotalBreaking)
 	assert.Contains(t, report.Summary, "CANNOT SAFELY UPDATE")
+	assert.Equal(t, "1.0.0", report.SafePinVersion)
+	assert.Contains(t, report.SafePinRationale, "currently analyzed version")
 }
 
 func TestCompare_WarningsAndFeatures(t *testing.T) {
@@ -204,6 +208,7 @@ func TestCompare_SafeTransition(t *testing.T) {
 	assert.Equal(t, 0, report.TotalWarnings)
 	assert.Equal(t, 1, report.TotalNewFeatures)
 	assert.Contains(t, report.Summary, "SAFE TO UPDATE")
+	assert.Equal(t, "1.1.0", report.SafePinVersion)
 }
 
 func TestCompare_NullabilityAndOutputTypeChanges(t *testing.T) {

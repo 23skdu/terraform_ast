@@ -4,6 +4,8 @@
 - **Version Transition**: `v29.0.0` -> `v30.0.0` (`MAJOR`)
 - **Verdict**: `BREAKING_CHANGES`
 
+- **Safest Known Pin**: `v29.0.0` — Keep the currently analyzed version pinned until the breaking changes are resolved.
+
 > [!CAUTION]
 > **CANNOT SAFELY UPDATE: Detected 5 breaking change(s) between v29.0.0 and v30.0.0. Wrapper must be updated before pinning.**
 

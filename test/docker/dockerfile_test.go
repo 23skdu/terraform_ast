@@ -62,6 +62,33 @@ func TestDockerfile_DevSecOpsStaticAnalysis(t *testing.T) {
 	}
 }
 
+func TestDeveloperWorkflowManifests(t *testing.T) {
+	action, err := os.ReadFile("../../action.yml")
+	require.NoError(t, err)
+	actionContent := string(action)
+	assert.Contains(t, actionContent, "wrapper_path:")
+	assert.Contains(t, actionContent, "upstream:")
+	assert.Contains(t, actionContent, "new_version:")
+	assert.Contains(t, actionContent, "--wrapper")
+	assert.Contains(t, actionContent, "--exit-code=${{ inputs.exit_code }}")
+	assert.NotContains(t, actionContent, "inputs.target_dir")
+
+	hooks, err := os.ReadFile("../../.pre-commit-hooks.yaml")
+	require.NoError(t, err)
+	assert.Contains(t, string(hooks), "id: tfastdiff")
+	assert.Contains(t, string(hooks), "entry: tfastdiff")
+	assert.Contains(t, string(hooks), "pass_filenames: false")
+
+	workflow, err := os.ReadFile("../../.github/workflows/tfastdiff-audit.yml")
+	require.NoError(t, err)
+	workflowContent := string(workflow)
+	assert.Contains(t, workflowContent, "workflow_call:")
+	assert.Contains(t, workflowContent, "upload-sarif@v3")
+	assert.Contains(t, workflowContent, "tfastdiff-compatibility-report")
+	assert.Contains(t, workflowContent, "updateComment")
+	assert.Contains(t, workflowContent, "createComment")
+}
+
 // TestDockerfile_BuildAndRuntimeSecurity builds the container and validates runtime security constraints.
 func TestDockerfile_BuildAndRuntimeSecurity(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {

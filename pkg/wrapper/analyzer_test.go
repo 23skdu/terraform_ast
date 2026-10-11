@@ -97,6 +97,8 @@ func TestAnalyzeWrapper_BreakingIssues(t *testing.T) {
 	assert.Equal(t, 4, report.TotalBreaking)
 	assert.NotEmpty(t, report.RemediationSteps)
 	assert.Equal(t, `version = "30.0.0"`, report.RecommendedPin)
+	assert.Equal(t, "v29.0.0", report.SafePinVersion)
+	assert.Contains(t, report.SafePinRationale, "currently pinned")
 	assert.NotNil(t, report.UpstreamDiff)
 	assert.NotEmpty(t, report.NewFeatureAdoptions)
 	assert.Contains(t, report.Summary, "CANNOT SAFELY PIN")
@@ -136,6 +138,7 @@ func TestAnalyzeWrapper_SafeWithWarnings(t *testing.T) {
 	assert.Equal(t, "SAFE_WITH_WARNINGS", report.Verdict)
 	assert.Equal(t, 2, report.TotalWarnings)
 	assert.Contains(t, report.Summary, "CAN SAFELY PIN WITH WARNINGS")
+	assert.Equal(t, "20.0.0", report.SafePinVersion)
 }
 
 func TestAnalyzeWrapper_NullabilityMismatch(t *testing.T) {

@@ -137,6 +137,35 @@ variable "region" {
 	assert.Equal(t, 1, code)
 }
 
+func TestExecute_PolicyGate(t *testing.T) {
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
+	policyFile := filepath.Join(t.TempDir(), "policy.json")
+	require.NoError(t, os.WriteFile(filepath.Join(oldDir, "main.tf"), []byte(`variable "name" { type = string }`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(newDir, "main.tf"), []byte(`variable "name" { type = string }
+variable "region" {
+  type    = string
+  default = "west"
+}`), 0644))
+	require.NoError(t, os.WriteFile(policyFile, []byte(`{"max_bump":"PATCH"}`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--old", oldDir, "--new", newDir,
+		"--old-version", "1.0.0", "--new-version", "1.1.0",
+		"--policy", policyFile, "--format", "json",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stdout.String(), `"rule": "max_bump"`)
+	assert.Contains(t, stdout.String(), "allows at most a PATCH")
+
+	require.NoError(t, os.WriteFile(policyFile, []byte(`{"not_a_rule":true}`), 0600))
+	stderr.Reset()
+	code = Execute([]string{"--old", oldDir, "--new", newDir, "--policy", policyFile}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "Error loading policy")
+}
+
 func TestExecute_WrapperMode(t *testing.T) {
 	wrapperDir := t.TempDir()
 	upstreamDir := t.TempDir()
@@ -206,6 +235,31 @@ output "cluster_endpoint" {
 	require.NoError(t, os.WriteFile(filepath.Join(badUpstream, "main.tf"), []byte(`variable "other" { type = string }`), 0644))
 	code = Execute([]string{"--wrapper", wrapperDir, "--upstream", badUpstream, "--exit-code"}, &stdout, &stderr)
 	assert.Equal(t, 1, code)
+}
+
+func TestExecute_FixPreviewDoesNotModifyWrapper(t *testing.T) {
+	wrapperDir := t.TempDir()
+	upstreamDir := t.TempDir()
+	wrapperFile := filepath.Join(wrapperDir, "main.tf")
+	wrapperSource := `module "upstream" {
+  source = "` + upstreamDir + `"
+  removed = "value"
+  retained = "value"
+}
+`
+	require.NoError(t, os.WriteFile(wrapperFile, []byte(wrapperSource), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "retained" { type = string }`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--fix-preview"}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "--- a/main.tf")
+	assert.Contains(t, stdout.String(), "-  removed = \"value\"")
+	assert.NotContains(t, stdout.String(), "+  removed = \"value\"")
+
+	after, err := os.ReadFile(wrapperFile)
+	require.NoError(t, err)
+	assert.Equal(t, wrapperSource, string(after))
 }
 
 func TestExecute_GitReposAndVersions(t *testing.T) {
@@ -448,7 +502,7 @@ variable "ip_range_services" {
 	wrapperDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
 module "gke" {
-  source = "` + upstreamDir + `"
+  source = "`+upstreamDir+`"
 }
 `), 0600))
 
@@ -457,7 +511,7 @@ module "gke" {
 	require.NoError(t, os.MkdirAll(envDev, 0750))
 	require.NoError(t, os.WriteFile(filepath.Join(envDev, "main.tf"), []byte(`
 module "my_wrapper" {
-  source = "` + wrapperDir + `"
+  source = "`+wrapperDir+`"
 }
 `), 0600))
 
@@ -665,7 +719,7 @@ variable "new_required" {
 	wrapperDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
 module "gke" {
-  source = "` + upstreamDir + `"
+  source = "`+upstreamDir+`"
 }
 `), 0600))
 
@@ -674,7 +728,7 @@ module "gke" {
 	require.NoError(t, os.MkdirAll(envDev, 0750))
 	require.NoError(t, os.WriteFile(filepath.Join(envDev, "main.tf"), []byte(`
 module "my_wrapper" {
-  source = "` + wrapperDir + `"
+  source = "`+wrapperDir+`"
 }
 `), 0600))
 
@@ -714,6 +768,41 @@ variable "ip_range_services" {
 	}, &stdout, &stderr)
 	assert.Equal(t, 0, code)
 	assert.Contains(t, stdout.String(), "State Destruction & Recreation Hazards")
+}
+
+func TestExecute_UpgradePathAndPolicy(t *testing.T) {
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(oldDir, "main.tf"), []byte(`
+variable "name" {
+  type = string
+}
+`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(newDir, "main.tf"), []byte(`
+variable "name" {
+  type = number
+}
+`), 0600))
+
+	policyFile := filepath.Join(t.TempDir(), "policy.json")
+	require.NoError(t, os.WriteFile(policyFile, []byte(`{"max_bump":"MINOR"}`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--old", oldDir, "--new", newDir,
+		"--old-version", "1.0.0", "--new-version", "2.0.0",
+		"--upgrade-path", "--policy", policyFile, "--format", "json",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stdout.String(), `"target_version": "2.0.0"`)
+	assert.Contains(t, stdout.String(), `"rule": "max_bump"`)
+	assert.Empty(t, stderr.String())
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", oldDir, "--new", newDir, "--upgrade-path"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "requires --old-version and --new-version")
 }
 
 func TestExecute_RegistryMkdirTempFailures(t *testing.T) {
@@ -785,6 +874,3 @@ func TestDefaultRegistryClient(t *testing.T) {
 	c := newRegistryClient()
 	assert.NotNil(t, c)
 }
-
-
-

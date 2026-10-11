@@ -58,8 +58,32 @@ func Compare(oldMod, newMod *ast.ModuleInfo, oldVer, newVer string) *DiffReport 
 
 	// Compute safety verdict
 	computeVerdict(report)
+	recommendSafePin(report)
 
 	return report
+}
+
+func recommendSafePin(report *DiffReport) {
+	if report.IsDowngrade {
+		if report.OldVersion != "" {
+			report.SafePinVersion = report.OldVersion
+			report.SafePinRationale = "The analyzed target is a downgrade; keep the currently analyzed version pinned."
+		} else {
+			report.SafePinRationale = "The analyzed target is a downgrade; no safe pin can be recommended without a known current version."
+		}
+		return
+	}
+	if report.CanSafelyUpdate && report.NewVersion != "" {
+		report.SafePinVersion = report.NewVersion
+		report.SafePinRationale = "The analyzed target version has no detected breaking changes."
+		return
+	}
+	if report.TotalBreaking > 0 && report.OldVersion != "" {
+		report.SafePinVersion = report.OldVersion
+		report.SafePinRationale = "Keep the currently analyzed version pinned until the breaking changes are resolved."
+		return
+	}
+	report.SafePinRationale = "No safe pin can be recommended from the supplied version information."
 }
 
 func scoreConfidence(report *DiffReport) {

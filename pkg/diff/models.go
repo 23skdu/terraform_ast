@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"github.com/23skdu/terraform_ast/pkg/policy"
 	"github.com/23skdu/terraform_ast/pkg/semverutil"
 )
 
@@ -35,9 +36,12 @@ type DiffReport struct {
 	IsDowngrade      bool                `json:"is_downgrade"`
 	CanSafelyUpdate  bool                `json:"can_safely_update"`
 	Verdict          string              `json:"verdict"`
+	SafePinVersion   string              `json:"safe_pin_version,omitempty"`
+	SafePinRationale string              `json:"safe_pin_rationale,omitempty"`
 	BreakingChanges  []DifferenceItem    `json:"breaking_changes"`
 	NewFeatures      []DifferenceItem    `json:"new_features"`
 	Warnings         []DifferenceItem    `json:"warnings"`
+	PolicyViolations []policy.Violation  `json:"policy_violations,omitempty"`
 	TotalBreaking    int                 `json:"total_breaking"`
 	TotalNewFeatures int                 `json:"total_new_features"`
 	TotalWarnings    int                 `json:"total_warnings"`
