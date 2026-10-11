@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -14,10 +13,11 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/recreation"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
 	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclparse"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 )
 
-// TrackCrossModule performs multi-tiered variable taint tracking to follow an input through 
+// TrackCrossModule performs multi-tiered variable taint tracking to follow an input through
 // nested wrapper modules down to its immutable target in the base upstream module.
 func TrackCrossModule(rootConsumer string, wrapperLayers []string, baseTarget string) error {
 	// TODO: Deep recursive graph analysis for cross-module mapping
@@ -26,12 +26,13 @@ func TrackCrossModule(rootConsumer string, wrapperLayers []string, baseTarget st
 
 // CallSite represents a root module consumer calling the wrapper module.
 type CallSite struct {
-	Dir               string            `json:"dir"`
-	File              string            `json:"file"`
-	ModuleName        string            `json:"module_name"`
-	Source            string            `json:"source"`
-	PassedInputs      map[string]string `json:"passed_inputs"`
-	OutputsReferenced []string          `json:"outputs_referenced"`
+	Dir                     string            `json:"dir"`
+	File                    string            `json:"file"`
+	ModuleName              string            `json:"module_name"`
+	Source                  string            `json:"source"`
+	PassedInputs            map[string]string `json:"passed_inputs"`
+	OutputsReferenced       []string          `json:"outputs_referenced"`
+	InputAnalysisIncomplete bool              `json:"input_analysis_incomplete,omitempty"`
 }
 
 // RootModuleImpact captures the compatibility impact on a specific downstream root module.
@@ -42,22 +43,21 @@ type RootModuleImpact struct {
 	RemovedInputsPassed      []string `json:"removed_inputs_passed"`
 	RemovedOutputsReferenced []string `json:"removed_outputs_referenced"`
 	RecreationHazards        []string `json:"recreation_hazards"`
+	AnalysisIncomplete       bool     `json:"analysis_incomplete,omitempty"`
 	RiskScore                string   `json:"risk_score"`
 	CanSafelyUpdate          bool     `json:"can_safely_update"`
 }
 
 // BlastRadiusReport summarizes the blast radius across all scanned root modules.
 type BlastRadiusReport struct {
-	SearchDir            string             `json:"search_dir"`
-	WrapperIdentifier    string             `json:"wrapper_identifier"`
-	TotalCallSitesScanned int               `json:"total_call_sites_scanned"`
-	ImpactedRootModules  []RootModuleImpact `json:"impacted_root_modules"`
-	HighestRisk          string             `json:"highest_risk"`
-	CanSafelyUpdateAll   bool               `json:"can_safely_update_all"`
-	Summary              string             `json:"summary"`
+	SearchDir             string             `json:"search_dir"`
+	WrapperIdentifier     string             `json:"wrapper_identifier"`
+	TotalCallSitesScanned int                `json:"total_call_sites_scanned"`
+	ImpactedRootModules   []RootModuleImpact `json:"impacted_root_modules"`
+	HighestRisk           string             `json:"highest_risk"`
+	CanSafelyUpdateAll    bool               `json:"can_safely_update_all"`
+	Summary               string             `json:"summary"`
 }
-
-var modRefRegex = regexp.MustCompile(`module\.([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_-]+)`)
 
 // ScanDirectory searches searchDir recursively for root modules calling wrapperIdentifier.
 func ScanDirectory(
@@ -125,13 +125,30 @@ func discoverCallSites(searchDir, wrapperIdentifier string) ([]CallSite, error) 
 			}
 			return nil
 		}
-		if !strings.HasSuffix(d.Name(), ".tf") {
+		isTerragrunt := d.Name() == "terragrunt.hcl"
+		isJSON := strings.HasSuffix(d.Name(), ".tf.json")
+		if !isTerragrunt && !isJSON && !strings.HasSuffix(d.Name(), ".tf") {
 			return nil
 		}
 
 		// #nosec G122, G304 -- directory entries traversed within validated search directory
 		src, err := os.ReadFile(filepath.Clean(path))
 		if err != nil {
+			return nil
+		}
+
+		if isTerragrunt {
+			if callSite, ok := parseTerragruntCallSite(src, path, normTarget); ok {
+				callSites = append(callSites, callSite)
+			}
+			return nil
+		}
+		if isJSON {
+			jsonCallSites, err := discoverJSONCallSites(src, path, normTarget)
+			if err != nil {
+				return err
+			}
+			callSites = append(callSites, jsonCallSites...)
 			return nil
 		}
 
@@ -144,46 +161,183 @@ func discoverCallSites(searchDir, wrapperIdentifier string) ([]CallSite, error) 
 			// Extract all module.<name>.<output> references in this file
 			refs := extractModuleReferences(src)
 
-		for _, block := range body.Blocks {
-			if block.Type != "module" || len(block.Labels) == 0 {
-				continue
-			}
-			modName := block.Labels[0]
-
-			srcAttr, exists := block.Body.Attributes["source"]
-			if !exists {
-				continue
-			}
-
-			sourceVal := extractSourceVal(src, srcAttr.Expr)
-			if !isMatchingSource(path, sourceVal, normTarget) {
-				continue
-			}
-
-			passedInputs := make(map[string]string)
-			for attrName, attr := range block.Body.Attributes {
-				if attrName == "source" || attrName == "version" || attrName == "providers" || attrName == "depends_on" {
+			for _, block := range body.Blocks {
+				if block.Type != "module" || len(block.Labels) == 0 {
 					continue
 				}
-				passedInputs[attrName] = string(src[attr.Expr.Range().Start.Byte:attr.Expr.Range().End.Byte])
-			}
+				modName := block.Labels[0]
 
-			cs := CallSite{
-				Dir:               filepath.Dir(path),
-				File:              path,
-				ModuleName:        modName,
-				Source:            sourceVal,
-				PassedInputs:      passedInputs,
-				OutputsReferenced: refs[modName],
+				srcAttr, exists := block.Body.Attributes["source"]
+				if !exists {
+					continue
+				}
+
+				sourceVal := extractSourceVal(src, srcAttr.Expr)
+				if !isMatchingSource(path, sourceVal, normTarget) {
+					continue
+				}
+
+				passedInputs := make(map[string]string)
+				for attrName, attr := range block.Body.Attributes {
+					if attrName == "source" || attrName == "version" || attrName == "count" || attrName == "for_each" || attrName == "providers" || attrName == "depends_on" {
+						continue
+					}
+					passedInputs[attrName] = string(src[attr.Expr.Range().Start.Byte:attr.Expr.Range().End.Byte])
+				}
+
+				cs := CallSite{
+					Dir:               filepath.Dir(path),
+					File:              path,
+					ModuleName:        modName,
+					Source:            sourceVal,
+					PassedInputs:      passedInputs,
+					OutputsReferenced: refs[modName],
+				}
+				callSites = append(callSites, cs)
 			}
-			callSites = append(callSites, cs)
-		}
 		}
 
 		return nil
 	})
 
 	return callSites, err
+}
+
+func discoverJSONCallSites(src []byte, path, targetIdentifier string) ([]CallSite, error) {
+	file, diags := hclparse.NewParser().ParseJSON(src, path)
+	if diags.HasErrors() || file == nil {
+		return nil, nil
+	}
+	schema := &hcl.BodySchema{
+		Blocks: []hcl.BlockHeaderSchema{
+			{Type: "module", LabelNames: []string{"name"}},
+			{Type: "output", LabelNames: []string{"name"}},
+			{Type: "resource", LabelNames: []string{"type", "name"}},
+			{Type: "data", LabelNames: []string{"type", "name"}},
+			{Type: "locals"},
+		},
+	}
+	content, _, diags := file.Body.PartialContent(schema)
+	if diags.HasErrors() || content == nil {
+		return nil, nil
+	}
+	refs := make(map[string][]string)
+	for _, block := range content.Blocks {
+		attrs, _ := block.Body.JustAttributes()
+		for _, attr := range attrs {
+			addModuleReferences(refs, attr.Expr.Variables())
+		}
+	}
+
+	var callSites []CallSite
+	for _, block := range content.Blocks {
+		if block.Type != "module" || len(block.Labels) == 0 {
+			continue
+		}
+		attrs, _ := block.Body.JustAttributes()
+		sourceAttr, exists := attrs["source"]
+		if !exists {
+			continue
+		}
+		source := extractSourceVal(src, sourceAttr.Expr)
+		if !isMatchingSource(path, source, targetIdentifier) {
+			continue
+		}
+
+		passedInputs := make(map[string]string)
+		for name, attr := range attrs {
+			switch name {
+			case "source", "version", "count", "for_each", "providers", "depends_on":
+				continue
+			default:
+				passedInputs[name] = strings.TrimSpace(string(src[attr.Expr.Range().Start.Byte:attr.Expr.Range().End.Byte]))
+			}
+		}
+		callSites = append(callSites, CallSite{
+			Dir:               filepath.Dir(path),
+			File:              path,
+			ModuleName:        block.Labels[0],
+			Source:            source,
+			PassedInputs:      passedInputs,
+			OutputsReferenced: refs[block.Labels[0]],
+		})
+	}
+	return callSites, nil
+}
+
+func parseTerragruntCallSite(src []byte, path, targetIdentifier string) (CallSite, bool) {
+	file, diags := hclsyntax.ParseConfig(src, path, hcl.Pos{Line: 1, Column: 1})
+	if diags.HasErrors() || file == nil {
+		return CallSite{}, false
+	}
+	body, ok := file.Body.(*hclsyntax.Body)
+	if !ok {
+		return CallSite{}, false
+	}
+
+	var source string
+	for _, block := range body.Blocks {
+		if block.Type != "terraform" {
+			continue
+		}
+		if sourceAttr, exists := block.Body.Attributes["source"]; exists {
+			source = extractSourceVal(src, sourceAttr.Expr)
+			break
+		}
+	}
+	if source == "" || !isMatchingSource(path, source, targetIdentifier) {
+		return CallSite{}, false
+	}
+
+	passedInputs := make(map[string]string)
+	inputAnalysisIncomplete := false
+	if inputsAttr, exists := body.Attributes["inputs"]; exists {
+		if inputs, ok := inputsAttr.Expr.(*hclsyntax.ObjectConsExpr); ok {
+			for _, item := range inputs.Items {
+				key, ok := terragruntInputKey(item.KeyExpr)
+				if !ok {
+					inputAnalysisIncomplete = true
+					continue
+				}
+				if key != "" {
+					passedInputs[key] = strings.TrimSpace(string(src[item.ValueExpr.Range().Start.Byte:item.ValueExpr.Range().End.Byte]))
+				}
+			}
+		} else {
+			inputAnalysisIncomplete = true
+		}
+	}
+
+	return CallSite{
+		Dir:                     filepath.Dir(path),
+		File:                    path,
+		ModuleName:              filepath.Base(filepath.Dir(path)),
+		Source:                  source,
+		PassedInputs:            passedInputs,
+		OutputsReferenced:       extractModuleReferences(src)[filepath.Base(filepath.Dir(path))],
+		InputAnalysisIncomplete: inputAnalysisIncomplete,
+	}, true
+}
+
+func terragruntInputKey(expr hclsyntax.Expression) (string, bool) {
+	switch keyExpr := expr.(type) {
+	case *hclsyntax.ObjectConsKeyExpr:
+		if keyExpr.ForceNonLiteral {
+			return "", false
+		}
+		return terragruntInputKey(keyExpr.Wrapped)
+	case *hclsyntax.LiteralValueExpr:
+		if keyExpr.Val.IsKnown() && !keyExpr.Val.IsNull() && keyExpr.Val.Type().FriendlyName() == "string" {
+			return keyExpr.Val.AsString(), true
+		}
+	case *hclsyntax.ScopeTraversalExpr:
+		if len(keyExpr.Traversal) == 1 {
+			if root, ok := keyExpr.Traversal[0].(hcl.TraverseRoot); ok {
+				return root.Name, true
+			}
+		}
+	}
+	return "", false
 }
 
 func isMatchingSource(callerFilePath, sourceVal, targetIdentifier string) bool {
@@ -200,22 +354,73 @@ func isMatchingSource(callerFilePath, sourceVal, targetIdentifier string) bool {
 	return resolved == cleanTarget || strings.HasSuffix(resolved, cleanTarget) || strings.HasSuffix(cleanSource, cleanTarget)
 }
 
-func extractSourceVal(src []byte, expr hclsyntax.Expression) string {
+func extractSourceVal(src []byte, expr hcl.Expression) string {
 	raw := string(src[expr.Range().Start.Byte:expr.Range().End.Byte])
 	return strings.Trim(strings.TrimSpace(raw), `"'`)
 }
 
 func extractModuleReferences(src []byte) map[string][]string {
 	res := make(map[string][]string)
-	matches := modRefRegex.FindAllSubmatch(src, -1)
-	for _, m := range matches {
-		if len(m) == 3 {
-			modName := string(m[1])
-			outName := string(m[2])
-			res[modName] = append(res[modName], outName)
+	file, diags := hclsyntax.ParseConfig(src, "references.tf", hcl.Pos{Line: 1, Column: 1})
+	if diags.HasErrors() || file == nil {
+		return res
+	}
+
+	seen := make(map[string]map[string]struct{})
+	var visit func(*hclsyntax.Body)
+	visit = func(body *hclsyntax.Body) {
+		for _, attr := range body.Attributes {
+			addModuleReferencesWithSeen(res, seen, attr.Expr.Variables())
+		}
+		for _, block := range body.Blocks {
+			visit(block.Body)
 		}
 	}
+	visit(file.Body.(*hclsyntax.Body))
+	for moduleName := range res {
+		sort.Strings(res[moduleName])
+	}
 	return res
+}
+
+func addModuleReferences(refs map[string][]string, traversals []hcl.Traversal) {
+	seen := make(map[string]map[string]struct{})
+	for name, outputs := range refs {
+		if seen[name] == nil {
+			seen[name] = make(map[string]struct{})
+		}
+		for _, output := range outputs {
+			seen[name][output] = struct{}{}
+		}
+	}
+	addModuleReferencesWithSeen(refs, seen, traversals)
+}
+
+func addModuleReferencesWithSeen(refs map[string][]string, seen map[string]map[string]struct{}, traversals []hcl.Traversal) {
+	for _, traversal := range traversals {
+		if len(traversal) < 3 {
+			continue
+		}
+		root, okRoot := traversal[0].(hcl.TraverseRoot)
+		module, okModule := traversal[1].(hcl.TraverseAttr)
+		if !okRoot || root.Name != "module" || !okModule {
+			continue
+		}
+		for _, step := range traversal[2:] {
+			output, okOutput := step.(hcl.TraverseAttr)
+			if !okOutput {
+				continue
+			}
+			if seen[module.Name] == nil {
+				seen[module.Name] = make(map[string]struct{})
+			}
+			if _, exists := seen[module.Name][output.Name]; !exists {
+				seen[module.Name][output.Name] = struct{}{}
+				refs[module.Name] = append(refs[module.Name], output.Name)
+			}
+			break
+		}
+	}
 }
 
 func evaluateCallSiteImpact(
@@ -224,13 +429,20 @@ func evaluateCallSiteImpact(
 	audit *wrapper.WrapperCompatibilityReport,
 ) RootModuleImpact {
 	impact := RootModuleImpact{
-		Dir:             cs.Dir,
-		ModuleName:      cs.ModuleName,
-		RiskScore:       "LOW",
-		CanSafelyUpdate: true,
+		Dir:                cs.Dir,
+		ModuleName:         cs.ModuleName,
+		RiskScore:          "LOW",
+		CanSafelyUpdate:    true,
+		AnalysisIncomplete: cs.InputAnalysisIncomplete,
+	}
+	if cs.InputAnalysisIncomplete {
+		impact.CanSafelyUpdate = false
 	}
 
 	if audit == nil {
+		if cs.InputAnalysisIncomplete {
+			impact.RiskScore = "MEDIUM"
+		}
 		return impact
 	}
 
@@ -298,6 +510,9 @@ func evaluateCallSiteImpact(
 	} else {
 		impact.RiskScore = "LOW"
 	}
+	if impact.AnalysisIncomplete && impact.RiskScore == "LOW" {
+		impact.RiskScore = "MEDIUM"
+	}
 
 	return impact
 }
@@ -350,6 +565,9 @@ func (r *BlastRadiusReport) RenderMarkdown() string {
 			}
 			if len(m.RecreationHazards) > 0 {
 				issues = append(issues, fmt.Sprintf("Recreation hazards: %v", m.RecreationHazards))
+			}
+			if m.AnalysisIncomplete {
+				issues = append(issues, "Some dynamic inputs could not be analyzed")
 			}
 			if len(issues) == 0 {
 				issues = append(issues, "None")

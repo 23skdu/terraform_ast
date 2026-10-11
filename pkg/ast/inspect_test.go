@@ -44,8 +44,9 @@ terraform {
   required_version = ">= 1.5.0"
   required_providers {
     google = {
-      source  = "hashicorp/google"
-      version = ">= 5.0"
+      source                = "hashicorp/google"
+      version               = ">= 5.0"
+      configuration_aliases = [google.west]
     }
   }
 }
@@ -75,6 +76,10 @@ variable "cluster_name" {
   type        = string
   description = "Name of the GKE cluster"
   default     = "production-cluster"
+  validation {
+    condition     = length(var.cluster_name) > 0
+    error_message = "Cluster name must not be empty."
+  }
 }
 
 variable "untyped_var" {
@@ -110,6 +115,7 @@ output "custom_output" {
 	assert.Contains(t, info.RequiredCore, ">= 1.5.0")
 	require.Contains(t, info.RequiredProviders, "google")
 	assert.Equal(t, "hashicorp/google", info.RequiredProviders["google"].Source)
+	assert.Equal(t, []string{"google.west"}, info.RequiredProviders["google"].ConfigurationAliases)
 
 	// Check variables
 	require.Contains(t, info.Variables, "project_id")
@@ -121,6 +127,8 @@ output "custom_output" {
 	assert.False(t, info.Variables["cluster_name"].Required)
 	assert.True(t, info.Variables["cluster_name"].HasDefault)
 	assert.Equal(t, "production-cluster", info.Variables["cluster_name"].Default)
+	assert.Len(t, info.Variables["cluster_name"].ValidationRules, 1)
+	assert.Contains(t, info.Variables["cluster_name"].ValidationRules[0], "length(var.cluster_name)")
 
 	require.Contains(t, info.Variables, "untyped_var")
 	assert.Equal(t, "any", info.Variables["untyped_var"].Type)
@@ -192,4 +200,93 @@ output "no_val" {
 	enrichFromHCLFiles(dir, info2)
 	enrichFromHCLFiles(edgeDir, info2)
 	enrichFromHCLFiles("/non/existent/path/for/read/dir", info2)
+}
+
+func TestInspect_NullabilityAndModuleMetaArguments(t *testing.T) {
+	dir := t.TempDir()
+	source := `
+variable "name" {
+  type     = string
+  nullable = false
+}
+
+module "child" {
+  source   = "./child"
+  for_each = toset(["one"])
+  name     = each.value
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(source), 0644))
+
+	info, err := Inspect(dir)
+	require.NoError(t, err)
+	require.NotNil(t, info.Variables["name"].Nullable)
+	assert.False(t, *info.Variables["name"].Nullable)
+	require.Contains(t, info.ModuleCalls, "child")
+	assert.Equal(t, []string{"name"}, info.ModuleCalls["child"].PassedInputs)
+	assert.NotContains(t, info.ModuleCalls["child"].PassedInputs, "for_each")
+}
+
+func TestInspect_TerraformJSON(t *testing.T) {
+	dir := t.TempDir()
+	source := `{
+  "variable": {
+    "name": {
+      "type": "string",
+      "nullable": false
+    }
+  },
+  "module": {
+    "child": {
+      "source": "./child",
+      "count": 1,
+      "input": "${var.name}"
+    }
+  },
+  "output": {
+    "child_id": {
+      "value": "${module.child[0].id}"
+    },
+    "literal": {
+      "value": "module.child.not_a_reference"
+    }
+  }
+}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf.json"), []byte(source), 0644))
+
+	info, err := Inspect(dir)
+	require.NoError(t, err)
+	require.Contains(t, info.Variables, "name")
+	require.NotNil(t, info.Variables["name"].Nullable)
+	assert.False(t, *info.Variables["name"].Nullable)
+	require.Contains(t, info.ModuleCalls, "child")
+	assert.Equal(t, []string{"input"}, info.ModuleCalls["child"].PassedInputs)
+	assert.Equal(t, `"${var.name}"`, info.ModuleCalls["child"].InputExpressions["input"])
+	require.Contains(t, info.WrapperOutputReferences, "child_id")
+	assert.Equal(t, OutputReference{
+		OutputName:   "child_id",
+		TargetModule: "child",
+		TargetOutput: "id",
+	}, info.WrapperOutputReferences["child_id"])
+	assert.NotContains(t, info.WrapperOutputReferences, "literal")
+}
+
+func TestInspect_CacheDefensiveCopyAndInvalidation(t *testing.T) {
+	dir := t.TempDir()
+	variablesFile := filepath.Join(dir, "variables.tf")
+	require.NoError(t, os.WriteFile(variablesFile, []byte(`variable "name" { type = string }`), 0644))
+
+	first, err := Inspect(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "string", first.Variables["name"].Type)
+	first.Variables["name"] = VariableDef{Name: "name", Type: "mutated"}
+
+	second, err := Inspect(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "string", second.Variables["name"].Type)
+
+	require.NoError(t, os.WriteFile(variablesFile, []byte(`variable "name" { type = number }`), 0644))
+	updated, err := Inspect(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "number", updated.Variables["name"].Type)
 }

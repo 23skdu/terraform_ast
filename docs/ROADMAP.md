@@ -22,6 +22,8 @@ flowchart LR
 **Target Milestone**: `v0.2.0`  
 **Focus**: *Accuracy, signal quality, and enterprise adoption*
 
+**Delivery status**: In progress. The current implementation adds Terraform JSON scanning, module meta-argument handling, variable validation/nullability and provider-alias comparisons, confidence-scored findings, content-fingerprint inspection caching, and Terragrunt consumer scanning. Dynamic Terragrunt input expressions are explicitly reported as incomplete analysis.
+
 #### Objectives
 - **Broader Terraform Coverage**:
   - Expand AST parsing and diffing to handle `dynamic` blocks, `for_each` / `count`, `locals`, validation blocks, provider aliases, and nested expression-heavy configs.

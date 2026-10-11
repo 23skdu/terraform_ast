@@ -11,19 +11,19 @@
 
 ### 🚨 Compatibility Issues (5)
 
-| Category | Target | Description | Remediation |
-| :--- | :--- | :--- | :--- |
-| `BrokenOutputDelegation` | `aws_auth` | Wrapper output 'aws_auth' references module.eks.aws_auth_configmap_yaml, but output 'aws_auth_configmap_yaml' was removed in target upstream v20.0.0 | Update or remove output "aws_auth" in wrapper outputs.tf |
-| `MissingRequiredInput` | `authentication_mode` | Target upstream v20.0.0 requires input 'authentication_mode' (no default), but wrapper call 'eks' does not provide it | Add argument 'authentication_mode = ...' to module "eks" block in wrapper |
-| `PassedRemovedInput` | `legacy_security_group_id` | Wrapper passes argument 'legacy_security_group_id' to child module 'eks', but 'legacy_security_group_id' is not an accepted input in target upstream v20.0.0 | Remove argument 'legacy_security_group_id' from module "eks" block in wrapper |
-| `PassedRemovedInput` | `manage_aws_auth_configmap` | Wrapper passes argument 'manage_aws_auth_configmap' to child module 'eks', but 'manage_aws_auth_configmap' is not an accepted input in target upstream v20.0.0 | Remove argument 'manage_aws_auth_configmap' from module "eks" block in wrapper |
-| `TypeMismatch` | `subnet_ids` | Wrapper variable 'subnet_ids' type 'list(string)' differs from upstream 'set(string)': Type converted from list to set (Terraform automatically coerces list to set, but ordering is not preserved) | Align variable "subnet_ids" with upstream type |
+| Category | Target | Description | Confidence | Remediation |
+| :--- | :--- | :--- | :--- | :--- |
+| `BrokenOutputDelegation` | `aws_auth` | Wrapper output 'aws_auth' references module.eks.aws_auth_configmap_yaml, but output 'aws_auth_configmap_yaml' was removed in target upstream v20.0.0 | 9/10 | Update or remove output "aws_auth" in wrapper outputs.tf |
+| `MissingRequiredInput` | `authentication_mode` | Target upstream v20.0.0 requires input 'authentication_mode' (no default), but wrapper call 'eks' does not provide it | 9/10 | Add argument 'authentication_mode = ...' to module "eks" block in wrapper |
+| `PassedRemovedInput` | `legacy_security_group_id` | Wrapper passes argument 'legacy_security_group_id' to child module 'eks', but 'legacy_security_group_id' is not an accepted input in target upstream v20.0.0 | 9/10 | Remove argument 'legacy_security_group_id' from module "eks" block in wrapper |
+| `PassedRemovedInput` | `manage_aws_auth_configmap` | Wrapper passes argument 'manage_aws_auth_configmap' to child module 'eks', but 'manage_aws_auth_configmap' is not an accepted input in target upstream v20.0.0 | 9/10 | Remove argument 'manage_aws_auth_configmap' from module "eks" block in wrapper |
+| `TypeMismatch` | `subnet_ids` | Wrapper variable 'subnet_ids' type 'list(string)' differs from upstream 'set(string)': Type converted from list to set (Terraform automatically coerces list to set, but ordering is not preserved) | 8/10 | Align variable "subnet_ids" with upstream type |
 
 ### 💡 Available Upstream Features (3)
 
-| Category | Target | Description |
-| :--- | :--- | :--- |
-| `OptionalVariableAvailable` | `cluster_endpoint_public_access` | New optional upstream parameter 'cluster_endpoint_public_access' (type bool) can be exposed in wrapper |
-| `OptionalVariableAvailable` | `cluster_version` | New optional upstream parameter 'cluster_version' (type string) can be exposed in wrapper |
-| `OptionalVariableAvailable` | `enable_cluster_creator_admin_permissions` | New optional upstream parameter 'enable_cluster_creator_admin_permissions' (type bool) can be exposed in wrapper |
+| Category | Target | Description | Confidence |
+| :--- | :--- | :--- | :--- |
+| `OptionalVariableAvailable` | `cluster_endpoint_public_access` | New optional upstream parameter 'cluster_endpoint_public_access' (type bool) can be exposed in wrapper | 9/10 |
+| `OptionalVariableAvailable` | `cluster_version` | New optional upstream parameter 'cluster_version' (type string) can be exposed in wrapper | 9/10 |
+| `OptionalVariableAvailable` | `enable_cluster_creator_admin_permissions` | New optional upstream parameter 'enable_cluster_creator_admin_permissions' (type bool) can be exposed in wrapper | 9/10 |
 

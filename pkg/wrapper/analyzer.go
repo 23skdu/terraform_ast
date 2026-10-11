@@ -12,29 +12,30 @@ import (
 
 // WrapperIssue represents a specific compatibility issue found in the wrapper module.
 type WrapperIssue struct {
-	Severity    diff.ChangeSeverity `json:"severity"`
-	Category    string              `json:"category"`
-	Target      string              `json:"target"`
-	Description string              `json:"description"`
-	Remediation string              `json:"remediation"`
+	Severity        diff.ChangeSeverity `json:"severity"`
+	ConfidenceScore int                 `json:"confidence_score"`
+	Category        string              `json:"category"`
+	Target          string              `json:"target"`
+	Description     string              `json:"description"`
+	Remediation     string              `json:"remediation"`
 }
 
 // WrapperCompatibilityReport contains the verdict and findings for updating a wrapper module.
 type WrapperCompatibilityReport struct {
-	WrapperPath          string             `json:"wrapper_path"`
-	TargetModuleName     string             `json:"target_module_name"`
-	TargetVersion        string             `json:"target_version"`
-	PinnedVersion        string             `json:"pinned_version,omitempty"`
-	CanSafelyUpdate      bool               `json:"can_safely_update"`
-	Verdict              string             `json:"verdict"`
-	Issues               []WrapperIssue     `json:"issues"`
-	NewFeatureAdoptions  []WrapperIssue     `json:"new_feature_adoptions"`
-	UpstreamDiff         *diff.DiffReport   `json:"upstream_diff,omitempty"`
-	RecommendedPin       string             `json:"recommended_pin"`
-	RemediationSteps     []string           `json:"remediation_steps"`
-	TotalBreaking        int                `json:"total_breaking"`
-	TotalWarnings        int                `json:"total_warnings"`
-	Summary              string             `json:"summary"`
+	WrapperPath         string           `json:"wrapper_path"`
+	TargetModuleName    string           `json:"target_module_name"`
+	TargetVersion       string           `json:"target_version"`
+	PinnedVersion       string           `json:"pinned_version,omitempty"`
+	CanSafelyUpdate     bool             `json:"can_safely_update"`
+	Verdict             string           `json:"verdict"`
+	Issues              []WrapperIssue   `json:"issues"`
+	NewFeatureAdoptions []WrapperIssue   `json:"new_feature_adoptions"`
+	UpstreamDiff        *diff.DiffReport `json:"upstream_diff,omitempty"`
+	RecommendedPin      string           `json:"recommended_pin"`
+	RemediationSteps    []string         `json:"remediation_steps"`
+	TotalBreaking       int              `json:"total_breaking"`
+	TotalWarnings       int              `json:"total_warnings"`
+	Summary             string           `json:"summary"`
 }
 
 // AnalyzeWrapper verifies whether a wrapper module can safely update and pin to targetUpstream.
@@ -47,10 +48,10 @@ func AnalyzeWrapper(
 ) *WrapperCompatibilityReport {
 	if wrapperMod == nil {
 		wrapperMod = &ast.ModuleInfo{
-			Variables:                make(map[string]ast.VariableDef),
-			Outputs:                  make(map[string]ast.OutputDef),
-			ModuleCalls:              make(map[string]ast.ModuleCallDef),
-			WrapperOutputReferences:  make(map[string]ast.OutputReference),
+			Variables:               make(map[string]ast.VariableDef),
+			Outputs:                 make(map[string]ast.OutputDef),
+			ModuleCalls:             make(map[string]ast.ModuleCallDef),
+			WrapperOutputReferences: make(map[string]ast.OutputReference),
 		}
 	}
 	if targetUpstream == nil {
@@ -123,6 +124,18 @@ func AnalyzeWrapper(
 	// 4. Check wrapper variable type consistency against target upstream
 	for varName, wVar := range wrapperMod.Variables {
 		if upVar, exists := targetUpstream.Variables[varName]; exists {
+			wrapperNullable := wVar.Nullable == nil || *wVar.Nullable
+			upstreamNullable := upVar.Nullable == nil || *upVar.Nullable
+			if wrapperNullable && !upstreamNullable {
+				report.Issues = append(report.Issues, WrapperIssue{
+					Severity:    diff.SeverityBreaking,
+					Category:    "VariableNullability",
+					Target:      varName,
+					Description: fmt.Sprintf("Wrapper variable '%s' accepts null, but upstream no longer does", varName),
+					Remediation: fmt.Sprintf("Reject null values for variable \"%s\" in the wrapper", varName),
+				})
+			}
+
 			typeCompat := ast.CheckTypeCompatibility(wVar.Type, upVar.Type)
 			if typeCompat.IsBreaking {
 				report.Issues = append(report.Issues, WrapperIssue{
@@ -177,6 +190,9 @@ func AnalyzeWrapper(
 		}
 	}
 
+	scoreIssueConfidence(report.Issues)
+	scoreIssueConfidence(report.NewFeatureAdoptions)
+
 	// Sort issues deterministically
 	sortIssues(report.Issues)
 	sortIssues(report.NewFeatureAdoptions)
@@ -214,6 +230,17 @@ func AnalyzeWrapper(
 	}
 
 	return report
+}
+
+func scoreIssueConfidence(issues []WrapperIssue) {
+	for i := range issues {
+		switch issues[i].Category {
+		case "TypeMismatch":
+			issues[i].ConfidenceScore = 8
+		default:
+			issues[i].ConfidenceScore = 9
+		}
+	}
 }
 
 func sortIssues(issues []WrapperIssue) {

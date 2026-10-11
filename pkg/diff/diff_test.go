@@ -5,6 +5,7 @@ import (
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCompare_NilInputs(t *testing.T) {
@@ -203,4 +204,101 @@ func TestCompare_SafeTransition(t *testing.T) {
 	assert.Equal(t, 0, report.TotalWarnings)
 	assert.Equal(t, 1, report.TotalNewFeatures)
 	assert.Contains(t, report.Summary, "SAFE TO UPDATE")
+}
+
+func TestCompare_NullabilityAndOutputTypeChanges(t *testing.T) {
+	oldNullable := true
+	newNullable := false
+	oldMod := &ast.ModuleInfo{
+		Variables: map[string]ast.VariableDef{
+			"input": {Name: "input", Type: "string", Nullable: &oldNullable},
+			"items": {Name: "items", Type: "list(string)"},
+		},
+		Outputs: map[string]ast.OutputDef{
+			"items": {Name: "items", Type: "list(string)"},
+		},
+	}
+	newMod := &ast.ModuleInfo{
+		Variables: map[string]ast.VariableDef{
+			"input": {Name: "input", Type: "string", Nullable: &newNullable},
+			"items": {Name: "items", Type: "set(string)"},
+		},
+		Outputs: map[string]ast.OutputDef{
+			"items": {Name: "items", Type: "any"},
+		},
+	}
+
+	report := Compare(oldMod, newMod, "1.0.0", "1.1.0")
+	require.Equal(t, 1, report.TotalBreaking)
+	assert.Equal(t, "VariableNullability", report.BreakingChanges[0].Category)
+	assert.Equal(t, 9, report.BreakingChanges[0].ConfidenceScore)
+	assert.Equal(t, 2, report.TotalWarnings)
+	assert.Equal(t, "OutputType", report.Warnings[0].Category)
+	assert.Equal(t, 8, report.Warnings[0].ConfidenceScore)
+	assert.Equal(t, 8, report.Warnings[1].ConfidenceScore)
+	assert.Equal(t, "BREAKING_CHANGES", report.Verdict)
+	assert.False(t, report.CanSafelyUpdate)
+}
+
+func TestCompare_NullabilityWideningWarning(t *testing.T) {
+	oldNullable := false
+	newNullable := true
+	oldMod := &ast.ModuleInfo{
+		Variables: map[string]ast.VariableDef{
+			"input": {Name: "input", Type: "string", Nullable: &oldNullable},
+		},
+	}
+	newMod := &ast.ModuleInfo{
+		Variables: map[string]ast.VariableDef{
+			"input": {Name: "input", Type: "string", Nullable: &newNullable},
+		},
+	}
+
+	report := Compare(oldMod, newMod, "1.0.0", "1.1.0")
+	assert.Equal(t, 1, report.TotalWarnings)
+	assert.Equal(t, "VariableNullability", report.Warnings[0].Category)
+	assert.True(t, report.CanSafelyUpdate)
+}
+
+func TestCompare_ValidationAndProviderAliasChanges(t *testing.T) {
+	oldMod := &ast.ModuleInfo{
+		Variables: map[string]ast.VariableDef{
+			"region": {
+				Name:            "region",
+				Type:            "string",
+				ValidationRules: []string{`contains(["us-east-1"], var.region)`},
+			},
+		},
+		RequiredProviders: map[string]ast.ProviderRequirement{
+			"aws": {
+				Name:                 "aws",
+				Source:               "hashicorp/aws",
+				ConfigurationAliases: []string{"aws.west"},
+			},
+		},
+	}
+	newMod := &ast.ModuleInfo{
+		Variables: map[string]ast.VariableDef{
+			"region": {
+				Name:            "region",
+				Type:            "string",
+				ValidationRules: []string{`contains(["us-east-1", "us-west-2"], var.region)`},
+			},
+		},
+		RequiredProviders: map[string]ast.ProviderRequirement{
+			"aws": {
+				Name:                 "aws",
+				Source:               "hashicorp/aws",
+				ConfigurationAliases: []string{"aws.west", "aws.east"},
+			},
+		},
+	}
+
+	report := Compare(oldMod, newMod, "1.0.0", "1.1.0")
+	require.Equal(t, 1, report.TotalBreaking)
+	assert.Equal(t, "ProviderConfigurationAlias", report.BreakingChanges[0].Category)
+	assert.Equal(t, 9, report.BreakingChanges[0].ConfidenceScore)
+	require.Equal(t, 1, report.TotalWarnings)
+	assert.Equal(t, "VariableValidation", report.Warnings[0].Category)
+	assert.Equal(t, 6, report.Warnings[0].ConfidenceScore)
 }

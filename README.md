@@ -10,10 +10,11 @@
 
 ## Key Features
 
-- **AST Inspection & Parsing**: Uses [`github.com/hashicorp/terraform-config-inspect`](https://github.com/hashicorp/terraform-config-inspect) and HCL parsing to extract variables, outputs, module calls, provider requirements, and type constraints.
+- **AST Inspection & Parsing**: Uses [`github.com/hashicorp/terraform-config-inspect`](https://github.com/hashicorp/terraform-config-inspect) and HCL parsing to extract variables, outputs, module calls, provider requirements and aliases, validation rules, and type constraints from both `.tf` and `.tf.json` files. Module meta-arguments are excluded from forwarded input analysis, and statically declared variable nullability is tracked.
 - **Terraform Registry Protocol**: Directly downloads and inspects modules from the Terraform Registry (e.g. `terraform-google-modules/kubernetes-engine/google`, `terraform-aws-modules/eks/aws`).
 - **Deep Structural Object Schema Diffing**: Analyzes nested `object({ ... })` type constraints attribute-by-attribute (attribute additions, removals, optional-to-required transitions, and type shifts).
-- **Blast-Radius & Consumer Analysis**: Recursively scans downstream root modules and environment directories to evaluate consumer-level impact (`--blast-radius ./environments`).
+- **Blast-Radius & Consumer Analysis**: Recursively scans Terraform root modules and Terragrunt `terragrunt.hcl` configurations to evaluate consumer-level impact (`--blast-radius ./environments`).
+- **Confidence-Scored Findings & Incremental Inspection**: Adds per-finding confidence scores to reports and reuses module inspections while source files remain unchanged; edits invalidate cached results.
 - **State Destruction & Recreation Heuristics**: Flags `ForceNew` destruction hazards on critical immutable cloud resources (GKE cluster name, project ID, location, secondary subnet CIDRs, EKS cluster name, VPC ID).
 - **OASIS SARIF v2.1.0 Export**: Generates industry-standard SARIF reports (`--format sarif`) for direct integration with GitHub Code Scanning.
 - **Git Optimization & In-Memory Caching**: Implements shallow cloning (`--depth 1`) and thread-safe repository caching to maximize analysis speed.

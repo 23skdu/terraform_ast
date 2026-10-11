@@ -1,0 +1,12 @@
+{
+  "variable": {
+    "input": {
+      "type": "string"
+    }
+  },
+  "output": {
+    "id": {
+      "value": "${var.input}"
+    }
+  }
+}

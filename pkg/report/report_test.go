@@ -116,6 +116,27 @@ func TestRenderMarkdown(t *testing.T) {
 	assert.Contains(t, outSafe, "[!NOTE]")
 }
 
+func TestConfidenceScoresAreRendered(t *testing.T) {
+	report := sampleDiffReport()
+	report.BreakingChanges[0].ConfidenceScore = 9
+	report.NewFeatures[0].ConfidenceScore = 9
+	report.Warnings[0].ConfidenceScore = 7
+
+	text := RenderText(report)
+	assert.Contains(t, text, "confidence: 9/10")
+	assert.Contains(t, text, "confidence: 7/10")
+	markdown := RenderMarkdown(report)
+	assert.Contains(t, markdown, "Confidence")
+	assert.Contains(t, markdown, "9/10")
+
+	jsonBytes, err := RenderJSON(report)
+	require.NoError(t, err)
+	assert.Contains(t, string(jsonBytes), `"confidence_score": 9`)
+	sarifBytes, err := RenderSARIF(report)
+	require.NoError(t, err)
+	assert.Contains(t, string(sarifBytes), "Confidence: 9/10")
+}
+
 func TestRenderJSON(t *testing.T) {
 	r := sampleDiffReport()
 	data, err := RenderJSON(r)

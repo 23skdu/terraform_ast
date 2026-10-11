@@ -115,6 +115,101 @@ output "net_tag" {
 	assert.True(t, nilAuditReport.CanSafelyUpdateAll)
 }
 
+func TestScanDirectory_TerragruntConsumer(t *testing.T) {
+	searchDir := t.TempDir()
+	envDir := filepath.Join(searchDir, "prod")
+	require.NoError(t, os.MkdirAll(envDir, 0750))
+	terragruntConfig := `
+terraform {
+  source = "../modules/gke_wrapper"
+}
+
+inputs = {
+  removed_input = "value"
+  cluster_name      = "prod"
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(envDir, "terragrunt.hcl"), []byte(terragruntConfig), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(envDir, "other.hcl"), []byte(terragruntConfig), 0600))
+
+	audit := &wrapper.WrapperCompatibilityReport{
+		Issues: []wrapper.WrapperIssue{
+			{
+				Category:    "PassedRemovedInput",
+				Target:      "removed_input",
+				Severity:    diff.SeverityBreaking,
+				Description: "Input was removed",
+			},
+		},
+	}
+	report, err := ScanDirectory(searchDir, "gke_wrapper", nil, audit)
+	require.NoError(t, err)
+	require.Equal(t, 1, report.TotalCallSitesScanned)
+	assert.False(t, report.CanSafelyUpdateAll)
+	assert.Equal(t, "HIGH", report.HighestRisk)
+	assert.Equal(t, "prod", report.ImpactedRootModules[0].ModuleName)
+	assert.Equal(t, []string{"removed_input"}, report.ImpactedRootModules[0].RemovedInputsPassed)
+}
+
+func TestScanDirectory_TerragruntDynamicInputsAreNotReportedSafe(t *testing.T) {
+	searchDir := t.TempDir()
+	envDir := filepath.Join(searchDir, "prod")
+	require.NoError(t, os.MkdirAll(envDir, 0750))
+	terragruntConfig := `
+terraform {
+  source = "../modules/gke_wrapper"
+}
+
+inputs = merge(local.defaults, { removed_input = "value" })
+`
+	require.NoError(t, os.WriteFile(filepath.Join(envDir, "terragrunt.hcl"), []byte(terragruntConfig), 0600))
+
+	report, err := ScanDirectory(searchDir, "gke_wrapper", nil, &wrapper.WrapperCompatibilityReport{})
+	require.NoError(t, err)
+	require.Equal(t, 1, report.TotalCallSitesScanned)
+	assert.False(t, report.CanSafelyUpdateAll)
+	assert.True(t, report.ImpactedRootModules[0].AnalysisIncomplete)
+	assert.Equal(t, "MEDIUM", report.HighestRisk)
+}
+
+func TestScanDirectory_TerraformJSONConsumer(t *testing.T) {
+	searchDir := t.TempDir()
+	consumerDir := filepath.Join(searchDir, "consumer")
+	targetDir := filepath.Join(searchDir, "modules", "gke_wrapper")
+	require.NoError(t, os.MkdirAll(consumerDir, 0750))
+	require.NoError(t, os.MkdirAll(targetDir, 0750))
+	consumerConfig := `{
+  "module": {
+    "my_gke": {
+      "source": "../modules/gke_wrapper",
+      "count": 1,
+      "removed_input": "value"
+    }
+  },
+  "output": {
+    "network_tag": {
+      "value": "${module.my_gke[0].legacy_network_tag}"
+    },
+    "literal": {
+      "value": "module.my_gke.not_a_reference"
+    }
+  }
+}`
+	require.NoError(t, os.WriteFile(filepath.Join(consumerDir, "main.tf.json"), []byte(consumerConfig), 0600))
+	audit := &wrapper.WrapperCompatibilityReport{
+		Issues: []wrapper.WrapperIssue{
+			{Category: "PassedRemovedInput", Target: "removed_input", Severity: diff.SeverityBreaking, Description: "removed input"},
+			{Category: "Output", Target: "legacy_network_tag", Severity: diff.SeverityBreaking, Description: "output was removed"},
+		},
+	}
+	report, err := ScanDirectory(searchDir, targetDir, nil, audit)
+	require.NoError(t, err)
+	require.Equal(t, 1, report.TotalCallSitesScanned)
+	assert.Equal(t, []string{"removed_input"}, report.ImpactedRootModules[0].RemovedInputsPassed)
+	assert.Equal(t, []string{"legacy_network_tag"}, report.ImpactedRootModules[0].RemovedOutputsReferenced)
+	assert.Equal(t, "CRITICAL", report.HighestRisk)
+}
+
 func TestRiskRank(t *testing.T) {
 	assert.Equal(t, 4, riskRank("CRITICAL"))
 	assert.Equal(t, 3, riskRank("HIGH"))
@@ -129,6 +224,19 @@ func TestIsMatchingSource(t *testing.T) {
 	assert.True(t, isMatchingSource(caller, "../modules/vpc", "vpc"))
 	assert.True(t, isMatchingSource(caller, "./submod", "/repos/app/submod"))
 	assert.False(t, isMatchingSource(caller, "hashicorp/consul", "my-vpc"))
+}
+
+func TestExtractModuleReferencesUsesExpressions(t *testing.T) {
+	src := []byte(`
+# module.consumer.fake_comment
+locals {
+  note = "module.consumer.fake_string"
+}
+output "actual" {
+  value = module.consumer.real_output
+}
+`)
+	assert.Equal(t, map[string][]string{"consumer": {"real_output"}}, extractModuleReferences(src))
 }
 
 func TestScanDirectory_FilteringAndErrors(t *testing.T) {

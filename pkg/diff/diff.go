@@ -45,6 +45,8 @@ func Compare(oldMod, newMod *ast.ModuleInfo, oldVer, newVer string) *DiffReport 
 	// 3. Compare Providers and Core Requirements
 	compareRequirements(oldMod, newMod, report)
 
+	scoreConfidence(report)
+
 	// Sort slices deterministically for stable reporting and golden testing
 	sortDifferences(report.BreakingChanges)
 	sortDifferences(report.NewFeatures)
@@ -58,6 +60,52 @@ func Compare(oldMod, newMod *ast.ModuleInfo, oldVer, newVer string) *DiffReport 
 	computeVerdict(report)
 
 	return report
+}
+
+func scoreConfidence(report *DiffReport) {
+	for i := range report.BreakingChanges {
+		report.BreakingChanges[i].ConfidenceScore = 9
+	}
+	for i := range report.NewFeatures {
+		report.NewFeatures[i].ConfidenceScore = 9
+	}
+	for i := range report.Warnings {
+		switch report.Warnings[i].Category {
+		case "TerraformCore", "ProviderRequirement":
+			report.Warnings[i].ConfidenceScore = 7
+		case "VariableValidation":
+			report.Warnings[i].ConfidenceScore = 6
+		case "VariableType", "OutputType":
+			report.Warnings[i].ConfidenceScore = 8
+		default:
+			report.Warnings[i].ConfidenceScore = 9
+		}
+	}
+}
+
+func makeStringSet(values []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		set[value] = struct{}{}
+	}
+	return set
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftSet := makeStringSet(left)
+	rightSet := makeStringSet(right)
+	if len(leftSet) != len(rightSet) {
+		return false
+	}
+	for value := range leftSet {
+		if _, exists := rightSet[value]; !exists {
+			return false
+		}
+	}
+	return true
 }
 
 func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
@@ -100,6 +148,18 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			})
 		}
 
+		if !sameStrings(oldVar.ValidationRules, newVar.ValidationRules) {
+			report.Warnings = append(report.Warnings, DifferenceItem{
+				Category:    "VariableValidation",
+				Name:        name,
+				Severity:    SeverityWarning,
+				Description: fmt.Sprintf("Validation rules for variable '%s' changed", name),
+				OldValue:    strings.Join(oldVar.ValidationRules, "; "),
+				NewValue:    strings.Join(newVar.ValidationRules, "; "),
+				Remediation: "Review accepted values and validation behavior before upgrading",
+			})
+		}
+
 		// Check if previously optional input became required
 		if oldVar.HasDefault && (!newVar.HasDefault && newVar.Required) {
 			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
@@ -110,6 +170,30 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				OldValue:    "optional with default",
 				NewValue:    "required without default",
 				Remediation: fmt.Sprintf("Explicitly supply a value for '%s' in the wrapper module call", name),
+			})
+		}
+
+		oldNullable := oldVar.Nullable == nil || *oldVar.Nullable
+		newNullable := newVar.Nullable == nil || *newVar.Nullable
+		if oldNullable && !newNullable {
+			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				Category:    "VariableNullability",
+				Name:        name,
+				Severity:    SeverityBreaking,
+				Description: fmt.Sprintf("Variable '%s' no longer accepts null values", name),
+				OldValue:    "nullable=true",
+				NewValue:    "nullable=false",
+				Remediation: fmt.Sprintf("Ensure callers provide a non-null value for '%s'", name),
+			})
+		} else if !oldNullable && newNullable {
+			report.Warnings = append(report.Warnings, DifferenceItem{
+				Category:    "VariableNullability",
+				Name:        name,
+				Severity:    SeverityWarning,
+				Description: fmt.Sprintf("Variable '%s' now accepts null values", name),
+				OldValue:    "nullable=false",
+				NewValue:    "nullable=true",
+				Remediation: "Verify null values are handled safely by the module",
 			})
 		}
 
@@ -195,6 +279,16 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					NewValue:    newOut.Type,
 					Remediation: fmt.Sprintf("Update downstream references to output '%s' to expect '%s'", name, newOut.Type),
 				})
+			} else {
+				report.Warnings = append(report.Warnings, DifferenceItem{
+					Category:    "OutputType",
+					Name:        name,
+					Severity:    SeverityWarning,
+					Description: fmt.Sprintf("Output '%s' type constraint changed: %s", name, typeCompat.Reason),
+					OldValue:    oldOut.Type,
+					NewValue:    newOut.Type,
+					Remediation: "Verify downstream consumers remain compatible with the changed output type",
+				})
 			}
 		}
 
@@ -268,6 +362,43 @@ func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Remediation: "Verify wrapper still satisfies provider dependencies",
 			})
 		} else {
+			oldAliases := makeStringSet(oldReq.ConfigurationAliases)
+			newAliases := makeStringSet(newReq.ConfigurationAliases)
+			for alias := range newAliases {
+				if _, exists := oldAliases[alias]; !exists {
+					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+						Category:    "ProviderConfigurationAlias",
+						Name:        alias,
+						Severity:    SeverityBreaking,
+						Description: fmt.Sprintf("Provider configuration alias '%s' is newly required by upstream", alias),
+						Remediation: fmt.Sprintf("Pass a provider configuration for alias '%s' to the module call", alias),
+					})
+				}
+			}
+			for alias := range oldAliases {
+				if _, exists := newAliases[alias]; !exists {
+					report.Warnings = append(report.Warnings, DifferenceItem{
+						Category:    "ProviderConfigurationAlias",
+						Name:        alias,
+						Severity:    SeverityWarning,
+						Description: fmt.Sprintf("Provider configuration alias '%s' is no longer declared by upstream", alias),
+						Remediation: "Verify provider mappings in parent modules remain valid",
+					})
+				}
+			}
+
+			if oldReq.Source != "" && newReq.Source != "" && oldReq.Source != newReq.Source {
+				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					Category:    "ProviderSource",
+					Name:        name,
+					Severity:    SeverityBreaking,
+					Description: fmt.Sprintf("Provider '%s' source changed from '%s' to '%s'", name, oldReq.Source, newReq.Source),
+					OldValue:    oldReq.Source,
+					NewValue:    newReq.Source,
+					Remediation: "Verify provider configuration and state compatibility for the new provider source",
+				})
+			}
+
 			oldC := strings.Join(oldReq.VersionConstraints, ", ")
 			newC := strings.Join(newReq.VersionConstraints, ", ")
 			if oldC != newC {

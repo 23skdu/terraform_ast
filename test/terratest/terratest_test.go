@@ -33,6 +33,7 @@ func TestTerratest_ValidateFixtures(t *testing.T) {
 		"../fixtures/downstream_consumer",
 		"../fixtures/object_schema_v1",
 		"../fixtures/object_schema_v2",
+		"../fixtures/json_module",
 	}
 
 	for _, relDir := range fixtureDirs {
@@ -51,6 +52,40 @@ func TestTerratest_ValidateFixtures(t *testing.T) {
 			terraform.InitAndValidate(t, opts)
 		})
 	}
+}
+
+func TestTerratest_TerraformJSONInspection(t *testing.T) {
+	dir, err := filepath.Abs("../fixtures/json_module")
+	require.NoError(t, err)
+	opts := &terraform.Options{TerraformDir: dir, NoColor: true}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(filepath.Join(dir, ".terraform"))
+		_ = os.Remove(filepath.Join(dir, ".terraform.lock.hcl"))
+	})
+	terraform.InitAndValidate(t, opts)
+
+	info, err := ast.Inspect(dir)
+	require.NoError(t, err)
+	require.Contains(t, info.Variables, "value")
+	require.Contains(t, info.ModuleCalls, "child")
+	assert.Equal(t, []string{"input"}, info.ModuleCalls["child"].PassedInputs)
+	require.Contains(t, info.WrapperOutputReferences, "child_id")
+	assert.Equal(t, "id", info.WrapperOutputReferences["child_id"].TargetOutput)
+
+	blastReport, err := blastradius.ScanDirectory(dir, filepath.Join(dir, "child"), nil, &wrapper.WrapperCompatibilityReport{
+		Issues: []wrapper.WrapperIssue{
+			{
+				Category:    "Output",
+				Target:      "id",
+				Severity:    diff.SeverityBreaking,
+				Description: "Output was removed",
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, blastReport.TotalCallSitesScanned)
+	assert.Equal(t, "CRITICAL", blastReport.HighestRisk)
+	assert.Equal(t, []string{"id"}, blastReport.ImpactedRootModules[0].RemovedOutputsReferenced)
 }
 
 // TestGKE_ASTDiffAndGolden verifies GKE upstream diff against golden images.
@@ -480,5 +515,3 @@ func TestTerratest_WrapperRecreationHazardsAndSARIF(t *testing.T) {
 	assert.Contains(t, string(sarifBytes), "TF-DIFF-BREAKING-CHANGE")
 	assert.Contains(t, string(sarifBytes), "PassedRemovedInput")
 }
-
-

@@ -1,0 +1,20 @@
+{
+  "variable": {
+    "value": {
+      "type": "string",
+      "default": "fixture"
+    }
+  },
+  "module": {
+    "child": {
+      "source": "./child",
+      "count": 1,
+      "input": "${var.value}"
+    }
+  },
+  "output": {
+    "child_id": {
+      "value": "${module.child[0].id}"
+    }
+  }
+}

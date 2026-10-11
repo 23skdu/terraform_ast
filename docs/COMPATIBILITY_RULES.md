@@ -36,6 +36,16 @@ A breaking change is any modification that will prevent existing wrapper code or
   ```
 - **Remediation**: Align wrapper variable types and values with upstream expectations.
 
+### Nullability Changes
+- **Condition**: An existing input changes from `nullable = true` (Terraform's default) to `nullable = false`.
+- **Impact**: Existing callers that provide null may fail validation or module evaluation.
+- **Verdict**: Breaking when null is disallowed; changing from non-nullable to nullable is reported as a warning because module behavior may change.
+
+### Variable Validation Rule Changes
+- **Condition**: A variable's `validation` condition or error message changes.
+- **Impact**: The module may begin rejecting values that previously worked, or stop rejecting invalid values.
+- **Verdict**: `WARNING`, because static comparison cannot reliably determine whether an arbitrary expression became stricter or more permissive.
+
 ### Removed Outputs
 - **Condition**: An output present in version $N$ is omitted in version $N+1$.
 - **Impact**: Any wrapper module or downstream root module referencing `module.<name>.<output>` fails to evaluate:
@@ -90,6 +100,12 @@ Subtle behavioral shifts that do not break the HCL parser but may require operat
 
 ### Provider & Core Requirement Shifts
 - **Condition**: Upstream updates minimum Terraform core version (e.g. `>= 1.3.0` to `>= 1.5.0`) or updates provider constraint boundaries.
+- A newly declared `configuration_aliases` entry or provider source change is treated as breaking because callers may need different provider mappings.
+
+### Confidence Scores
+- Every diff and wrapper finding includes a `confidence_score` from 1 to 10 in machine-readable reports and human-readable output.
+- Scores estimate certainty that the analyzer's extracted declaration change is real, not the operational impact of the finding.
+- Exact input/output API changes are scored 9/10; type compatibility judgments are 8/10; provider and Terraform Core constraint shifts are 7/10 because the effective result depends on the consumer's selected versions; arbitrary validation-rule changes are scored 6/10 because static analysis cannot determine their full acceptance set.
 
 ---
 
@@ -121,4 +137,3 @@ When comparing input variables or outputs typed as complex structural objects (`
 ### Optional Attribute Introduction
 - **Condition**: An attribute is added with `optional(type, default)`.
 - **Verdict**: `NEW_FEATURE` (backwards-compatible expansion).
-

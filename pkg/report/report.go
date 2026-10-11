@@ -32,7 +32,7 @@ func RenderText(r *diff.DiffReport) string {
 	if len(r.BreakingChanges) > 0 {
 		sb.WriteString(fmt.Sprintf("🚨 BREAKING CHANGES (%d):\n", len(r.BreakingChanges)))
 		for _, item := range r.BreakingChanges {
-			sb.WriteString(fmt.Sprintf("  • [%s] %s: %s\n", item.Category, item.Name, item.Description))
+			sb.WriteString(fmt.Sprintf("  • [%s] %s: %s%s\n", item.Category, item.Name, item.Description, confidenceSuffix(item.ConfidenceScore)))
 			if item.Remediation != "" {
 				sb.WriteString(fmt.Sprintf("    Remediation: %s\n", item.Remediation))
 			}
@@ -43,7 +43,7 @@ func RenderText(r *diff.DiffReport) string {
 	if len(r.NewFeatures) > 0 {
 		sb.WriteString(fmt.Sprintf("✨ NEW FEATURES (%d):\n", len(r.NewFeatures)))
 		for _, item := range r.NewFeatures {
-			sb.WriteString(fmt.Sprintf("  • [%s] %s: %s\n", item.Category, item.Name, item.Description))
+			sb.WriteString(fmt.Sprintf("  • [%s] %s: %s%s\n", item.Category, item.Name, item.Description, confidenceSuffix(item.ConfidenceScore)))
 		}
 		sb.WriteString("\n")
 	}
@@ -51,7 +51,7 @@ func RenderText(r *diff.DiffReport) string {
 	if len(r.Warnings) > 0 {
 		sb.WriteString(fmt.Sprintf("⚠️  WARNINGS & NON-BREAKING CHANGES (%d):\n", len(r.Warnings)))
 		for _, item := range r.Warnings {
-			sb.WriteString(fmt.Sprintf("  • [%s] %s: %s\n", item.Category, item.Name, item.Description))
+			sb.WriteString(fmt.Sprintf("  • [%s] %s: %s%s\n", item.Category, item.Name, item.Description, confidenceSuffix(item.ConfidenceScore)))
 			if item.Remediation != "" {
 				sb.WriteString(fmt.Sprintf("    Remediation: %s\n", item.Remediation))
 			}
@@ -84,35 +84,49 @@ func RenderMarkdown(r *diff.DiffReport) string {
 
 	if len(r.BreakingChanges) > 0 {
 		sb.WriteString(fmt.Sprintf("### 🚨 Breaking Changes (%d)\n\n", len(r.BreakingChanges)))
-		sb.WriteString("| Category | Name | Description | Remediation |\n")
-		sb.WriteString("| :--- | :--- | :--- | :--- |\n")
+		sb.WriteString("| Category | Name | Description | Confidence | Remediation |\n")
+		sb.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")
 		for _, item := range r.BreakingChanges {
-			sb.WriteString(fmt.Sprintf("| `%s` | `%s` | %s | %s |\n", item.Category, item.Name, item.Description, item.Remediation))
+			sb.WriteString(fmt.Sprintf("| `%s` | `%s` | %s | %s | %s |\n", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore), item.Remediation))
 		}
 		sb.WriteString("\n")
 	}
 
 	if len(r.NewFeatures) > 0 {
 		sb.WriteString(fmt.Sprintf("### ✨ New Features (%d)\n\n", len(r.NewFeatures)))
-		sb.WriteString("| Category | Name | Description |\n")
-		sb.WriteString("| :--- | :--- | :--- |\n")
+		sb.WriteString("| Category | Name | Description | Confidence |\n")
+		sb.WriteString("| :--- | :--- | :--- | :--- |\n")
 		for _, item := range r.NewFeatures {
-			sb.WriteString(fmt.Sprintf("| `%s` | `%s` | %s |\n", item.Category, item.Name, item.Description))
+			sb.WriteString(fmt.Sprintf("| `%s` | `%s` | %s | %s |\n", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore)))
 		}
 		sb.WriteString("\n")
 	}
 
 	if len(r.Warnings) > 0 {
 		sb.WriteString(fmt.Sprintf("### ⚠️ Warnings (%d)\n\n", len(r.Warnings)))
-		sb.WriteString("| Category | Name | Description | Remediation |\n")
-		sb.WriteString("| :--- | :--- | :--- | :--- |\n")
+		sb.WriteString("| Category | Name | Description | Confidence | Remediation |\n")
+		sb.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")
 		for _, item := range r.Warnings {
-			sb.WriteString(fmt.Sprintf("| `%s` | `%s` | %s | %s |\n", item.Category, item.Name, item.Description, item.Remediation))
+			sb.WriteString(fmt.Sprintf("| `%s` | `%s` | %s | %s | %s |\n", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore), item.Remediation))
 		}
 		sb.WriteString("\n")
 	}
 
 	return sb.String()
+}
+
+func confidenceText(score int) string {
+	if score <= 0 {
+		return "Not scored"
+	}
+	return fmt.Sprintf("%d/10", score)
+}
+
+func confidenceSuffix(score int) string {
+	if score <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (confidence: %d/10)", score)
 }
 
 // RenderJSON serializes a DiffReport into JSON bytes.
@@ -140,7 +154,7 @@ func RenderWrapperText(w *wrapper.WrapperCompatibilityReport) string {
 	if len(w.Issues) > 0 {
 		sb.WriteString(fmt.Sprintf("🚨 WRAPPER ISSUES (%d):\n", len(w.Issues)))
 		for _, iss := range w.Issues {
-			sb.WriteString(fmt.Sprintf("  • [%s] %s: %s\n", iss.Category, iss.Target, iss.Description))
+			sb.WriteString(fmt.Sprintf("  • [%s] %s: %s%s\n", iss.Category, iss.Target, iss.Description, confidenceSuffix(iss.ConfidenceScore)))
 			if iss.Remediation != "" {
 				sb.WriteString(fmt.Sprintf("    Remediation: %s\n", iss.Remediation))
 			}
@@ -183,20 +197,20 @@ func RenderWrapperMarkdown(w *wrapper.WrapperCompatibilityReport) string {
 
 	if len(w.Issues) > 0 {
 		sb.WriteString(fmt.Sprintf("### 🚨 Compatibility Issues (%d)\n\n", len(w.Issues)))
-		sb.WriteString("| Category | Target | Description | Remediation |\n")
-		sb.WriteString("| :--- | :--- | :--- | :--- |\n")
+		sb.WriteString("| Category | Target | Description | Confidence | Remediation |\n")
+		sb.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")
 		for _, iss := range w.Issues {
-			sb.WriteString(fmt.Sprintf("| `%s` | `%s` | %s | %s |\n", iss.Category, iss.Target, iss.Description, iss.Remediation))
+			sb.WriteString(fmt.Sprintf("| `%s` | `%s` | %s | %s | %s |\n", iss.Category, iss.Target, iss.Description, confidenceText(iss.ConfidenceScore), iss.Remediation))
 		}
 		sb.WriteString("\n")
 	}
 
 	if len(w.NewFeatureAdoptions) > 0 {
 		sb.WriteString(fmt.Sprintf("### 💡 Available Upstream Features (%d)\n\n", len(w.NewFeatureAdoptions)))
-		sb.WriteString("| Category | Target | Description |\n")
-		sb.WriteString("| :--- | :--- | :--- |\n")
+		sb.WriteString("| Category | Target | Description | Confidence |\n")
+		sb.WriteString("| :--- | :--- | :--- | :--- |\n")
 		for _, feat := range w.NewFeatureAdoptions {
-			sb.WriteString(fmt.Sprintf("| `%s` | `%s` | %s |\n", feat.Category, feat.Target, feat.Description))
+			sb.WriteString(fmt.Sprintf("| `%s` | `%s` | %s | %s |\n", feat.Category, feat.Target, feat.Description, confidenceText(feat.ConfidenceScore)))
 		}
 		sb.WriteString("\n")
 	}

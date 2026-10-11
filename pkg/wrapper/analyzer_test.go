@@ -5,6 +5,7 @@ import (
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAnalyzeWrapper_NilInputs(t *testing.T) {
@@ -99,6 +100,14 @@ func TestAnalyzeWrapper_BreakingIssues(t *testing.T) {
 	assert.NotNil(t, report.UpstreamDiff)
 	assert.NotEmpty(t, report.NewFeatureAdoptions)
 	assert.Contains(t, report.Summary, "CANNOT SAFELY PIN")
+	for _, issue := range report.Issues {
+		if issue.Category == "TypeMismatch" {
+			assert.Equal(t, 8, issue.ConfidenceScore)
+		} else {
+			assert.Equal(t, 9, issue.ConfidenceScore)
+		}
+	}
+	assert.Equal(t, 9, report.NewFeatureAdoptions[0].ConfidenceScore)
 }
 
 func TestAnalyzeWrapper_SafeWithWarnings(t *testing.T) {
@@ -127,4 +136,28 @@ func TestAnalyzeWrapper_SafeWithWarnings(t *testing.T) {
 	assert.Equal(t, "SAFE_WITH_WARNINGS", report.Verdict)
 	assert.Equal(t, 2, report.TotalWarnings)
 	assert.Contains(t, report.Summary, "CAN SAFELY PIN WITH WARNINGS")
+}
+
+func TestAnalyzeWrapper_NullabilityMismatch(t *testing.T) {
+	upstreamNullable := false
+	report := AnalyzeWrapper(
+		&ast.ModuleInfo{
+			Variables: map[string]ast.VariableDef{
+				"name": {Name: "name", Type: "string"},
+			},
+		},
+		&ast.ModuleInfo{
+			Variables: map[string]ast.VariableDef{
+				"name": {Name: "name", Type: "string", Nullable: &upstreamNullable},
+			},
+		},
+		nil,
+		"v2.0.0",
+		"v1.0.0",
+	)
+
+	require.False(t, report.CanSafelyUpdate)
+	require.Equal(t, 1, report.TotalBreaking)
+	assert.Equal(t, "VariableNullability", report.Issues[0].Category)
+	assert.Equal(t, 9, report.Issues[0].ConfidenceScore)
 }

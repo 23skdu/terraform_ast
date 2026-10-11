@@ -49,8 +49,8 @@ type SARIFRuleConfig struct {
 
 // SARIFResult represents an individual finding reported by the analyzer.
 type SARIFResult struct {
-	RuleID    string          `json:"ruleId"`
-	Level     string          `json:"level"`
+	RuleID    string           `json:"ruleId"`
+	Level     string           `json:"level"`
 	Message   SARIFMessageText `json:"message"`
 	Locations []SARIFLocation  `json:"locations,omitempty"`
 }
@@ -127,7 +127,7 @@ func RenderSARIF(r *diff.DiffReport) ([]byte, error) {
 			RuleID: "TF-DIFF-BREAKING-CHANGE",
 			Level:  "error",
 			Message: SARIFMessageText{
-				Text: fmt.Sprintf("[%s] %s: %s (Remediation: %s)", item.Category, item.Name, item.Description, item.Remediation),
+				Text: fmt.Sprintf("[%s] %s: %s (Confidence: %s; Remediation: %s)", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore), item.Remediation),
 			},
 			Locations: []SARIFLocation{
 				{
@@ -145,7 +145,7 @@ func RenderSARIF(r *diff.DiffReport) ([]byte, error) {
 			RuleID: "TF-DIFF-WARNING",
 			Level:  "warning",
 			Message: SARIFMessageText{
-				Text: fmt.Sprintf("[%s] %s: %s (Remediation: %s)", item.Category, item.Name, item.Description, item.Remediation),
+				Text: fmt.Sprintf("[%s] %s: %s (Confidence: %s; Remediation: %s)", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore), item.Remediation),
 			},
 			Locations: []SARIFLocation{
 				{
@@ -163,7 +163,7 @@ func RenderSARIF(r *diff.DiffReport) ([]byte, error) {
 			RuleID: "TF-DIFF-NEW-FEATURE",
 			Level:  "note",
 			Message: SARIFMessageText{
-				Text: fmt.Sprintf("[%s] %s: %s", item.Category, item.Name, item.Description),
+				Text: fmt.Sprintf("[%s] %s: %s (Confidence: %s)", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore)),
 			},
 			Locations: []SARIFLocation{
 				{
@@ -225,7 +225,7 @@ func RenderWrapperSARIF(res *wrapper.WrapperCompatibilityReport) ([]byte, error)
 			RuleID: ruleID,
 			Level:  level,
 			Message: SARIFMessageText{
-				Text: fmt.Sprintf("[%s] %s: %s. %s", item.Category, item.Target, item.Description, item.Remediation),
+				Text: fmt.Sprintf("[%s] %s: %s (Confidence: %s). %s", item.Category, item.Target, item.Description, confidenceText(item.ConfidenceScore), item.Remediation),
 			},
 			Locations: []SARIFLocation{
 				{

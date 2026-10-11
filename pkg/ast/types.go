@@ -10,25 +10,27 @@ import (
 
 // VariableDef represents an input variable in a Terraform module.
 type VariableDef struct {
-	Name        string              `json:"name"`
-	Type        string              `json:"type"`
-	Description string              `json:"description"`
-	Required    bool                `json:"required"`
-	Default     interface{}         `json:"default,omitempty"`
-	HasDefault  bool                `json:"has_default"`
-	Sensitive   bool                `json:"sensitive"`
-	Deprecated  string              `json:"deprecated,omitempty"`
-	Pos         tfconfig.SourcePos  `json:"pos"`
+	Name            string             `json:"name"`
+	Type            string             `json:"type"`
+	Description     string             `json:"description"`
+	Required        bool               `json:"required"`
+	Default         interface{}        `json:"default,omitempty"`
+	HasDefault      bool               `json:"has_default"`
+	Sensitive       bool               `json:"sensitive"`
+	Nullable        *bool              `json:"nullable,omitempty"`
+	ValidationRules []string           `json:"validation_rules,omitempty"`
+	Deprecated      string             `json:"deprecated,omitempty"`
+	Pos             tfconfig.SourcePos `json:"pos"`
 }
 
 // OutputDef represents an output exposed by a Terraform module.
 type OutputDef struct {
-	Name        string              `json:"name"`
-	Description string              `json:"description"`
-	Sensitive   bool                `json:"sensitive"`
-	Type        string              `json:"type,omitempty"`
-	Deprecated  string              `json:"deprecated,omitempty"`
-	Pos         tfconfig.SourcePos  `json:"pos"`
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	Sensitive   bool               `json:"sensitive"`
+	Type        string             `json:"type,omitempty"`
+	Deprecated  string             `json:"deprecated,omitempty"`
+	Pos         tfconfig.SourcePos `json:"pos"`
 }
 
 // ModuleCallDef represents a child module instantiation (e.g. `module "gke"` or `module "eks"`).
@@ -50,20 +52,21 @@ type OutputReference struct {
 
 // ProviderRequirement captures provider name and constraint.
 type ProviderRequirement struct {
-	Name               string   `json:"name"`
-	Source             string   `json:"source,omitempty"`
-	VersionConstraints []string `json:"version_constraints,omitempty"`
+	Name                 string   `json:"name"`
+	Source               string   `json:"source,omitempty"`
+	VersionConstraints   []string `json:"version_constraints,omitempty"`
+	ConfigurationAliases []string `json:"configuration_aliases,omitempty"`
 }
 
 // ModuleInfo is the normalized AST representation of a Terraform module.
 type ModuleInfo struct {
-	Path                     string                         `json:"path"`
-	Variables                map[string]VariableDef         `json:"variables"`
-	Outputs                  map[string]OutputDef           `json:"outputs"`
-	ModuleCalls              map[string]ModuleCallDef       `json:"module_calls"`
-	RequiredCore             []string                       `json:"required_core,omitempty"`
-	RequiredProviders        map[string]ProviderRequirement `json:"required_providers,omitempty"`
-	WrapperOutputReferences  map[string]OutputReference     `json:"wrapper_output_references,omitempty"`
+	Path                    string                         `json:"path"`
+	Variables               map[string]VariableDef         `json:"variables"`
+	Outputs                 map[string]OutputDef           `json:"outputs"`
+	ModuleCalls             map[string]ModuleCallDef       `json:"module_calls"`
+	RequiredCore            []string                       `json:"required_core,omitempty"`
+	RequiredProviders       map[string]ProviderRequirement `json:"required_providers,omitempty"`
+	WrapperOutputReferences map[string]OutputReference     `json:"wrapper_output_references,omitempty"`
 }
 
 // TypeCompatibilityResult describes the compatibility between two type constraints.

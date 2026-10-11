@@ -4,16 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
-	"github.com/hashicorp/hcl/v2/hclsyntax"
+	"github.com/hashicorp/hcl/v2/hclparse"
 	"github.com/hashicorp/terraform-config-inspect/tfconfig"
 )
-
-var moduleOutputRefRegex = regexp.MustCompile(`module\.([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_-]+)`)
 
 // Inspect parses and extracts the normalized AST for a Terraform module at the given directory.
 func Inspect(dir string) (info *ModuleInfo, err error) {
@@ -29,6 +26,21 @@ func Inspect(dir string) (info *ModuleInfo, err error) {
 	}
 	if !fi.IsDir() {
 		return nil, fmt.Errorf("module path %s is not a directory", dir)
+	}
+
+	cachePath, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve module path %s: %w", dir, err)
+	}
+	fingerprint, err := moduleFingerprint(dir)
+	if err != nil {
+		return nil, err
+	}
+	if cached, found, err := cachedModule(cachePath, fingerprint); err != nil {
+		return nil, err
+	} else if found {
+		cached.Path = dir
+		return cached, nil
 	}
 
 	tfMod, diags := tfconfig.LoadModule(dir)
@@ -81,10 +93,18 @@ func Inspect(dir string) (info *ModuleInfo, err error) {
 
 		// Providers
 		for name, req := range tfMod.RequiredProviders {
+			var aliases []string
+			for _, alias := range req.ConfigurationAliases {
+				if alias.Alias != "" {
+					aliases = append(aliases, alias.Name+"."+alias.Alias)
+				}
+			}
+			sort.Strings(aliases)
 			info.RequiredProviders[name] = ProviderRequirement{
-				Name:               name,
-				Source:             req.Source,
-				VersionConstraints: req.VersionConstraints,
+				Name:                 name,
+				Source:               req.Source,
+				VersionConstraints:   req.VersionConstraints,
+				ConfigurationAliases: aliases,
 			}
 		}
 
@@ -104,14 +124,27 @@ func Inspect(dir string) (info *ModuleInfo, err error) {
 	// Deep HCL parsing to extract passed arguments to child modules and wrapper output delegations
 	enrichFromHCLFiles(dir, info)
 
+	if err := cacheModule(cachePath, fingerprint, info); err != nil {
+		return nil, err
+	}
 	return info, nil
 }
 
-// enrichFromHCLFiles scans top-level .tf and .tf.json files in dir to extract passed inputs and output delegations.
+// enrichFromHCLFiles scans top-level Terraform files for module inputs, nullable settings,
+// and output delegations that are not exposed by terraform-config-inspect.
 func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
+	}
+
+	parser := hclparse.NewParser()
+	schema := &hcl.BodySchema{
+		Blocks: []hcl.BlockHeaderSchema{
+			{Type: "variable", LabelNames: []string{"name"}},
+			{Type: "module", LabelNames: []string{"name"}},
+			{Type: "output", LabelNames: []string{"name"}},
+		},
 	}
 
 	for _, entry := range entries {
@@ -119,7 +152,8 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasSuffix(name, ".tf") {
+		isJSON := strings.HasSuffix(name, ".tf.json")
+		if !isJSON && !strings.HasSuffix(name, ".tf") {
 			continue
 		}
 
@@ -130,19 +164,60 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 			continue
 		}
 
-		file, diags := hclsyntax.ParseConfig(src, filePath, hcl.Pos{Line: 1, Column: 1})
+		var file *hcl.File
+		var diags hcl.Diagnostics
+		if isJSON {
+			file, diags = parser.ParseJSON(src, filePath)
+		} else {
+			file, diags = parser.ParseHCL(src, filePath)
+		}
 		if diags.HasErrors() || file == nil {
 			continue
 		}
 
-		body := file.Body.(*hclsyntax.Body)
-
-		for _, block := range body.Blocks {
+		content, _, diags := file.Body.PartialContent(schema)
+		if diags.HasErrors() || content == nil {
+			continue
+		}
+		for _, block := range content.Blocks {
+			if len(block.Labels) == 0 {
+				continue
+			}
+			attrs, _ := block.Body.JustAttributes()
 			switch block.Type {
-			case "module":
-				if len(block.Labels) == 0 {
-					continue
+			case "variable":
+				variable := info.Variables[block.Labels[0]]
+				attr, exists := attrs["nullable"]
+				if exists {
+					value := strings.TrimSpace(string(src[attr.Expr.Range().Start.Byte:attr.Expr.Range().End.Byte]))
+					if value == "true" || value == "false" {
+						nullable := value == "true"
+						variable.Nullable = &nullable
+					}
 				}
+
+				validationContent, _, validationDiags := block.Body.PartialContent(&hcl.BodySchema{
+					Blocks: []hcl.BlockHeaderSchema{{Type: "validation"}},
+				})
+				if !validationDiags.HasErrors() && validationContent != nil {
+					for _, validation := range validationContent.Blocks {
+						validationAttrs, _ := validation.Body.JustAttributes()
+						condition, hasCondition := validationAttrs["condition"]
+						message, hasMessage := validationAttrs["error_message"]
+						if hasCondition {
+							rule := strings.TrimSpace(string(src[condition.Expr.Range().Start.Byte:condition.Expr.Range().End.Byte]))
+							if hasMessage {
+								rule += " => " + strings.TrimSpace(string(src[message.Expr.Range().Start.Byte:message.Expr.Range().End.Byte]))
+							}
+							variable.ValidationRules = append(variable.ValidationRules, rule)
+						}
+					}
+					sort.Strings(variable.ValidationRules)
+				}
+				if variable.Nullable != nil || len(variable.ValidationRules) > 0 {
+					info.Variables[block.Labels[0]] = variable
+				}
+			case "module":
 				modName := block.Labels[0]
 				mc, exists := info.ModuleCalls[modName]
 				if !exists {
@@ -153,7 +228,7 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 				}
 
 				var passed []string
-				for attrName, attr := range block.Body.Attributes {
+				for attrName, attr := range attrs {
 					exprBytes := src[attr.Expr.Range().Start.Byte:attr.Expr.Range().End.Byte]
 					exprStr := strings.TrimSpace(string(exprBytes))
 
@@ -162,6 +237,8 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 						mc.Source = strings.Trim(exprStr, `"'`)
 					case "version":
 						mc.Version = strings.Trim(exprStr, `"'`)
+					case "count", "for_each", "providers", "depends_on":
+						continue
 					default:
 						passed = append(passed, attrName)
 						mc.InputExpressions[attrName] = exprStr
@@ -172,19 +249,28 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 				info.ModuleCalls[modName] = mc
 
 			case "output":
-				if len(block.Labels) == 0 {
-					continue
-				}
 				outName := block.Labels[0]
-				if valAttr, ok := block.Body.Attributes["value"]; ok {
-					valBytes := src[valAttr.Expr.Range().Start.Byte:valAttr.Expr.Range().End.Byte]
-					valStr := string(valBytes)
-					matches := moduleOutputRefRegex.FindStringSubmatch(valStr)
-					if len(matches) == 3 {
-						info.WrapperOutputReferences[outName] = OutputReference{
-							OutputName:   outName,
-							TargetModule: matches[1],
-							TargetOutput: matches[2],
+				if valAttr, ok := attrs["value"]; ok {
+					for _, traversal := range valAttr.Expr.Variables() {
+						if len(traversal) < 2 {
+							continue
+						}
+						root, okRoot := traversal[0].(hcl.TraverseRoot)
+						module, okModule := traversal[1].(hcl.TraverseAttr)
+						if !okRoot || root.Name != "module" || !okModule {
+							continue
+						}
+						for _, step := range traversal[2:] {
+							output, okOutput := step.(hcl.TraverseAttr)
+							if !okOutput {
+								continue
+							}
+							info.WrapperOutputReferences[outName] = OutputReference{
+								OutputName:   outName,
+								TargetModule: module.Name,
+								TargetOutput: output.Name,
+							}
+							break
 						}
 					}
 				}
