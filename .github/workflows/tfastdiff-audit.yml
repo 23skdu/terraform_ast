@@ -62,7 +62,7 @@ jobs:
             --output "$RUNNER_TEMP/tfastdiff.sarif"
       - name: Upload SARIF results
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: ${{ runner.temp }}/tfastdiff.sarif
       - name: Upsert pull request summary
