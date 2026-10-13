@@ -2,7 +2,6 @@
 
 [![Go Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](#testing--quality-assurance)
 [![Terratest](https://img.shields.io/badge/terratest-validated-blue.svg)](test/terratest/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 `terraform_ast` (`tfastdiff`) is a Go CLI and library for comparing the Abstract Syntax Tree (AST) and top-level configuration metadata of Terraform modules. It specifically targets enterprise wrappers (such as **Google GKE** and **AWS EKS** terraform wrappers) to determine whether a wrapper can be safely updated and pinned to a new upstream version without breaking downstream consumers.
 
