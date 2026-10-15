@@ -83,10 +83,20 @@ func TestDeveloperWorkflowManifests(t *testing.T) {
 	require.NoError(t, err)
 	workflowContent := string(workflow)
 	assert.Contains(t, workflowContent, "workflow_call:")
-	assert.Contains(t, workflowContent, "upload-sarif@v3")
 	assert.Contains(t, workflowContent, "tfastdiff-compatibility-report")
 	assert.Contains(t, workflowContent, "updateComment")
 	assert.Contains(t, workflowContent, "createComment")
+
+	// Assert the actions are referenced without pinning a major version, which Dependabot bumps
+	// and which would otherwise fail this test on every dependency update.
+	assert.Regexp(t, `github/codeql-action/upload-sarif@v[0-9]+`, workflowContent)
+	assert.Regexp(t, `actions/checkout@v[0-9]+`, workflowContent)
+	assert.Regexp(t, `actions/setup-go@v[0-9]+`, workflowContent)
+	assert.Regexp(t, `actions/github-script@v[0-9]+`, workflowContent)
+
+	// The workflow must upload SARIF and require the permissions to do so.
+	assert.Contains(t, workflowContent, "sarif_file:")
+	assert.Contains(t, workflowContent, "security-events: write")
 }
 
 // TestDockerfile_BuildAndRuntimeSecurity builds the container and validates runtime security constraints.
