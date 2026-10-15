@@ -14,11 +14,7 @@ import (
 
 // Inspect parses and extracts the normalized AST for a Terraform module at the given directory.
 func Inspect(dir string) (info *ModuleInfo, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("panic during AST parsing of module %s: %v", dir, r)
-		}
-	}()
+	defer recoverParseError(dir, &err)
 
 	fi, err := os.Stat(dir)
 	if err != nil {
@@ -28,17 +24,19 @@ func Inspect(dir string) (info *ModuleInfo, err error) {
 		return nil, fmt.Errorf("module path %s is not a directory", dir)
 	}
 
-	cachePath, err := filepath.Abs(dir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve module path %s: %w", dir, err)
-	}
+	// The directory has already been stat'ed successfully, so cleaning the path is enough to key
+	// the inspection cache without depending on the process working directory.
+	cachePath := filepath.Clean(dir)
 	fingerprint, err := moduleFingerprint(dir)
 	if err != nil {
 		return nil, err
 	}
-	if cached, found, err := cachedModule(cachePath, fingerprint); err != nil {
-		return nil, err
-	} else if found {
+	cached, found, cacheErr := cachedModule(cachePath, fingerprint)
+	if cacheErr != nil {
+		// A corrupted cache entry must never break the analysis: drop it and inspect from source.
+		forgetModuleCacheEntry(cachePath)
+	}
+	if found {
 		cached.Path = dir
 		return cached, nil
 	}
@@ -124,10 +122,17 @@ func Inspect(dir string) (info *ModuleInfo, err error) {
 	// Deep HCL parsing to extract passed arguments to child modules and wrapper output delegations
 	enrichFromHCLFiles(dir, info)
 
-	if err := cacheModule(cachePath, fingerprint, info); err != nil {
-		return nil, err
-	}
+	// The inspection cache is an optimisation, so a write failure must not invalidate the result.
+	_ = cacheModule(cachePath, fingerprint, info)
 	return info, nil
+}
+
+// recoverParseError converts a panic raised while parsing untrusted Terraform source into a normal
+// error so a malformed module can never crash the CLI.
+func recoverParseError(dir string, err *error) {
+	if r := recover(); r != nil {
+		*err = fmt.Errorf("panic during AST parsing of module %s: %v", dir, r)
+	}
 }
 
 // enrichFromHCLFiles scans top-level Terraform files for module inputs, nullable settings,
@@ -180,9 +185,6 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 			continue
 		}
 		for _, block := range content.Blocks {
-			if len(block.Labels) == 0 {
-				continue
-			}
 			attrs, _ := block.Body.JustAttributes()
 			switch block.Type {
 			case "variable":

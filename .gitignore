@@ -18,6 +18,8 @@ coverage.*
 !coverage.go
 *.coverprofile
 profile.cov
+gosec.json
+gosec.sarif
 
 # Dependency directories (remove the comment below to include it)
 # vendor/

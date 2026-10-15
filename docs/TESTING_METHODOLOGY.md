@@ -1,9 +1,17 @@
 # Testing Methodology & Quality Assurance
 
-This repository maintains **100% test statement coverage** across all packages through a multi-tiered testing strategy combining:
-1. **Terratest Integration Validation**
-2. **Golden File / Golden Image Testing Methodology**
-3. **Exhaustive Unit & Branch Coverage**
+This repository enforces **100% statement coverage in every package** through a multi-tiered
+testing strategy combining:
+1. **Exhaustive Unit & Branch Coverage** — every package sits at 100%, gated in CI.
+2. **Native Go Fuzz Targets** — one seeded target per untrusted-input parser, asserting real invariants.
+3. **Terratest Integration Validation** — real `terraform init`/`validate`/`plan` runs on fixtures.
+4. **Golden File / Golden Image Testing Methodology** — byte-exact regression artefacts.
+
+A single command runs the whole gate:
+
+```bash
+./scripts/verify.sh        # gofmt, vet, unit tests, 100% coverage gate, fuzz smoke run
+```
 
 ---
 
@@ -11,8 +19,13 @@ This repository maintains **100% test statement coverage** across all packages t
 
 ```
 +-------------------------------------------------------------+
-|               Terratest HCL Validation Tier                 |
-|  (Initializes & validates real Terraform modules with HCL)   |
+|        Fuzz Targets: Untrusted Parser Invariants            |
+|  (ast, blastradius, codemod, registry, semverutil)          |
++-------------------------------------------------------------+
+                               |
++-------------------------------------------------------------+
+|        Unit Tests & Error Branch Coverage (100%)           |
+|   (Every package, every success and failure branch)          |
 +-------------------------------------------------------------+
                                |
 +-------------------------------------------------------------+
@@ -31,8 +44,8 @@ This repository maintains **100% test statement coverage** across all packages t
 +-------------------------------------------------------------+
                                |
 +-------------------------------------------------------------+
-|               Unit Tests & Error Branch Coverage            |
-|       (Guarantees 100% branch and statement coverage)       |
+|               Terratest HCL Validation Tier                 |
+|  (Initializes, validates and plans real Terraform modules)  |
 +-------------------------------------------------------------+
 ```
 
@@ -121,15 +134,59 @@ go test -v ./test/docker
 
 ## 5. 100% Statement Coverage Verification
 
-Run all test suites and verify coverage:
+Every package is required to reach 100% statement coverage. CI fails the build if any package, or
+the module as a whole, drops below it.
 
 ```bash
-go test -cover ./...
+go test -covermode=atomic -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out            # total must read 100.0%
+go tool cover -func=coverage.out | grep -v '100.0%'   # must print nothing
 ```
 
 To generate a full HTML report:
 
 ```bash
-go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out -o coverage.html
 ```
+
+Defensive branches that cannot be reached from any input are removed during review rather than
+excluded from the profile, so the number reflects real behaviour instead of measurement exclusions.
+
+---
+
+## 6. Fuzz Testing
+
+Every parser that consumes untrusted third-party Terraform source has a native Go fuzz target.
+Targets are seeded, so they execute during a plain `go test` run and count toward coverage; the
+same targets can then be run as an open-ended campaign.
+
+| Target | Package | Invariant asserted |
+| :--- | :--- | :--- |
+| `FuzzInspect` | `pkg/ast` | `Inspect` never panics; re-inspection is stable |
+| `FuzzCheckTypeCompatibility` | `pkg/ast` | Compatible is never breaking; `any` widening/narrowing rules hold |
+| `FuzzParseObjectSchema` | `pkg/ast` | Parsed attribute keys match their recorded names |
+| `FuzzDiscoverCallSites` | `pkg/blastradius` | Scanning never panics and always yields a complete call site |
+| `FuzzTerragruntInputKey` | `pkg/blastradius` | Terragrunt keys resolve or cleanly fail |
+| `FuzzDiscoverJSONCallSites` | `pkg/blastradius` | Terraform JSON scanning never panics |
+| `FuzzPreviewRemovedInputs` | `pkg/codemod` | Preview mode never mutates the wrapper |
+| `FuzzUnifiedReplacement` | `pkg/codemod` | Generated patches carry a valid unified diff header |
+| `FuzzIsRegistrySource` | `pkg/registry` | Local paths and VCS addresses are never Registry sources |
+| `FuzzParseRegistrySource` | `pkg/registry` | Registry addresses parse completely or are rejected |
+| `FuzzNormalizeAndIsValid` | `pkg/semverutil` | Normalisation is idempotent and agrees with the semver library |
+| `FuzzDetermineBumpType` | `pkg/semverutil` | Bump classification matches semver ordering |
+| `FuzzSort` | `pkg/semverutil` | Sorting preserves every element |
+
+Run one target as a campaign:
+
+```bash
+go test ./pkg/ast -run '^FuzzInspect$' -fuzz '^FuzzInspect$' -fuzztime 60s
+```
+
+Run every target for a short smoke window (this is what `scripts/verify.sh` and CI do):
+
+```bash
+./scripts/verify.sh 30
+```
+
+Any input discovered by a campaign is written to `testdata/fuzz/<Target>/` and replayed
+automatically by `go test`, so regressions are captured as permanent regression seeds.

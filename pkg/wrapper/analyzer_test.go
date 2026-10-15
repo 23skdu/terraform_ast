@@ -164,3 +164,32 @@ func TestAnalyzeWrapper_NullabilityMismatch(t *testing.T) {
 	assert.Equal(t, "VariableNullability", report.Issues[0].Category)
 	assert.Equal(t, 9, report.Issues[0].ConfidenceScore)
 }
+
+func TestAnalyzeWrapper_WithoutPinnedVersionRecommendsNoSafePin(t *testing.T) {
+	wrapperMod := &ast.ModuleInfo{
+		ModuleCalls: map[string]ast.ModuleCallDef{
+			"gke": {Name: "gke", PassedInputs: []string{"obsolete"}},
+		},
+	}
+	target := &ast.ModuleInfo{Variables: map[string]ast.VariableDef{}}
+
+	report := AnalyzeWrapper(wrapperMod, target, nil, "v30.0.0", "")
+	require.False(t, report.CanSafelyUpdate)
+	assert.Equal(t, "BREAKING_CHANGES_DETECTED", report.Verdict)
+	assert.Empty(t, report.SafePinVersion)
+	assert.Equal(t, "No current pin was supplied, so there is no verified safe version to recommend.", report.SafePinRationale)
+}
+
+func TestAnalyzeWrapper_NilInputsAreTolerated(t *testing.T) {
+	report := AnalyzeWrapper(nil, nil, nil, "v1.0.0", "v0.9.0")
+	require.NotNil(t, report)
+	assert.Empty(t, report.TargetModuleName)
+	assert.Equal(t, "SAFE_TO_PIN", report.Verdict)
+	assert.True(t, report.CanSafelyUpdate)
+	assert.Equal(t, `version = "1.0.0"`, report.RecommendedPin)
+}
+
+func TestAnalyzeWrapper_EmptyVersionKeepsRawPin(t *testing.T) {
+	report := AnalyzeWrapper(&ast.ModuleInfo{}, &ast.ModuleInfo{}, nil, "latest", "")
+	assert.Equal(t, `version = "latest"`, report.RecommendedPin)
+}

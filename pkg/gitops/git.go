@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -137,48 +138,6 @@ func CheckoutRef(repo *git.Repository, refName string) error {
 	})
 }
 
-// FindLatestVersion returns the highest semantic version tag found in the repository.
-func FindLatestVersion(repo *git.Repository) (string, error) {
-	tags, err := ListSemverTags(repo)
-	if err != nil {
-		return "", err
-	}
-	if len(tags) == 0 {
-		return "", fmt.Errorf("no semantic version tags found in repository")
-	}
-	return tags[len(tags)-1], nil
-}
-
-// FindNextVersion returns the next higher semantic version tag after currentVersion.
-func FindNextVersion(repo *git.Repository, currentVersion string) (string, error) {
-	tags, err := ListSemverTags(repo)
-	if err != nil {
-		return "", err
-	}
-	normCurrent := semverutil.Normalize(currentVersion)
-	for _, tag := range tags {
-		if semverutil.Compare(tag, normCurrent) > 0 {
-			return tag, nil
-		}
-	}
-	return "", fmt.Errorf("no version found higher than %s", currentVersion)
-}
-
-// ExtractVersionToDir clones or copies a repository and checks out the specified ref into destDir.
-func ExtractVersionToDir(repoURLOrPath, refName, destDir string) error {
-	if fi, err := os.Stat(repoURLOrPath); err == nil && fi.IsDir() && !isGitRepo(repoURLOrPath) {
-		return copyDir(repoURLOrPath, destDir)
-	}
-	repo, err := CloneOrOpen(repoURLOrPath, destDir)
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(refName) == "" {
-		return nil
-	}
-	return CheckoutRef(repo, refName)
-}
-
 // ExtractVersionToDirShallow clones or copies a repository using shallow cloning if possible.
 func ExtractVersionToDirShallow(repoURLOrPath, refName, destDir string) error {
 	if fi, err := os.Stat(repoURLOrPath); err == nil && fi.IsDir() && !isGitRepo(repoURLOrPath) {
@@ -200,9 +159,8 @@ func ExtractVersionToDirShallow(repoURLOrPath, refName, destDir string) error {
 }
 
 var (
-	mkdirTemp        = os.MkdirTemp
-	preWriteLockHook func()
-	relPath          = filepath.Rel
+	mkdirTemp = os.MkdirTemp
+	relPath   = filepath.Rel
 )
 
 func copyDir(src, dst string) error {
@@ -241,70 +199,156 @@ func isGitRepo(path string) bool {
 	return err == nil
 }
 
-// RepositoryCache provides thread-safe caching of extracted repositories.
+// DirFactory creates a new directory that will hold an extracted module version.
+// Callers supply it so that temporary directory creation stays injectable (and testable)
+// while the cache owns the lifetime of everything it hands back.
+type DirFactory func() (string, error)
+
+// RepositoryCache provides thread-safe caching of cloned repositories and extracted versions.
+//
+// A remote repository is downloaded at most once per cache: the first request creates a shared
+// local clone, and every later request for the same repository re-clones from that local copy
+// instead of re-downloading. Extracted versions are additionally memoised per source and ref,
+// so repeating the same comparison never touches the network twice.
 type RepositoryCache struct {
-	mu    sync.RWMutex
-	cache map[string]string // key: "repoURL@ref" -> cachedDir
+	mu      sync.Mutex
+	entries map[string]*cacheEntry
+}
+
+type cacheEntry struct {
+	once sync.Once
+	dir  string
+	err  error
 }
 
 // NewRepositoryCache creates an in-memory repository cache.
 func NewRepositoryCache() *RepositoryCache {
-	return &RepositoryCache{
-		cache: make(map[string]string),
-	}
+	return &RepositoryCache{entries: make(map[string]*cacheEntry)}
 }
 
 // GlobalCache is the default global in-memory repository cache.
 var GlobalCache = NewRepositoryCache()
 
-// GetOrExtract retrieves the version from cache or extracts it into a cached directory.
-func (c *RepositoryCache) GetOrExtract(repoURLOrPath, refName string) (string, error) {
-	key := fmt.Sprintf("%s@%s", repoURLOrPath, refName)
-
-	c.mu.RLock()
-	cachedDir, found := c.cache[key]
-	c.mu.RUnlock()
-
-	if found {
-		if fi, err := os.Stat(cachedDir); err == nil && fi.IsDir() {
-			return cachedDir, nil
+// SharedClone returns a local Git working tree for repoURLOrPath that can be reused to extract
+// many refs without re-downloading the repository. Local repositories are returned unchanged
+// because there is nothing to download; remote repositories are cloned once and cached.
+func (c *RepositoryCache) SharedClone(repoURLOrPath string) (string, error) {
+	if fi, err := os.Stat(repoURLOrPath); err == nil && fi.IsDir() {
+		if !isGitRepo(repoURLOrPath) {
+			return "", fmt.Errorf("%s is not a git repository", repoURLOrPath)
 		}
+		return repoURLOrPath, nil
 	}
-
-	if preWriteLockHook != nil {
-		preWriteLockHook()
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Double-check under write lock
-	if cachedDir, found := c.cache[key]; found {
-		if fi, err := os.Stat(cachedDir); err == nil && fi.IsDir() {
-			return cachedDir, nil
+	return c.resolve("repo\x00"+repoURLOrPath, func() (string, error) {
+		dir, err := mkdirTemp("", "tf_git_repo_*")
+		if err != nil {
+			return "", err
 		}
-	}
-
-	tmpDir, err := mkdirTemp("", "tf_git_cache_*")
-	if err != nil {
-		return "", err
-	}
-
-	if err := ExtractVersionToDirShallow(repoURLOrPath, refName, tmpDir); err != nil {
-		_ = os.RemoveAll(tmpDir)
-		return "", err
-	}
-
-	c.cache[key] = tmpDir
-	return tmpDir, nil
+		if _, err := CloneOrOpenWithOptions(repoURLOrPath, dir, CloneConfig{
+			Shallow: true,
+			Depth:   1,
+		}); err != nil {
+			_ = os.RemoveAll(dir)
+			return "", err
+		}
+		return dir, nil
+	})
 }
 
-// Clear removes all cached repositories.
+// GetOrExtract returns a directory holding repoURLOrPath checked out at refName, creating it with
+// newDir on a cache miss. The returned directory is owned by the cache and stays valid until Clear
+// is called; callers must not delete it themselves.
+func (c *RepositoryCache) GetOrExtract(repoURLOrPath, refName string, newDir DirFactory) (string, error) {
+	return c.resolve(fmt.Sprintf("ref\x00%s\x00%s", repoURLOrPath, refName), func() (string, error) {
+		dir, err := newDir()
+		if err != nil {
+			return "", err
+		}
+		if err := c.extractCached(repoURLOrPath, refName, dir); err != nil {
+			_ = os.RemoveAll(dir)
+			return "", err
+		}
+		return dir, nil
+	})
+}
+
+// extractCached prefers the shared local clone over a fresh remote download. When the shared clone
+// cannot serve the requested ref (for example an older tag excluded from the shallow clone) it
+// falls back to the original remote extraction so behaviour never regresses.
+func (c *RepositoryCache) extractCached(repoURLOrPath, refName, destDir string) error {
+	mirror, err := c.SharedClone(repoURLOrPath)
+	if err == nil && mirror != repoURLOrPath {
+		if localErr := ExtractVersionToDirShallow(mirror, refName, destDir); localErr == nil {
+			return nil
+		}
+		// The shared clone cannot serve this ref; retry against the original source from a clean
+		// destination. PlainClone recreates the directory itself if it is still missing.
+		if fi, statErr := os.Stat(destDir); statErr == nil && fi.IsDir() {
+			_ = os.RemoveAll(destDir)
+			_ = os.MkdirAll(destDir, 0750)
+		}
+	}
+	return ExtractVersionToDirShallow(repoURLOrPath, refName, destDir)
+}
+
+// resolve memoises build per key, serialising concurrent builds of the same key while still
+// allowing different keys to be produced in parallel. Failures are never cached.
+func (c *RepositoryCache) resolve(key string, build func() (string, error)) (string, error) {
+	c.mu.Lock()
+	entry, ok := c.entries[key]
+	if !ok {
+		entry = &cacheEntry{}
+		c.entries[key] = entry
+	}
+	c.mu.Unlock()
+
+	entry.once.Do(func() { entry.dir, entry.err = build() })
+
+	if entry.err != nil {
+		c.forget(key, entry)
+		return "", entry.err
+	}
+	if fi, err := os.Stat(entry.dir); err != nil || !fi.IsDir() {
+		c.forget(key, entry)
+		return "", fmt.Errorf("cached directory %s is no longer available", entry.dir)
+	}
+	return entry.dir, nil
+}
+
+// forget drops a cache entry so that a later request is able to retry it.
+func (c *RepositoryCache) forget(key string, entry *cacheEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries[key] == entry {
+		delete(c.entries, key)
+	}
+}
+
+// Clear removes all cached repositories and extracted versions.
 func (c *RepositoryCache) Clear() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, dir := range c.cache {
-		_ = os.RemoveAll(dir)
+	entries := c.entries
+	c.entries = make(map[string]*cacheEntry)
+	c.mu.Unlock()
+
+	for _, entry := range entries {
+		_ = os.RemoveAll(entry.dir)
 	}
-	c.cache = make(map[string]string)
 }
 
+// CachedRepositoryDirs returns the directories currently held by GlobalCache. It exists so callers
+// and tests can assert that cached clones and extracted versions are released.
+func CachedRepositoryDirs() []string {
+	c := GlobalCache
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	dirs := make([]string, 0, len(c.entries))
+	for _, entry := range c.entries {
+		if entry.dir != "" {
+			dirs = append(dirs, entry.dir)
+		}
+	}
+	sort.Strings(dirs)
+	return dirs
+}

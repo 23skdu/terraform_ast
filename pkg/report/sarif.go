@@ -1,11 +1,12 @@
 package report
 
 import (
-	"encoding/json"
 	"fmt"
 
+	"github.com/23skdu/terraform_ast/pkg/blastradius"
 	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/policy"
+	"github.com/23skdu/terraform_ast/pkg/recreation"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
 )
 
@@ -88,204 +89,209 @@ const (
 	toolName    = "terraform-ast-diff"
 	toolVer     = "0.1.0"
 	toolURI     = "https://github.com/23skdu/terraform_ast"
+
+	ruleBreaking         = "TF-DIFF-BREAKING-CHANGE"
+	ruleWarning          = "TF-DIFF-WARNING"
+	ruleNewFeature       = "TF-DIFF-NEW-FEATURE"
+	rulePolicy           = "TF-POLICY-VIOLATION"
+	ruleRecreationHazard = "TF-RECREATION-HAZARD"
+	ruleBlastRadius      = "TF-BLAST-RADIUS-CONSUMER"
 )
 
+// defaultRules is the SARIF rule catalogue. Each document only advertises the subset of rules for
+// which it actually emits results, which SARIF consumers use to decide which findings are actionable.
 var defaultRules = []SARIFRule{
 	{
-		ID:               "TF-DIFF-BREAKING-CHANGE",
+		ID:               ruleBreaking,
 		ShortDescription: SARIFMessageText{Text: "Breaking API change in Terraform module"},
 		FullDescription:  SARIFMessageText{Text: "A breaking API change was detected between module versions (e.g. removed input, newly required input, or incompatible type change)."},
 		DefaultConfig:    SARIFRuleConfig{Level: "error"},
 	},
 	{
-		ID:               "TF-DIFF-WARNING",
+		ID:               ruleWarning,
 		ShortDescription: SARIFMessageText{Text: "Warning or widening change in Terraform module"},
 		FullDescription:  SARIFMessageText{Text: "A non-breaking change or type widening that may require verification."},
 		DefaultConfig:    SARIFRuleConfig{Level: "warning"},
 	},
 	{
-		ID:               "TF-DIFF-NEW-FEATURE",
+		ID:               ruleNewFeature,
 		ShortDescription: SARIFMessageText{Text: "New feature or optional attribute added"},
 		FullDescription:  SARIFMessageText{Text: "A newly introduced optional variable or output is available."},
 		DefaultConfig:    SARIFRuleConfig{Level: "note"},
 	},
 	{
-		ID:               "TF-POLICY-VIOLATION",
+		ID:               rulePolicy,
 		ShortDescription: SARIFMessageText{Text: "Configured Terraform upgrade policy was violated"},
 		FullDescription:  SARIFMessageText{Text: "The analysis result violates a configured policy gate."},
 		DefaultConfig:    SARIFRuleConfig{Level: "error"},
 	},
+	{
+		ID:               ruleRecreationHazard,
+		ShortDescription: SARIFMessageText{Text: "State destruction and recreation hazard (ForceNew)"},
+		FullDescription:  SARIFMessageText{Text: "A modification touches an immutable cloud resource attribute that forces Terraform to destroy and re-create the resource."},
+		DefaultConfig:    SARIFRuleConfig{Level: "error"},
+	},
+	{
+		ID:               ruleBlastRadius,
+		ShortDescription: SARIFMessageText{Text: "Downstream consumer module cannot be safely updated"},
+		FullDescription:  SARIFMessageText{Text: "A root module calling the audited wrapper passes removed inputs, misses newly required inputs, or consumes removed outputs."},
+		DefaultConfig:    SARIFRuleConfig{Level: "error"},
+	},
+}
+
+func sarifLocation(artifact string) []SARIFLocation {
+	return []SARIFLocation{{
+		PhysicalLocation: SARIFPhysicalLocation{
+			ArtifactLocation: SARIFArtifactLocation{URI: artifact},
+			Region:           SARIFRegion{StartLine: 1},
+		},
+	}}
+}
+
+func artifactOrDefault(artifact string) string {
+	if artifact == "" {
+		return "main.tf"
+	}
+	return artifact
+}
+
+// renderSARIF builds the SARIF document, advertising exactly the rules that back an emitted
+// result so that code-scanning consumers only see actionable rule metadata.
+func renderSARIF(results []SARIFResult) []byte {
+	emitted := make(map[string]struct{}, len(results))
+	for _, result := range results {
+		emitted[result.RuleID] = struct{}{}
+	}
+	rules := make([]SARIFRule, 0, len(emitted))
+	for _, rule := range defaultRules {
+		if _, ok := emitted[rule.ID]; ok {
+			rules = append(rules, rule)
+		}
+	}
+
+	return marshalJSON(SARIFLog{
+		Schema:  sarifSchema,
+		Version: sarifVer,
+		Runs: []SARIFRun{
+			{
+				Tool: SARIFTool{
+					Driver: SARIFDriver{
+						Name:           toolName,
+						Version:        toolVer,
+						InformationURI: toolURI,
+						Rules:          rules,
+					},
+				},
+				Results: results,
+			},
+		},
+	})
+}
+
+// emptySARIF renders a well-formed document with no runs, used when there is nothing to report.
+func emptySARIF() []byte {
+	return marshalJSON(SARIFLog{
+		Schema:  sarifSchema,
+		Version: sarifVer,
+		Runs:    []SARIFRun{},
+	})
 }
 
 // RenderSARIF formats a DiffReport into standard OASIS SARIF v2.1.0 JSON.
-func RenderSARIF(r *diff.DiffReport) ([]byte, error) {
+func RenderSARIF(r *diff.DiffReport, findings Findings) []byte {
 	if r == nil {
-		return json.MarshalIndent(SARIFLog{
-			Schema:  sarifSchema,
-			Version: sarifVer,
-			Runs:    []SARIFRun{},
-		}, "", "  ")
+		return emptySARIF()
 	}
 
-	var results []SARIFResult
+	artifact := artifactOrDefault(r.ModuleName)
 
+	results := make([]SARIFResult, 0, len(r.BreakingChanges)+len(r.Warnings)+len(r.NewFeatures)+len(findings.RecreationHazards))
 	for _, item := range r.BreakingChanges {
-		results = append(results, SARIFResult{
-			RuleID: "TF-DIFF-BREAKING-CHANGE",
-			Level:  "error",
-			Message: SARIFMessageText{
-				Text: fmt.Sprintf("[%s] %s: %s (Confidence: %s; Remediation: %s)", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore), item.Remediation),
-			},
-			Locations: []SARIFLocation{
-				{
-					PhysicalLocation: SARIFPhysicalLocation{
-						ArtifactLocation: SARIFArtifactLocation{URI: r.ModuleName},
-						Region:           SARIFRegion{StartLine: 1},
-					},
-				},
-			},
-		})
+		results = append(results, sarifResult(ruleBreaking, "error", artifact,
+			fmt.Sprintf("[%s] %s: %s (Confidence: %s; Remediation: %s)", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore), item.Remediation)))
 	}
-
 	for _, item := range r.Warnings {
-		results = append(results, SARIFResult{
-			RuleID: "TF-DIFF-WARNING",
-			Level:  "warning",
-			Message: SARIFMessageText{
-				Text: fmt.Sprintf("[%s] %s: %s (Confidence: %s; Remediation: %s)", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore), item.Remediation),
-			},
-			Locations: []SARIFLocation{
-				{
-					PhysicalLocation: SARIFPhysicalLocation{
-						ArtifactLocation: SARIFArtifactLocation{URI: r.ModuleName},
-						Region:           SARIFRegion{StartLine: 1},
-					},
-				},
-			},
-		})
+		results = append(results, sarifResult(ruleWarning, "warning", artifact,
+			fmt.Sprintf("[%s] %s: %s (Confidence: %s; Remediation: %s)", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore), item.Remediation)))
 	}
-
 	for _, item := range r.NewFeatures {
-		results = append(results, SARIFResult{
-			RuleID: "TF-DIFF-NEW-FEATURE",
-			Level:  "note",
-			Message: SARIFMessageText{
-				Text: fmt.Sprintf("[%s] %s: %s (Confidence: %s)", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore)),
-			},
-			Locations: []SARIFLocation{
-				{
-					PhysicalLocation: SARIFPhysicalLocation{
-						ArtifactLocation: SARIFArtifactLocation{URI: r.ModuleName},
-						Region:           SARIFRegion{StartLine: 1},
-					},
-				},
-			},
-		})
+		results = append(results, sarifResult(ruleNewFeature, "note", artifact,
+			fmt.Sprintf("[%s] %s: %s (Confidence: %s)", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore))))
 	}
-	results = appendPolicyResults(results, r.PolicyViolations, r.ModuleName)
+	results = appendHazardResults(results, artifact, findings.RecreationHazards)
+	results = appendBlastResults(results, findings.BlastRadius)
+	results = appendPolicyResults(results, r.PolicyViolations, artifact)
 
-	log := SARIFLog{
-		Schema:  sarifSchema,
-		Version: sarifVer,
-		Runs: []SARIFRun{
-			{
-				Tool: SARIFTool{
-					Driver: SARIFDriver{
-						Name:           toolName,
-						Version:        toolVer,
-						InformationURI: toolURI,
-						Rules:          defaultRules,
-					},
-				},
-				Results: results,
-			},
-		},
-	}
-
-	return json.MarshalIndent(log, "", "  ")
+	return renderSARIF(results)
 }
 
 // RenderWrapperSARIF formats a WrapperCompatibilityReport into standard SARIF v2.1.0 JSON.
-func RenderWrapperSARIF(res *wrapper.WrapperCompatibilityReport) ([]byte, error) {
+func RenderWrapperSARIF(res *wrapper.WrapperCompatibilityReport, findings Findings) []byte {
 	if res == nil {
-		return json.MarshalIndent(SARIFLog{
-			Schema:  sarifSchema,
-			Version: sarifVer,
-			Runs:    []SARIFRun{},
-		}, "", "  ")
+		return emptySARIF()
 	}
 
-	var results []SARIFResult
+	artifact := artifactOrDefault(res.WrapperPath)
 
+	results := make([]SARIFResult, 0, len(res.Issues)+len(findings.RecreationHazards))
 	for _, item := range res.Issues {
 		level := "error"
-		ruleID := "TF-DIFF-BREAKING-CHANGE"
+		ruleID := ruleBreaking
 		if item.Severity == diff.SeverityWarning {
 			level = "warning"
-			ruleID = "TF-DIFF-WARNING"
+			ruleID = ruleWarning
 		}
-		targetFile := res.WrapperPath
-		if targetFile == "" {
-			targetFile = "main.tf"
+		results = append(results, sarifResult(ruleID, level, artifact,
+			fmt.Sprintf("[%s] %s: %s (Confidence: %s). %s", item.Category, item.Target, item.Description, confidenceText(item.ConfidenceScore), item.Remediation)))
+	}
+	results = appendHazardResults(results, artifact, findings.RecreationHazards)
+	results = appendBlastResults(results, findings.BlastRadius)
+	results = appendPolicyResults(results, res.PolicyViolations, artifact)
+
+	return renderSARIF(results)
+}
+
+func sarifResult(ruleID, level, artifact, message string) SARIFResult {
+	return SARIFResult{
+		RuleID:    ruleID,
+		Level:     level,
+		Message:   SARIFMessageText{Text: message},
+		Locations: sarifLocation(artifact),
+	}
+}
+
+func appendHazardResults(results []SARIFResult, artifact string, hazards []recreation.RecreationHazard) []SARIFResult {
+	for _, hazard := range hazards {
+		results = append(results, sarifResult(ruleRecreationHazard, "error", artifact,
+			fmt.Sprintf("[%s] %s: %s", hazard.HazardType, hazard.Variable, hazard.Description)))
+	}
+	return results
+}
+
+func appendBlastResults(results []SARIFResult, blast *blastradius.BlastRadiusReport) []SARIFResult {
+	if blast == nil {
+		return results
+	}
+	for _, impact := range blast.ImpactedRootModules {
+		if impact.CanSafelyUpdate && len(impact.RemovedInputsPassed) == 0 &&
+			len(impact.MissingRequiredInputs) == 0 && len(impact.RemovedOutputsReferenced) == 0 &&
+			len(impact.RecreationHazards) == 0 {
+			continue
 		}
-
-		results = append(results, SARIFResult{
-			RuleID: ruleID,
-			Level:  level,
-			Message: SARIFMessageText{
-				Text: fmt.Sprintf("[%s] %s: %s (Confidence: %s). %s", item.Category, item.Target, item.Description, confidenceText(item.ConfidenceScore), item.Remediation),
-			},
-			Locations: []SARIFLocation{
-				{
-					PhysicalLocation: SARIFPhysicalLocation{
-						ArtifactLocation: SARIFArtifactLocation{URI: targetFile},
-						Region:           SARIFRegion{StartLine: 1},
-					},
-				},
-			},
-		})
+		results = append(results, sarifResult(ruleBlastRadius, "error", artifactOrDefault(impact.Dir),
+			fmt.Sprintf("[%s] downstream consumer %s is impacted (risk %s): removed inputs %v, missing required inputs %v, removed outputs %v, recreation hazards %v",
+				impact.ModuleName, impact.Dir, impact.RiskScore,
+				impact.RemovedInputsPassed, impact.MissingRequiredInputs,
+				impact.RemovedOutputsReferenced, impact.RecreationHazards)))
 	}
-	results = appendPolicyResults(results, res.PolicyViolations, res.WrapperPath)
-
-	log := SARIFLog{
-		Schema:  sarifSchema,
-		Version: sarifVer,
-		Runs: []SARIFRun{
-			{
-				Tool: SARIFTool{
-					Driver: SARIFDriver{
-						Name:           toolName,
-						Version:        toolVer,
-						InformationURI: toolURI,
-						Rules:          defaultRules,
-					},
-				},
-				Results: results,
-			},
-		},
-	}
-
-	return json.MarshalIndent(log, "", "  ")
+	return results
 }
 
 func appendPolicyResults(results []SARIFResult, violations []policy.Violation, artifact string) []SARIFResult {
-	if artifact == "" {
-		artifact = "main.tf"
-	}
+	artifact = artifactOrDefault(artifact)
 	for _, violation := range violations {
-		results = append(results, SARIFResult{
-			RuleID: "TF-POLICY-VIOLATION",
-			Level:  "error",
-			Message: SARIFMessageText{
-				Text: fmt.Sprintf("[%s] %s", violation.Rule, violation.Message),
-			},
-			Locations: []SARIFLocation{{
-				PhysicalLocation: SARIFPhysicalLocation{
-					ArtifactLocation: SARIFArtifactLocation{URI: artifact},
-					Region:           SARIFRegion{StartLine: 1},
-				},
-			}},
-		})
+		results = append(results, sarifResult(rulePolicy, "error", artifact,
+			fmt.Sprintf("[%s] %s", violation.Rule, violation.Message)))
 	}
 	return results
 }

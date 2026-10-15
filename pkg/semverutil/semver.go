@@ -1,7 +1,6 @@
 package semverutil
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 
@@ -71,15 +70,6 @@ func Sort(versions []string) []string {
 	return result
 }
 
-// SortDesc sorts a slice of version strings in descending semver order.
-func SortDesc(versions []string) []string {
-	result := Sort(versions)
-	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
-		result[i], result[j] = result[j], result[i]
-	}
-	return result
-}
-
 // FilterValid returns only valid semver versions from the given slice.
 func FilterValid(versions []string) []string {
 	var valid []string
@@ -121,10 +111,4 @@ func DetermineBumpType(oldVer, newVer string) BumpType {
 	}
 
 	return BumpPatch
-}
-
-// FormatVersionInfo formats a summary string of the version change.
-func FormatVersionInfo(oldVer, newVer string) string {
-	bump := DetermineBumpType(oldVer, newVer)
-	return fmt.Sprintf("%s -> %s (%s)", oldVer, newVer, bump)
 }

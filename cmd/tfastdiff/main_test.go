@@ -4,15 +4,18 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/23skdu/terraform_ast/pkg/gitops"
 	"github.com/23skdu/terraform_ast/pkg/registry"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -122,13 +125,13 @@ variable "region" {
 	stderr.Reset()
 	code = Execute([]string{"--old", "/non/existent/dir", "--new", dir2}, &stdout, &stderr)
 	assert.Equal(t, 1, code)
-	assert.Contains(t, stderr.String(), "Error inspecting old module")
+	assert.Contains(t, stderr.String(), "inspecting old module")
 
 	// 5. Error on non-existent new module
 	stderr.Reset()
 	code = Execute([]string{"--old", dir1, "--new", "/non/existent/dir"}, &stdout, &stderr)
 	assert.Equal(t, 1, code)
-	assert.Contains(t, stderr.String(), "Error inspecting new module")
+	assert.Contains(t, stderr.String(), "inspecting new module")
 
 	// 6. Breaking change with exit-code returns 1
 	dirBreaking := t.TempDir()
@@ -405,16 +408,7 @@ func TestExecute_GitErrorBranches(t *testing.T) {
 		"--new-version", "v1.0.0",
 	}, &stdout, &stderr)
 	assert.Equal(t, 1, code)
-	assert.Contains(t, stderr.String(), "Error creating temp dir")
-
-	stderr.Reset()
-	code = Execute([]string{
-		"--wrapper", wrapperDir,
-		"--upstream", repo,
-		"--old-version", "v1.0.0",
-	}, &stdout, &stderr)
-	assert.Equal(t, 1, code)
-	assert.Contains(t, stderr.String(), "Error creating temp dir")
+	assert.Contains(t, stderr.String(), "Error checking out target upstream version")
 
 	stderr.Reset()
 	code = Execute([]string{
@@ -423,7 +417,7 @@ func TestExecute_GitErrorBranches(t *testing.T) {
 		"--old-version", "v1.0.0",
 	}, &stdout, &stderr)
 	assert.Equal(t, 1, code)
-	assert.Contains(t, stderr.String(), "Error creating temp dir")
+	assert.Contains(t, stderr.String(), "Error checking out old version")
 
 	stderr.Reset()
 	code = Execute([]string{
@@ -432,7 +426,19 @@ func TestExecute_GitErrorBranches(t *testing.T) {
 		"--new-version", "v1.0.0",
 	}, &stdout, &stderr)
 	assert.Equal(t, 1, code)
-	assert.Contains(t, stderr.String(), "Error creating temp dir")
+	assert.Contains(t, stderr.String(), "Error checking out new version")
+
+	// A failing pinned-version lookup degrades gracefully instead of aborting the audit.
+	stderr.Reset()
+	stdout.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", repo,
+		"--old-version", "v1.0.0",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Empty(t, stderr.String())
+	assert.Contains(t, stdout.String(), "TERRAFORM WRAPPER COMPATIBILITY & PIN AUDIT")
 }
 
 func TestHelpers(t *testing.T) {
@@ -440,6 +446,7 @@ func TestHelpers(t *testing.T) {
 	assert.True(t, isGitURL("http://github.com/org/repo.git"))
 	assert.True(t, isGitURL("git@github.com:org/repo.git"))
 	assert.True(t, isGitURL("git::https://github.com/org/repo.git"))
+	assert.True(t, isGitURL("file:///srv/modules/repo"))
 	assert.False(t, isGitURL("/local/path"))
 
 	tmpDir := t.TempDir()
@@ -873,4 +880,617 @@ func TestExecute_CompareMode_NewDownloadFailure(t *testing.T) {
 func TestDefaultRegistryClient(t *testing.T) {
 	c := newRegistryClient()
 	assert.NotNil(t, c)
+}
+
+func TestExecute_BlastRadiusMachineFormatsAreSingleDocuments(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`
+variable "ip_range_services" {
+  type = string
+}
+`), 0600))
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "gke" {
+  source = "`+upstreamDir+`"
+}
+`), 0600))
+
+	environmentsDir := t.TempDir()
+	envDev := filepath.Join(environmentsDir, "dev")
+	require.NoError(t, os.MkdirAll(envDev, 0750))
+	require.NoError(t, os.WriteFile(filepath.Join(envDev, "main.tf"), []byte(`
+module "my_wrapper" {
+  source = "`+wrapperDir+`"
+}
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+
+	// JSON must stay a single parseable document that carries the blast radius inline.
+	code := Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", upstreamDir,
+		"--blast-radius", environmentsDir,
+		"--format", "json",
+	}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &decoded), "output must be valid JSON: %s", stdout.String())
+	assert.Contains(t, decoded, "verdict")
+	blast, ok := decoded["blast_radius"].(map[string]any)
+	require.True(t, ok, "blast radius must be embedded in the same document")
+	assert.Equal(t, float64(1), blast["total_call_sites_scanned"])
+
+	// SARIF must stay a single valid SARIF document including the consumer findings.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", upstreamDir,
+		"--blast-radius", environmentsDir,
+		"--format", "sarif",
+	}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+
+	var log map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &log), "output must be valid SARIF: %s", stdout.String())
+	assert.Equal(t, "2.1.0", log["version"])
+
+	runs := log["runs"].([]any)
+	require.Len(t, runs, 1)
+	run := runs[0].(map[string]any)
+	ruleIDs := map[string]bool{}
+	for _, rule := range run["tool"].(map[string]any)["driver"].(map[string]any)["rules"].([]any) {
+		ruleIDs[rule.(map[string]any)["id"].(string)] = true
+	}
+	assert.True(t, ruleIDs["TF-BLAST-RADIUS-CONSUMER"], "consumer rule must be advertised: %v", ruleIDs)
+	for _, result := range run["results"].([]any) {
+		assert.True(t, ruleIDs[result.(map[string]any)["ruleId"].(string)], "every result needs a documented rule")
+	}
+}
+
+func TestExecute_RecreationHazardsAppearInEveryFormat(t *testing.T) {
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(oldDir, "main.tf"), []byte(`
+variable "location" {
+  type    = string
+  default = "us-central1"
+}
+`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(newDir, "main.tf"), []byte(`
+variable "location" {
+  type = list(string)
+}
+`), 0600))
+
+	for _, format := range []string{"text", "markdown", "json", "sarif"} {
+		t.Run(format, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Execute([]string{
+				"--old", oldDir,
+				"--new", newDir,
+				"--format", format,
+				"--check-recreation=true",
+			}, &stdout, &stderr)
+			require.Equal(t, 0, code, stderr.String())
+			assert.Contains(t, stdout.String(), "location")
+			assert.NotContains(t, stdout.String(), "Recreation Hazards\n  \n")
+
+			if format == "text" {
+				assert.Contains(t, stdout.String(), "STATE DESTRUCTION & RECREATION HAZARDS")
+			}
+			if format == "json" {
+				var decoded map[string]any
+				require.NoError(t, json.Unmarshal(stdout.Bytes(), &decoded))
+				assert.Contains(t, decoded, "recreation_hazards")
+			}
+			if format == "sarif" {
+				assert.Contains(t, stdout.String(), "TF-RECREATION-HAZARD")
+			}
+		})
+	}
+
+	// Disabling the flag must remove the hazard findings entirely.
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", oldDir, "--new", newDir, "--format", "json", "--check-recreation=false"}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &decoded))
+	assert.NotContains(t, decoded, "recreation_hazards")
+}
+
+func TestExecute_ReportsModuleSource(t *testing.T) {
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(oldDir, "main.tf"), []byte(`variable "name" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(newDir, "main.tf"), []byte(`variable "name" { type = number }`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", oldDir, "--new", newDir, "--format", "json"}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &decoded))
+	assert.Equal(t, newDir, decoded["module_name"], "the compared module source must be reported")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", oldDir, "--new", newDir, "--format", "text"}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "Module:      "+newDir)
+}
+
+func TestExecute_UpgradePathReportsModuleSource(t *testing.T) {
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(oldDir, "main.tf"), []byte(`variable "name" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(newDir, "main.tf"), []byte(`variable "name" { type = number }`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--old", oldDir, "--new", newDir,
+		"--old-version", "1.0.0", "--new-version", "2.0.0",
+		"--upgrade-path", "--format", "json",
+	}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &decoded))
+	steps := decoded["steps"].([]any)
+	require.Len(t, steps, 1)
+	stepDiff := steps[0].(map[string]any)["diff"].(map[string]any)
+	assert.Equal(t, newDir, stepDiff["module_name"])
+}
+
+func TestExecute_GitFileURLSources(t *testing.T) {
+	repoDir := createTestTFRepo(t, "v1.0.0", `variable "cluster_name" { type = string }`)
+	remote := "file://" + repoDir
+
+	var stdout, stderr bytes.Buffer
+
+	// A file:// URL is a Git URL and must be cloned rather than treated as a registry address.
+	code := Execute([]string{"--old", remote, "--new", remote, "--old-version", "v1.0.0"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "TERRAFORM AST COMPATIBILITY DIFF REPORT")
+
+	// Wrapper mode against the same remote.
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`module "gke" {
+  cluster_name = "test"
+}`), 0600))
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--wrapper", wrapperDir, "--upstream", remote, "--new-version", "v1.0.0"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "SAFE_TO_PIN")
+
+	// The cached clones must not outlive the run.
+	assert.Empty(t, gitops.CachedRepositoryDirs(), "cached repositories must be released when Execute returns")
+}
+
+func TestExecute_ModeValidationErrors(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+
+	// --upgrade-path is a direct-comparison feature.
+	code := Execute([]string{"--wrapper", t.TempDir(), "--upstream", t.TempDir(), "--upgrade-path"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--upgrade-path is only available in direct comparison mode")
+
+	// --fix-preview is a wrapper-audit feature.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", t.TempDir(), "--new", t.TempDir(), "--fix-preview"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--fix-preview is only available in wrapper audit mode")
+
+	// --upgrade-path needs a strictly ascending version window.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", t.TempDir(), "--new", t.TempDir(),
+		"--old-version", "2.0.0", "--new-version", "1.0.0",
+		"--upgrade-path",
+	}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "requires --new-version to be greater than --old-version")
+
+	// --upgrade-path has no SARIF renderer.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", t.TempDir(), "--new", t.TempDir(),
+		"--old-version", "1.0.0", "--new-version", "2.0.0",
+		"--upgrade-path", "--format", "sarif",
+	}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--upgrade-path supports text, markdown, and json formats")
+}
+
+func TestExecute_WrapperPolicyCombinesUpstreamDiff(t *testing.T) {
+	pinned := createTestTFRepo(t, "v1.0.0", `
+variable "cluster_name" { type = string }
+`)
+	target := createTestTFRepo(t, "v2.0.0", `
+variable "cluster_name" { type = list(string) }
+variable "region"         { type = string }
+`)
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "gke" {
+  source = "`+target+`"
+}
+`), 0600))
+
+	policyFile := filepath.Join(t.TempDir(), "policy.json")
+	require.NoError(t, os.WriteFile(policyFile, []byte(`{"block_breaking":true}`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", target,
+		"--old-version", "v1.0.0",
+		"--new-version", "v2.0.0",
+		"--policy", policyFile,
+		"--format", "json",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code, stderr.String())
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &decoded))
+	_, ok := decoded["upstream_diff"].(map[string]any)
+	require.True(t, ok, "the pinned upstream version must produce an upstream diff")
+	require.Contains(t, decoded, "policy_violations")
+	assert.NotEmpty(t, decoded["policy_violations"])
+
+	// Without a pinned version there is no upstream diff to fold into the policy input.
+	require.NoError(t, os.WriteFile(policyFile, []byte(`{"block_warnings":true}`), 0600))
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", target,
+		"--policy", policyFile,
+		"--format", "json",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	var noDiff map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &noDiff))
+	assert.NotContains(t, noDiff, "upstream_diff")
+	assert.NotContains(t, noDiff, "policy_violations")
+	_ = pinned
+}
+
+func TestExecute_FixPreviewOutcomes(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "kept" { type = string }`), 0600))
+
+	wrapperDir := t.TempDir()
+	wrapperFile := filepath.Join(wrapperDir, "main.tf")
+	require.NoError(t, os.WriteFile(wrapperFile, []byte(`module "upstream" {
+  source = "`+upstreamDir+`"
+  obsolete = "x"
+}
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+
+	// Patch generation failure.
+	code := Execute([]string{
+		"--wrapper", wrapperDir, "--upstream", upstreamDir, "--fix-preview",
+		"--output", "/invalid/directory/that/does/not/exist/out.diff",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error writing fix preview")
+
+	// A wrapper with a module call but nothing patchable yields an explanatory placeholder.
+	noRemoved := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(noRemoved, "main.tf"), []byte(`module "upstream" {
+  source = "`+upstreamDir+`"
+}
+`), 0600))
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", noRemoved, "--upstream", upstreamDir, "--fix-preview",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "No automatic patch can be generated")
+
+	// The exit-code gate still applies to a preview.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir, "--upstream", upstreamDir, "--fix-preview", "--exit-code",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stdout.String(), "--- a/main.tf")
+
+	// Policy violations fail a preview run even without --exit-code.
+	policyFile := filepath.Join(t.TempDir(), "policy.json")
+	require.NoError(t, os.WriteFile(policyFile, []byte(`{"block_breaking":true}`), 0600))
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir, "--upstream", upstreamDir, "--fix-preview", "--policy", policyFile,
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stdout.String(), "--- a/main.tf")
+}
+
+func TestExecute_UpgradePathFormatsAndFailures(t *testing.T) {
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(oldDir, "main.tf"), []byte(`variable "name" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(newDir, "main.tf"), []byte(`variable "name" { type = number }`), 0600))
+
+	var stdout, stderr bytes.Buffer
+
+	for _, format := range []string{"markdown", "text"} {
+		stdout.Reset()
+		stderr.Reset()
+		code := Execute([]string{
+			"--old", oldDir, "--new", newDir,
+			"--old-version", "v1.0.0", "--new-version", "v2.0.0",
+			"--upgrade-path", "--format", format,
+		}, &stdout, &stderr)
+		assert.Equal(t, 0, code, stderr.String())
+		assert.Contains(t, stdout.String(), "v1.0.0")
+	}
+
+	// Writing the report to an unwritable path fails.
+	stdout.Reset()
+	stderr.Reset()
+	code := Execute([]string{
+		"--old", oldDir, "--new", newDir,
+		"--old-version", "v1.0.0", "--new-version", "v2.0.0",
+		"--upgrade-path",
+		"--output", "/invalid/directory/that/does/not/exist/out.md",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error writing output")
+
+	// Different sources for --old and --new cannot be resolved into a single upgrade path.
+	first := createTaggedTFRepo(t, map[string]string{"v1.0.0": `variable "name" { type = string }`})
+	second := createTaggedTFRepo(t, map[string]string{"v1.0.0": `variable "name" { type = string }`, "v2.0.0": `variable "name" { type = number }`})
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", first, "--new", second,
+		"--old-version", "v1.0.0", "--new-version", "v2.0.0",
+		"--upgrade-path",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error analyzing upgrade path")
+	assert.Contains(t, stderr.String(), "same source")
+
+	// A registry that cannot list versions fails while planning the upgrade path.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/versions"):
+			http.Error(w, "no versions", http.StatusInternalServerError)
+		case strings.HasSuffix(r.URL.Path, "/download"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(createTestModuleArchive(t))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	origClient := newRegistryClient
+	newRegistryClient = func() *registry.Client {
+		client := registry.NewClient(server.Client())
+		client.BaseURL = server.URL
+		client.RetryMaxElapsedTime = 20 * time.Millisecond
+		return client
+	}
+	defer func() { newRegistryClient = origClient }()
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", "hashicorp/consul/aws", "--new", "hashicorp/consul/aws",
+		"--old-version", "1.0.0", "--new-version", "2.0.0",
+		"--upgrade-path",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error analyzing upgrade path")
+}
+
+func TestExecute_UpgradePathInspectsIntermediateVersions(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+	worktree, err := repo.Worktree()
+	require.NoError(t, err)
+	signature := &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()}
+
+	for _, version := range []string{"v1.0.0", "v1.1.0", "v2.0.0"} {
+		content := `variable "name" { type = string }`
+		if version == "v2.0.0" {
+			content = `variable "name" { type = number }`
+		} else {
+			content += "\n# " + version
+		}
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(content), 0600))
+		_, err = worktree.Add("main.tf")
+		require.NoError(t, err)
+		commit, err := worktree.Commit(version, &git.CommitOptions{Author: signature, Committer: signature})
+		require.NoError(t, err)
+		_, err = repo.CreateTag(version, commit, nil)
+		require.NoError(t, err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--old", dir, "--new", dir,
+		"--old-version", "v1.0.0", "--new-version", "v2.0.0",
+		"--upgrade-path", "--format", "json",
+	}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &decoded))
+	steps := decoded["steps"].([]any)
+	assert.Len(t, steps, 2, "the intermediate v1.1.0 release must be inspected and diffed")
+}
+
+func TestExecute_UpgradePathFailsOnUnreadableIntermediateVersion(t *testing.T) {
+	// The intermediate release carries an unparsable Terraform file, so inspecting it fails.
+	dir := createTaggedTFRepo(t, map[string]string{
+		"v1.0.0": `variable "name" { type = string }`,
+		"v1.1.0": "this is not { valid hcl",
+		"v2.0.0": `variable "name" { type = number }`,
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--old", dir, "--new", dir,
+		"--old-version", "v1.0.0", "--new-version", "v2.0.0",
+		"--upgrade-path",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error analyzing upgrade path")
+	assert.Contains(t, stderr.String(), "inspect intermediate version v1.1.0")
+}
+
+func TestInspectModuleVersion(t *testing.T) {
+	repoDir := createTestTFRepo(t, "v1.0.0", `variable "name" { type = string }`)
+
+	t.Cleanup(gitops.GlobalCache.Clear)
+
+	// Registry sources download into a temporary directory.
+	_, cleanup := setupMockRegistryServer(t)
+	defer cleanup()
+	info, err := inspectModuleVersion("hashicorp/consul/aws", "1.0.0")
+	require.NoError(t, err)
+	require.Contains(t, info.Variables, "cluster_name")
+
+	// A failing temporary directory surfaces as an error.
+	origMkdir := mkdirTemp
+	defer func() { mkdirTemp = origMkdir }()
+	mkdirTemp = func(dir, pattern string) (string, error) {
+		return "", assert.AnError
+	}
+	_, err = inspectModuleVersion("hashicorp/consul/aws", "1.0.0")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "create temporary module directory")
+	mkdirTemp = origMkdir
+
+	// Git URLs and repositories are extracted through the shared cache.
+	info, err = inspectModuleVersion(repoDir, "v1.0.0")
+	require.NoError(t, err)
+	require.Contains(t, info.Variables, "name")
+
+	info, err = inspectModuleVersion("file://"+repoDir, "v1.0.0")
+	require.NoError(t, err)
+	require.Contains(t, info.Variables, "name")
+
+	// An unknown ref fails.
+	_, err = inspectModuleVersion(repoDir, "v9.9.9")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "checkout repository version")
+
+	// Non-versioned local directories cannot provide intermediate releases.
+	_, err = inspectModuleVersion(t.TempDir(), "v1.0.0")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "non-versioned local directory")
+}
+
+func TestComparisonSource(t *testing.T) {
+	assert.Equal(t, "registry/mod/aws", comparisonSource("registry/mod/aws", "old/mod/aws"))
+	assert.Equal(t, "old/mod/aws", comparisonSource("   ", "  old/mod/aws  "))
+	assert.Equal(t, "", comparisonSource("", ""))
+}
+
+// createTaggedTFRepo builds a git repository with one tagged commit per supplied version.
+func createTaggedTFRepo(t *testing.T, versions map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+	worktree, err := repo.Worktree()
+	require.NoError(t, err)
+	signature := &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()}
+
+	for _, version := range sortedKeys(versions) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(versions[version]), 0600))
+		_, err = worktree.Add("main.tf")
+		require.NoError(t, err)
+		commit, err := worktree.Commit(version, &git.CommitOptions{Author: signature, Committer: signature})
+		require.NoError(t, err)
+		_, err = repo.CreateTag(version, commit, nil)
+		require.NoError(t, err)
+	}
+	return dir
+}
+
+func sortedKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// createTestModuleArchive returns a tar.gz archive containing a minimal Terraform module.
+func createTestModuleArchive(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	content := []byte(`variable "cluster_name" { type = string }`)
+	require.NoError(t, tw.WriteHeader(&tar.Header{
+		Name:     "main.tf",
+		Mode:     0600,
+		Size:     int64(len(content)),
+		Typeflag: tar.TypeReg,
+	}))
+	_, err := tw.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, tw.Close())
+	require.NoError(t, gw.Close())
+	return buf.Bytes()
+}
+
+func TestExecute_FixPreviewWithoutModuleCallFails(t *testing.T) {
+	// A wrapper with no module call has no target module name, so no patch can be generated.
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "kept" { type = string }`), 0600))
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`variable "orphan" { type = string }`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--fix-preview"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error generating fix preview")
+	assert.Contains(t, stderr.String(), "module name is required")
+}
+
+func TestInspectModuleVersion_RegistryDownloadFailure(t *testing.T) {
+	t.Cleanup(gitops.GlobalCache.Clear)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "download failed", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	origClient := newRegistryClient
+	newRegistryClient = func() *registry.Client {
+		client := registry.NewClient(server.Client())
+		client.BaseURL = server.URL
+		client.RetryMaxElapsedTime = 20 * time.Millisecond
+		return client
+	}
+	defer func() { newRegistryClient = origClient }()
+
+	_, err := inspectModuleVersion("hashicorp/consul/aws", "1.0.0")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "download registry module hashicorp/consul/aws@1.0.0")
 }

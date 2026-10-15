@@ -90,3 +90,30 @@ func TestAnalyzeWrapperHazards(t *testing.T) {
 	assert.Equal(t, "vpc_id", hazards[0].Variable)
 	assert.Contains(t, hazards[0].Description, "Wrapper issue on immutable variable")
 }
+
+func TestFormatHazardsText(t *testing.T) {
+	assert.Equal(t, "", FormatHazardsText(nil))
+	assert.Equal(t, "", FormatHazardsText([]RecreationHazard{}))
+
+	text := FormatHazardsText([]RecreationHazard{
+		{
+			Variable:    "location",
+			Resource:    "google_container_cluster",
+			HazardType:  "VariableType",
+			Severity:    "WARNING_HAZARD",
+			Description: "Location is immutable",
+			Remediation: "Keep location unchanged",
+		},
+		{
+			Variable: "project_id",
+			Resource: "google_container_cluster",
+			Severity: "CRITICAL_HAZARD",
+		},
+	})
+
+	assert.Contains(t, text, "STATE DESTRUCTION & RECREATION HAZARDS (ForceNew)")
+	assert.Contains(t, text, "[WARNING_HAZARD] location (google_container_cluster)")
+	assert.Contains(t, text, "Remediation: Keep location unchanged")
+	assert.Contains(t, text, "[CRITICAL_HAZARD] project_id")
+	assert.NotContains(t, text, "Remediation: \n")
+}

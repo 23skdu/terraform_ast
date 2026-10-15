@@ -36,6 +36,7 @@ func moduleFingerprint(dir string) (string, error) {
 			continue
 		}
 		path := filepath.Join(dir, name)
+		// #nosec G304 -- path is joined from a directory entry read via os.ReadDir
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return "", fmt.Errorf("failed to fingerprint module file %s: %w", path, err)
@@ -61,6 +62,20 @@ func cachedModule(path, fingerprint string) (*ModuleInfo, bool, error) {
 		return nil, false, fmt.Errorf("failed to decode cached module inspection for %s: %w", path, err)
 	}
 	return &info, true, nil
+}
+
+// forgetModuleCacheEntry drops a cached inspection so the next request re-reads the module.
+func forgetModuleCacheEntry(path string) {
+	moduleCache.Lock()
+	defer moduleCache.Unlock()
+
+	delete(moduleCache.entries, path)
+	for i, key := range moduleCache.order {
+		if key == path {
+			moduleCache.order = append(moduleCache.order[:i], moduleCache.order[i+1:]...)
+			break
+		}
+	}
 }
 
 func cacheModule(path, fingerprint string, info *ModuleInfo) error {

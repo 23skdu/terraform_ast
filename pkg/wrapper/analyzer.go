@@ -183,6 +183,11 @@ func AnalyzeWrapper(
 	// 6. Upstream-to-Upstream AST comparison (if pinnedUpstream provided)
 	if pinnedUpstream != nil {
 		report.UpstreamDiff = diff.Compare(pinnedUpstream, targetUpstream, pinnedVersion, targetVersion)
+		// Identify the diffed module by the wrapper's child module call name so nested reports and
+		// SARIF artifact locations never fall back to a temporary directory name.
+		if report.TargetModuleName != "" {
+			report.UpstreamDiff.ModuleName = report.TargetModuleName
+		}
 	}
 
 	// 7. Check new optional features available for adoption
@@ -209,10 +214,11 @@ func AnalyzeWrapper(
 
 	// Count breakages
 	for _, iss := range report.Issues {
-		if iss.Severity == diff.SeverityBreaking {
+		switch iss.Severity {
+		case diff.SeverityBreaking:
 			report.TotalBreaking++
 			report.RemediationSteps = append(report.RemediationSteps, iss.Remediation)
-		} else if iss.Severity == diff.SeverityWarning {
+		case diff.SeverityWarning:
 			report.TotalWarnings++
 		}
 	}

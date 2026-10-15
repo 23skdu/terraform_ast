@@ -13,8 +13,11 @@ COPY go.mod go.sum ./
 RUN go mod download && go mod verify
 
 # Copy remaining source code
+# internal/ holds module-private helpers; it is copied so the image always builds
+# against the complete module even when production code grows an internal dependency.
 COPY cmd/ cmd/
 COPY pkg/ pkg/
+COPY internal/ internal/
 
 # Compile hardened, statically-linked binary:
 # - CGO_ENABLED=0: Statically linked binary without glibc dependencies

@@ -12,7 +12,6 @@ const (
 	SeverityBreaking   ChangeSeverity = "BREAKING"
 	SeverityWarning    ChangeSeverity = "WARNING"
 	SeverityNewFeature ChangeSeverity = "NEW_FEATURE"
-	SeverityInfo       ChangeSeverity = "INFO"
 )
 
 // DifferenceItem represents a single identified difference between module versions.

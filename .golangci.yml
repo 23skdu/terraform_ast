@@ -1,0 +1,54 @@
+# Lint configuration for terraform_ast.
+#
+# The default linter set stays enabled; gosec is added on top so the security
+# scanner is a reproducible part of the quality gate.
+version: "2"
+
+linters:
+  enable:
+    - gosec
+  settings:
+    gosec:
+      # Every gosec rule is enabled. Suppressions live next to the code as
+      # #nosec annotations carrying a justification, so each one can be audited.
+      excludes: []
+    staticcheck:
+      # SA* (correctness) and S1* (simplification) stay enabled. QF* are
+      # staticcheck's opinionated refactoring suggestions ("use fmt.Fprintf
+      # instead of WriteString(fmt.Sprintf(...))" and friends) rather than
+      # defects, so they are not a gate; the ST1* exclusions below are
+      # golangci-lint's own defaults, restated so they survive this override.
+      checks:
+        - all
+        - -ST1000 # at least one file per package should have a package comment
+        - -ST1003 # initialisms in identifiers
+        - -ST1016 # methods on the same type should have the same receiver name
+        - -ST1020 # comment on exported function
+        - -ST1021 # comment on exported type
+        - -ST1022 # comment on exported var
+        - -QF1001 # De Morgan's law
+        - -QF1002 # simple conversion to avoid a regexp
+        - -QF1003 # if/else-if chain to tagged switch
+        - -QF1004 # strings.ReplaceAll instead of strings.Replace with n == -1
+        - -QF1005 # expand call to math.Pow
+        - -QF1006 # lift if+break into loop condition
+        - -QF1007 # merge conditional assignment into variable declaration
+        - -QF1008 # omit embedded fields from selector expression
+        - -QF1009 # use time.Time.Equal instead of the == operator
+        - -QF1010 # convert slice of bytes to string when printing it
+        - -QF1011 # omit redundant type from variable declaration
+        - -QF1012 # fmt.Fprintf instead of WriteString(fmt.Sprintf(...))
+  exclusions:
+    rules:
+      # Test files are not shipped, and their fixtures legitimately need patterns gosec flags in
+      # production code: world-readable git fixtures, mode-0500 directories that simulate
+      # unreadable paths, arbitrary fixture read paths, and subprocess execution for the CLI and
+      # container end-to-end suites.
+      - path: '_test\.go$'
+        linters:
+          - gosec
+
+issues:
+  # Report everything rather than silently capping identical findings.
+  max-issues-per-linter: 0
+  max-same-issues: 0

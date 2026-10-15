@@ -1,12 +1,15 @@
 package terratest
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/23skdu/terraform_ast/internal/goldentest"
 	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/23skdu/terraform_ast/pkg/blastradius"
 	"github.com/23skdu/terraform_ast/pkg/diff"
@@ -50,7 +53,7 @@ func TestTerratest_ValidateFixtures(t *testing.T) {
 				_ = os.RemoveAll(filepath.Join(dir, ".terraform"))
 				_ = os.Remove(filepath.Join(dir, ".terraform.lock.hcl"))
 			})
-			terraform.InitAndValidate(t, opts)
+			terraform.InitAndValidateContext(t, context.Background(), opts)
 		})
 	}
 }
@@ -63,7 +66,7 @@ func TestTerratest_TerraformJSONInspection(t *testing.T) {
 		_ = os.RemoveAll(filepath.Join(dir, ".terraform"))
 		_ = os.Remove(filepath.Join(dir, ".terraform.lock.hcl"))
 	})
-	terraform.InitAndValidate(t, opts)
+	terraform.InitAndValidateContext(t, context.Background(), opts)
 
 	info, err := ast.Inspect(dir)
 	require.NoError(t, err)
@@ -125,15 +128,14 @@ func TestGKE_ASTDiffAndGolden(t *testing.T) {
 	// Golden file testing: JSON
 	goldenJSONPath, err := filepath.Abs("../golden/gke_upstream_diff.golden.json")
 	require.NoError(t, err)
-	jsonData, err := report.RenderJSON(diffReport)
-	require.NoError(t, err)
-	report.AssertGoldenMatch(t, goldenJSONPath, jsonData, false)
+	jsonData := report.RenderJSON(diffReport, report.Findings{})
+	goldentest.AssertGoldenMatch(t, goldenJSONPath, jsonData, false)
 
 	// Golden file testing: Markdown
 	goldenMDPath, err := filepath.Abs("../golden/gke_upstream_diff.golden.md")
 	require.NoError(t, err)
 	mdData := []byte(report.RenderMarkdown(diffReport))
-	report.AssertGoldenMatch(t, goldenMDPath, mdData, false)
+	goldentest.AssertGoldenMatch(t, goldenMDPath, mdData, false)
 }
 
 // TestGKE_WrapperAuditAndGolden verifies GKE wrapper compatibility against golden images.
@@ -171,15 +173,14 @@ func TestGKE_WrapperAuditAndGolden(t *testing.T) {
 	// Golden file testing: JSON
 	goldenJSONPath, err := filepath.Abs("../golden/gke_wrapper_audit.golden.json")
 	require.NoError(t, err)
-	jsonData, err := report.RenderWrapperJSON(wrapperAudit)
-	require.NoError(t, err)
-	report.AssertGoldenMatch(t, goldenJSONPath, jsonData, false)
+	jsonData := report.RenderWrapperJSON(wrapperAudit, report.Findings{})
+	goldentest.AssertGoldenMatch(t, goldenJSONPath, jsonData, false)
 
 	// Golden file testing: Markdown
 	goldenMDPath, err := filepath.Abs("../golden/gke_wrapper_audit.golden.md")
 	require.NoError(t, err)
 	mdData := []byte(report.RenderWrapperMarkdown(wrapperAudit))
-	report.AssertGoldenMatch(t, goldenMDPath, mdData, false)
+	goldentest.AssertGoldenMatch(t, goldenMDPath, mdData, false)
 }
 
 // TestEKS_ASTDiffAndGolden verifies AWS EKS upstream diff against golden images.
@@ -211,15 +212,14 @@ func TestEKS_ASTDiffAndGolden(t *testing.T) {
 	// Golden file testing: JSON
 	goldenJSONPath, err := filepath.Abs("../golden/eks_upstream_diff.golden.json")
 	require.NoError(t, err)
-	jsonData, err := report.RenderJSON(diffReport)
-	require.NoError(t, err)
-	report.AssertGoldenMatch(t, goldenJSONPath, jsonData, false)
+	jsonData := report.RenderJSON(diffReport, report.Findings{})
+	goldentest.AssertGoldenMatch(t, goldenJSONPath, jsonData, false)
 
 	// Golden file testing: Markdown
 	goldenMDPath, err := filepath.Abs("../golden/eks_upstream_diff.golden.md")
 	require.NoError(t, err)
 	mdData := []byte(report.RenderMarkdown(diffReport))
-	report.AssertGoldenMatch(t, goldenMDPath, mdData, false)
+	goldentest.AssertGoldenMatch(t, goldenMDPath, mdData, false)
 }
 
 // TestEKS_WrapperAuditAndGolden verifies AWS EKS wrapper compatibility against golden images.
@@ -254,15 +254,14 @@ func TestEKS_WrapperAuditAndGolden(t *testing.T) {
 	// Golden file testing: JSON
 	goldenJSONPath, err := filepath.Abs("../golden/eks_wrapper_audit.golden.json")
 	require.NoError(t, err)
-	jsonData, err := report.RenderWrapperJSON(wrapperAudit)
-	require.NoError(t, err)
-	report.AssertGoldenMatch(t, goldenJSONPath, jsonData, false)
+	jsonData := report.RenderWrapperJSON(wrapperAudit, report.Findings{})
+	goldentest.AssertGoldenMatch(t, goldenJSONPath, jsonData, false)
 
 	// Golden file testing: Markdown
 	goldenMDPath, err := filepath.Abs("../golden/eks_wrapper_audit.golden.md")
 	require.NoError(t, err)
 	mdData := []byte(report.RenderWrapperMarkdown(wrapperAudit))
-	report.AssertGoldenMatch(t, goldenMDPath, mdData, false)
+	goldentest.AssertGoldenMatch(t, goldenMDPath, mdData, false)
 }
 
 // TestTerratest_DeepObjectSchemaDiff verifies deep object schema diffing with nested attribute level checks.
@@ -348,15 +347,14 @@ func TestTerratest_RecreationHazardsAndSARIF(t *testing.T) {
 	assert.True(t, foundPodsHazard, "ip_range_pods must be detected as ForceNew recreation hazard")
 
 	// 2. SARIF generation validation
-	sarifBytes, err := report.RenderSARIF(diffReport)
-	require.NoError(t, err)
+	sarifBytes := report.RenderSARIF(diffReport, report.Findings{})
 	assert.Contains(t, string(sarifBytes), "sarif-schema-2.1.0.json")
 	assert.Contains(t, string(sarifBytes), "TF-DIFF-BREAKING-CHANGE")
 
 	// Golden file testing: SARIF
 	goldenSARIFPath, err := filepath.Abs("../golden/gke_sarif.golden.json")
 	require.NoError(t, err)
-	report.AssertGoldenMatch(t, goldenSARIFPath, sarifBytes, false)
+	goldentest.AssertGoldenMatch(t, goldenSARIFPath, sarifBytes, false)
 }
 
 // TestTerratest_BlastRadiusConsumerAnalysis verifies downstream root module blast radius analysis.
@@ -393,9 +391,8 @@ func TestTerratest_BlastRadiusConsumerAnalysis(t *testing.T) {
 	// Golden file testing: Blast Radius JSON
 	goldenBlastPath, err := filepath.Abs("../golden/blast_radius.golden.json")
 	require.NoError(t, err)
-	blastJSON, err := blastReport.RenderJSON()
-	require.NoError(t, err)
-	report.AssertGoldenMatch(t, goldenBlastPath, blastJSON, false)
+	blastJSON := blastReport.RenderJSON()
+	goldentest.AssertGoldenMatch(t, goldenBlastPath, blastJSON, false)
 }
 
 // TestTerratest_GitShallowAndRegistryProtocols verifies shallow extraction and registry protocol detection.
@@ -453,7 +450,7 @@ func TestTerratest_PlanFixtures(t *testing.T) {
 				_ = os.RemoveAll(filepath.Join(dir, ".terraform"))
 				_ = os.Remove(filepath.Join(dir, ".terraform.lock.hcl"))
 			})
-			planOutput := terraform.InitAndPlan(t, opts)
+			planOutput := terraform.InitAndPlanContext(t, context.Background(), opts)
 			assert.NotEmpty(t, planOutput)
 		})
 	}
@@ -549,9 +546,173 @@ func TestTerratest_WrapperRecreationHazardsAndSARIF(t *testing.T) {
 	assert.Contains(t, formattedHazards, "google_container_cluster")
 
 	// 2. RenderWrapperSARIF
-	sarifBytes, err := report.RenderWrapperSARIF(audit)
-	require.NoError(t, err)
+	sarifBytes := report.RenderWrapperSARIF(audit, report.Findings{})
 	assert.Contains(t, string(sarifBytes), "sarif-schema-2.1.0.json")
 	assert.Contains(t, string(sarifBytes), "TF-DIFF-BREAKING-CHANGE")
 	assert.Contains(t, string(sarifBytes), "PassedRemovedInput")
+}
+
+// TestTerratest_CLI_ReportsModuleIdentityAndSingleDocumentOutput verifies the end-to-end CLI
+// contract on realistic fixtures: reports name the module, and JSON/SARIF stay single documents
+// when the downstream consumer scan is enabled.
+func TestTerratest_CLI_ReportsModuleIdentityAndSingleDocumentOutput(t *testing.T) {
+	tmpBin := filepath.Join(t.TempDir(), "tfastdiff")
+	build := exec.Command("go", "build", "-o", tmpBin, "../../cmd/tfastdiff")
+	require.NoError(t, build.Run(), "failed to build tfastdiff for the Terratest E2E check")
+
+	gkeV1Dir, _ := filepath.Abs("../fixtures/upstream_gke_v1")
+	gkeV2Dir, _ := filepath.Abs("../fixtures/upstream_gke_v2")
+	gkeWrapperDir, _ := filepath.Abs("../fixtures/gke_wrapper")
+	consumerDir, _ := filepath.Abs("../fixtures/downstream_consumer")
+
+	// 1. The compared module is named in every output format.
+	for _, format := range []string{"text", "markdown", "json"} {
+		t.Run("module identity/"+format, func(t *testing.T) {
+			out, err := exec.Command(tmpBin,
+				"--old", gkeV1Dir,
+				"--new", gkeV2Dir,
+				"--old-version", "v29.0.0",
+				"--new-version", "v30.0.0",
+				"--format", format,
+			).CombinedOutput()
+			require.NoError(t, err, string(out))
+			assert.Contains(t, string(out), gkeV2Dir, "format %s must name the compared module", format)
+		})
+	}
+
+	// 2. Recreation hazards survive the machine-readable formats.
+	for _, format := range []string{"json", "sarif"} {
+		t.Run("hazards/"+format, func(t *testing.T) {
+			out, err := exec.Command(tmpBin,
+				"--old", gkeV1Dir,
+				"--new", gkeV2Dir,
+				"--format", format,
+				"--check-recreation=true",
+			).CombinedOutput()
+			require.NoError(t, err, string(out))
+			assert.Contains(t, string(out), "location")
+			if format == "sarif" {
+				assert.Contains(t, string(out), "TF-RECREATION-HAZARD")
+			}
+		})
+	}
+
+	// 3. --blast-radius keeps JSON and SARIF parseable as a single document.
+	for _, format := range []string{"json", "sarif"} {
+		t.Run("blast radius/"+format, func(t *testing.T) {
+			out, err := exec.Command(tmpBin,
+				"--wrapper", gkeWrapperDir,
+				"--upstream", gkeV2Dir,
+				"--blast-radius", consumerDir,
+				"--format", format,
+			).CombinedOutput()
+			require.NoError(t, err, string(out))
+
+			var document any
+			require.NoError(t, json.Unmarshal(out, &document),
+				"format %s must emit a single valid document", format)
+
+			if format == "sarif" {
+				assert.Contains(t, string(out), "TF-BLAST-RADIUS-CONSUMER")
+			} else {
+				assert.Contains(t, string(out), `"blast_radius"`)
+			}
+		})
+	}
+}
+
+// TestTerratest_CLI_UpgradePathAcrossGitTags drives the multi-version analysis end to end against a
+// real git repository, exercising the shared repository cache.
+func TestTerratest_CLI_UpgradePathAcrossGitTags(t *testing.T) {
+	tmpBin := filepath.Join(t.TempDir(), "tfastdiff")
+	build := exec.Command("go", "build", "-o", tmpBin, "../../cmd/tfastdiff")
+	require.NoError(t, build.Run(), "failed to build tfastdiff for the Terratest E2E check")
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init", "-q", ".")
+	runGit(t, repoDir, "config", "user.email", "terratest@example.com")
+	runGit(t, repoDir, "config", "user.name", "Terratest")
+
+	for _, fixture := range []struct{ tag, source string }{
+		{"v29.0.0", "../fixtures/upstream_gke_v1"},
+		{"v29.5.0", "../fixtures/upstream_gke_v1"},
+		{"v30.0.0", "../fixtures/upstream_gke_v2"},
+	} {
+		// Copy the whole fixture and append a marker so every tag points at a distinct commit.
+		copyFixtureTree(t, fixture.source, repoDir)
+		marker, err := os.ReadFile(filepath.Join(repoDir, "RELEASE"))
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(repoDir, "RELEASE"), append(marker, []byte(fixture.tag+"\n")...), 0600))
+		runGit(t, repoDir, "add", "-A")
+		runGit(t, repoDir, "commit", "-q", "-m", fixture.tag)
+		runGit(t, repoDir, "tag", fixture.tag)
+	}
+
+	out, err := exec.Command(tmpBin,
+		"--old", repoDir,
+		"--new", repoDir,
+		"--old-version", "v29.0.0",
+		"--new-version", "v30.0.0",
+		"--upgrade-path",
+		"--format", "markdown",
+		"--exit-code",
+	).CombinedOutput()
+	require.Error(t, err, "a breaking major bump must fail the exit-code gate")
+	assert.Contains(t, string(out), "Terraform Upgrade Path: v29.0.0 -> v30.0.0")
+	assert.Contains(t, string(out), "v29.5.0", "the intermediate release must be part of the analysed path")
+	assert.Contains(t, string(out), "BREAKING_CHANGES")
+
+	jsonOut, err := exec.Command(tmpBin,
+		"--old", repoDir,
+		"--new", repoDir,
+		"--old-version", "v29.0.0",
+		"--new-version", "v30.0.0",
+		"--upgrade-path",
+		"--format", "json",
+	).CombinedOutput()
+	require.NoError(t, err, string(jsonOut))
+
+	var pathReport struct {
+		Steps []struct {
+			FromVersion string `json:"from_version"`
+			ToVersion   string `json:"to_version"`
+			Diff        struct {
+				ModuleName string `json:"module_name"`
+			} `json:"diff"`
+		} `json:"steps"`
+	}
+	require.NoError(t, json.Unmarshal(jsonOut, &pathReport))
+	require.Len(t, pathReport.Steps, 2)
+	assert.Equal(t, "v29.5.0", pathReport.Steps[0].ToVersion)
+	for _, step := range pathReport.Steps {
+		assert.Equal(t, repoDir, step.Diff.ModuleName, "every step must identify the compared module")
+	}
+}
+
+// copyFixtureTree copies the Terraform files of a fixture directory into dst.
+func copyFixtureTree(t *testing.T, src, dst string) {
+	t.Helper()
+	entries, err := os.ReadDir(src)
+	require.NoError(t, err)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".tf") && !strings.HasSuffix(name, ".tf.json") {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(src, name))
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(dst, name), content, 0600))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dst, "RELEASE"), []byte("release: "), 0600))
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %v failed: %s", args, output)
 }

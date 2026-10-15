@@ -3,20 +3,25 @@ package report
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
-	"testing"
 
+	"github.com/23skdu/terraform_ast/pkg/blastradius"
 	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/policy"
+	"github.com/23skdu/terraform_ast/pkg/recreation"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
+// Findings carries the optional analyses that augment a report. They are embedded into the
+// machine-readable documents so that text, Markdown, JSON and SARIF output all describe the same
+// set of findings instead of silently dropping the ones a given format cannot express inline.
+type Findings struct {
+	RecreationHazards []recreation.RecreationHazard  `json:"recreation_hazards,omitempty"`
+	BlastRadius       *blastradius.BlastRadiusReport `json:"blast_radius,omitempty"`
+}
+
 // RenderText formats a DiffReport into human-readable text.
-func RenderText(r *diff.DiffReport) string {
+func RenderText(r *diff.DiffReport, findings Findings) string {
 	if r == nil {
 		return ""
 	}
@@ -61,6 +66,9 @@ func RenderText(r *diff.DiffReport) string {
 			}
 		}
 		sb.WriteString("\n")
+	}
+	if len(findings.RecreationHazards) > 0 {
+		sb.WriteString(recreation.FormatHazardsText(findings.RecreationHazards))
 	}
 	writePolicyViolations(&sb, r.PolicyViolations)
 
@@ -149,13 +157,20 @@ func writePolicyViolations(sb *strings.Builder, violations []policy.Violation) {
 	sb.WriteString("\n")
 }
 
-// RenderJSON serializes a DiffReport into JSON bytes.
-func RenderJSON(r *diff.DiffReport) ([]byte, error) {
-	return json.MarshalIndent(r, "", "  ")
+// RenderJSON serializes a DiffReport into JSON bytes. The optional findings are embedded at the
+// top level so a report that carries extra analyses stays a single valid JSON document.
+//
+// Every field of the report graph is a string, number, boolean or slice of those, so encoding
+// cannot fail and no error is returned.
+func RenderJSON(r *diff.DiffReport, findings Findings) []byte {
+	return marshalJSON(struct {
+		*diff.DiffReport
+		Findings
+	}{DiffReport: r, Findings: findings})
 }
 
 // RenderWrapperText formats a WrapperCompatibilityReport into text.
-func RenderWrapperText(w *wrapper.WrapperCompatibilityReport) string {
+func RenderWrapperText(w *wrapper.WrapperCompatibilityReport, findings Findings) string {
 	if w == nil {
 		return ""
 	}
@@ -190,6 +205,13 @@ func RenderWrapperText(w *wrapper.WrapperCompatibilityReport) string {
 			sb.WriteString(fmt.Sprintf("  • [%s] %s: %s\n", feat.Category, feat.Target, feat.Description))
 		}
 		sb.WriteString("\n")
+	}
+	if len(findings.RecreationHazards) > 0 {
+		sb.WriteString(recreation.FormatHazardsText(findings.RecreationHazards))
+	}
+	if findings.BlastRadius != nil {
+		sb.WriteString("\n")
+		sb.WriteString(findings.BlastRadius.RenderText())
 	}
 	writePolicyViolations(&sb, w.PolicyViolations)
 
@@ -244,55 +266,16 @@ func RenderWrapperMarkdown(w *wrapper.WrapperCompatibilityReport) string {
 }
 
 // RenderWrapperJSON serializes a WrapperCompatibilityReport into JSON bytes.
-func RenderWrapperJSON(w *wrapper.WrapperCompatibilityReport) ([]byte, error) {
-	return json.MarshalIndent(w, "", "  ")
+func RenderWrapperJSON(w *wrapper.WrapperCompatibilityReport, findings Findings) []byte {
+	return marshalJSON(struct {
+		*wrapper.WrapperCompatibilityReport
+		Findings
+	}{WrapperCompatibilityReport: w, Findings: findings})
 }
 
-func getRepoRoot() string {
-	dir, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return ""
-}
-
-// AssertGoldenMatch verifies that actual output matches the canonical golden file at goldenPath.
-// If updateGolden is true or UPDATE_GOLDEN environment variable is set to true, it writes/updates the golden file.
-func AssertGoldenMatch(t *testing.T, goldenPath string, actual []byte, updateGolden bool) {
-	t.Helper()
-	if os.Getenv("UPDATE_GOLDEN") == "true" {
-		updateGolden = true
-	}
-
-	root := getRepoRoot()
-	actualStr := string(actual)
-	if root != "" {
-		// Replace both native OS path and slash-normalized path
-		actualStr = strings.ReplaceAll(actualStr, root, "<WORKSPACE>")
-		actualStr = strings.ReplaceAll(actualStr, filepath.ToSlash(root), "<WORKSPACE>")
-	}
-	actualSanitized := []byte(actualStr)
-
-	if updateGolden {
-		err := os.MkdirAll(filepath.Dir(goldenPath), 0750)
-		require.NoError(t, err)
-		err = os.WriteFile(filepath.Clean(goldenPath), actualSanitized, 0600)
-		require.NoError(t, err)
-		return
-	}
-
-	// #nosec G304 -- test golden verification path
-	expected, err := os.ReadFile(filepath.Clean(goldenPath))
-	require.NoError(t, err, "golden file %s missing. Run with UPDATE_GOLDEN=true to generate", goldenPath)
-	assert.Equal(t, string(expected), string(actualSanitized), "golden file mismatch for %s", goldenPath)
+// marshalJSON encodes v as indented JSON. The report graph is composed exclusively of JSON-safe
+// types, so encoding cannot fail and no error is returned.
+func marshalJSON(v any) []byte {
+	encoded, _ := json.MarshalIndent(v, "", "  ")
+	return encoded
 }

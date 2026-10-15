@@ -27,10 +27,16 @@ type ModuleVersionsResponse struct {
 	} `json:"modules"`
 }
 
+// DefaultRetryMaxElapsedTime bounds how long transient registry failures are retried.
+const DefaultRetryMaxElapsedTime = 2 * time.Minute
+
 // Client interacts with the Terraform Module Registry API.
 type Client struct {
 	HTTPClient *http.Client
 	BaseURL    string
+	// RetryMaxElapsedTime bounds how long transient failures (429 and 5xx responses) are retried.
+	// Zero selects DefaultRetryMaxElapsedTime; tests lower it to keep runs fast.
+	RetryMaxElapsedTime time.Duration
 }
 
 // NewClient creates a new Terraform Registry client.
@@ -49,8 +55,12 @@ func NewClient(httpClient *http.Client) *Client {
 // IsRegistrySource determines whether a module source string is a Terraform Registry identifier.
 func IsRegistrySource(source string) bool {
 	trimmed := strings.TrimSpace(source)
+	if trimmed == "" {
+		return false
+	}
 	if strings.HasPrefix(trimmed, ".") ||
 		strings.HasPrefix(trimmed, "/") ||
+		strings.HasPrefix(trimmed, "~") ||
 		strings.HasPrefix(trimmed, "git::") ||
 		strings.HasPrefix(trimmed, "git@") ||
 		strings.HasPrefix(trimmed, "http://") ||
@@ -58,23 +68,45 @@ func IsRegistrySource(source string) bool {
 		strings.HasSuffix(trimmed, ".git") {
 		return false
 	}
+	// A source that resolves to a directory on disk is always a local module: a bare relative
+	// path such as "modules/gke/v30" has the same shape as a registry address and must not be
+	// mistaken for one.
+	if fi, err := os.Stat(trimmed); err == nil && fi.IsDir() {
+		return false
+	}
 	parts := strings.Split(trimmed, "/")
 	// Standard 3-part registry format: namespace/name/provider
 	// Or hostname/namespace/name/provider (4 parts)
-	return len(parts) == 3 || len(parts) == 4
+	if len(parts) != 3 && len(parts) != 4 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // ParseRegistrySource parses a registry source into hostname, namespace, name, and provider.
+// It accepts exactly the shapes IsRegistrySource recognises: namespace/name/provider, optionally
+// prefixed with a hostname. Empty components are rejected so a malformed address can never be
+// turned into a request against a partially empty registry path.
 func ParseRegistrySource(source string) (host, namespace, name, provider string, err error) {
 	trimmed := strings.TrimSpace(source)
 	parts := strings.Split(trimmed, "/")
+	if len(parts) != 3 && len(parts) != 4 {
+		return "", "", "", "", fmt.Errorf("invalid registry module source format: %s", source)
+	}
+	for _, part := range parts {
+		if part == "" {
+			return "", "", "", "", fmt.Errorf("invalid registry module source format: %s", source)
+		}
+	}
 	if len(parts) == 3 {
 		return "registry.terraform.io", parts[0], parts[1], parts[2], nil
 	}
-	if len(parts) == 4 {
-		return parts[0], parts[1], parts[2], parts[3], nil
-	}
-	return "", "", "", "", fmt.Errorf("invalid registry module source format: %s", source)
+	return parts[0], parts[1], parts[2], parts[3], nil
 }
 
 func (c *Client) doRequestWithBackoff(req *http.Request) (*http.Response, error) {
@@ -86,14 +118,18 @@ func (c *Client) doRequestWithBackoff(req *http.Request) (*http.Response, error)
 			return err
 		}
 		if resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode <= 599) {
-			resp.Body.Close()
+			// The body is discarded so the connection can be reused for the retry.
+			_ = resp.Body.Close()
 			return fmt.Errorf("temporary registry error: %d", resp.StatusCode)
 		}
 		return nil
 	}
 
 	b := backoff.NewExponentialBackOff()
-	b.MaxElapsedTime = 2 * time.Minute
+	b.MaxElapsedTime = c.RetryMaxElapsedTime
+	if b.MaxElapsedTime <= 0 {
+		b.MaxElapsedTime = DefaultRetryMaxElapsedTime
+	}
 
 	err := backoff.Retry(operation, backoff.WithContext(b, req.Context()))
 	return resp, err
@@ -116,7 +152,7 @@ func (c *Client) ListVersions(ctx context.Context, source string) ([]string, err
 	if err != nil {
 		return nil, fmt.Errorf("registry API request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("registry returned status %d for module %s", resp.StatusCode, source)
@@ -179,7 +215,7 @@ func (c *Client) DownloadModule(ctx context.Context, source, version, destDir st
 	if err != nil {
 		return fmt.Errorf("download request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("module download returned status %d", resp.StatusCode)
@@ -204,7 +240,7 @@ func (c *Client) DownloadModule(ctx context.Context, source, version, destDir st
 		if err != nil {
 			return fmt.Errorf("failed to fetch archive from %s: %w", downloadURL, err)
 		}
-		defer dlResp.Body.Close()
+		defer func() { _ = dlResp.Body.Close() }()
 		if dlResp.StatusCode != http.StatusOK {
 			return fmt.Errorf("archive fetch returned status %d", dlResp.StatusCode)
 		}
@@ -227,7 +263,7 @@ func extractTarGz(r io.Reader, destDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize gzip reader: %w", err)
 	}
-	defer gzReader.Close()
+	defer func() { _ = gzReader.Close() }()
 
 	tarReader := tar.NewReader(gzReader)
 	cleanDest := filepath.Clean(destDir)

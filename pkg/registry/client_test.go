@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,6 +57,54 @@ func TestIsRegistrySource(t *testing.T) {
 	assert.False(t, IsRegistrySource("git@github.com:org/repo.git"))
 	assert.False(t, IsRegistrySource("https://github.com/org/repo.git"))
 	assert.False(t, IsRegistrySource("invalid-source"))
+	assert.False(t, IsRegistrySource(""))
+	assert.False(t, IsRegistrySource("   "))
+	assert.False(t, IsRegistrySource("a//c"))
+	assert.False(t, IsRegistrySource("~/modules/gke/v30"))
+}
+
+// TestIsRegistrySource_LocalPathsWithRegistryShape guards against a bare relative path that happens
+// to have three or four segments being downloaded from the public registry.
+func TestIsRegistrySource_LocalPathsWithRegistryShape(t *testing.T) {
+	local := t.TempDir()
+	nested := filepath.Join(local, "modules", "gke", "v30")
+	require.NoError(t, os.MkdirAll(nested, 0750))
+
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(local))
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	assert.False(t, IsRegistrySource("modules/gke/v30"), "an existing relative path is a local module")
+	assert.False(t, IsRegistrySource(nested), "an existing absolute path is a local module")
+	assert.True(t, IsRegistrySource("terraform-google-modules/kubernetes-engine/google"))
+}
+
+func TestParseRegistrySourceRejectsEmptyComponents(t *testing.T) {
+	// ParseRegistrySource must accept exactly the shapes IsRegistrySource recognises.
+	for _, source := range []string{"//", "/a/b", "a//b", "a/b/", "a/", "a/b/c/d/e", ""} {
+		host, namespace, name, provider, err := ParseRegistrySource(source)
+		require.Error(t, err, "expected %q to be rejected", source)
+		assert.Empty(t, host)
+		assert.Empty(t, namespace)
+		assert.Empty(t, name)
+		assert.Empty(t, provider)
+	}
+
+	// Surrounding whitespace is tolerated on a well formed address.
+	host, namespace, name, provider, err := ParseRegistrySource("  terraform-aws-modules/eks/aws  ")
+	require.NoError(t, err)
+	assert.Equal(t, "registry.terraform.io", host)
+	assert.Equal(t, "terraform-aws-modules", namespace)
+	assert.Equal(t, "eks", name)
+	assert.Equal(t, "aws", provider)
+
+	// Whatever IsRegistrySource accepts, ParseRegistrySource must also accept, and vice versa.
+	for _, source := range []string{"a/b/c", "a/b/c/d", "//", "a//b", "a/b/c/d/e", "", "  a/b/c  "} {
+		_, _, _, _, parseErr := ParseRegistrySource(source)
+		assert.Equal(t, IsRegistrySource(source), parseErr == nil,
+			"classifier and parser disagree for %q", source)
+	}
 }
 
 func TestParseRegistrySource(t *testing.T) {
@@ -187,6 +236,7 @@ func TestRegistryClient_DownloadModule(t *testing.T) {
 
 	client := NewClient(server.Client())
 	client.BaseURL = server.URL
+	client.RetryMaxElapsedTime = 50 * time.Millisecond
 	ctx := context.Background()
 
 	// 1. Download via X-Terraform-Get header
@@ -224,6 +274,7 @@ func TestRegistryClient_DownloadModule(t *testing.T) {
 	defer badNetworkServer.Close()
 	badNetClient := NewClient(badNetworkServer.Client())
 	badNetClient.BaseURL = badNetworkServer.URL
+	badNetClient.RetryMaxElapsedTime = 50 * time.Millisecond
 	err = badNetClient.DownloadModule(ctx, "hashicorp/bad-net/aws", "1.0.0", t.TempDir())
 	assert.Error(t, err)
 
@@ -345,3 +396,48 @@ func TestRegistryClient_RequestCreationErrors(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestRegistryClient_RetriesTransientFailures(t *testing.T) {
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/modules/hashicorp/flaky/aws/versions":
+			attempts++
+			if attempts == 1 {
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			_, _ = w.Write([]byte(`{"modules": [{"versions": [{"version": "1.0.0"}]}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Client())
+	client.BaseURL = server.URL
+	client.RetryMaxElapsedTime = 5 * time.Second
+
+	versions, err := client.ListVersions(context.Background(), "hashicorp/flaky/aws")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"1.0.0"}, versions)
+	assert.Equal(t, 2, attempts, "the request must be retried after a 429 response")
+	assert.Equal(t, time.Duration(0), NewClient(nil).RetryMaxElapsedTime, "zero selects the documented default at call time")
+	assert.Equal(t, 2*time.Minute, DefaultRetryMaxElapsedTime)
+
+	var serverErrors int
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverErrors++
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer failing.Close()
+
+	failingClient := NewClient(failing.Client())
+	failingClient.BaseURL = failing.URL
+	failingClient.RetryMaxElapsedTime = 20 * time.Millisecond
+
+	// 5xx responses exhaust the retry budget and surface as a request failure.
+	_, err = failingClient.ListVersions(context.Background(), "hashicorp/flaky/aws")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "registry API request failed")
+	assert.Equal(t, 1, serverErrors, "the retry budget expires before the first backoff interval")
+}

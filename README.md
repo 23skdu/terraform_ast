@@ -12,11 +12,11 @@
 - **AST Inspection & Parsing**: Uses [`github.com/hashicorp/terraform-config-inspect`](https://github.com/hashicorp/terraform-config-inspect) and HCL parsing to extract variables, outputs, module calls, provider requirements and aliases, validation rules, and type constraints from both `.tf` and `.tf.json` files. Module meta-arguments are excluded from forwarded input analysis, and statically declared variable nullability is tracked.
 - **Terraform Registry Protocol**: Directly downloads and inspects modules from the Terraform Registry (e.g. `terraform-google-modules/kubernetes-engine/google`, `terraform-aws-modules/eks/aws`).
 - **Deep Structural Object Schema Diffing**: Analyzes nested `object({ ... })` type constraints attribute-by-attribute (attribute additions, removals, optional-to-required transitions, and type shifts).
-- **Blast-Radius & Consumer Analysis**: Recursively scans Terraform root modules and Terragrunt `terragrunt.hcl` configurations to evaluate consumer-level impact (`--blast-radius ./environments`).
+- **Blast-Radius & Consumer Analysis**: Recursively scans Terraform root modules and Terragrunt `terragrunt.hcl` configurations to evaluate consumer-level impact (`--blast-radius ./environments`). Findings are embedded in the same document for every output format, so JSON and SARIF stay machine-parseable.
 - **Confidence-Scored Findings & Incremental Inspection**: Adds per-finding confidence scores to reports and reuses module inspections while source files remain unchanged; edits invalidate cached results.
-- **State Destruction & Recreation Heuristics**: Flags `ForceNew` destruction hazards on critical immutable cloud resources (GKE cluster name, project ID, location, secondary subnet CIDRs, EKS cluster name, VPC ID).
+- **State Destruction & Recreation Heuristics**: Flags `ForceNew` destruction hazards on critical immutable cloud resources (GKE cluster name, project ID, location, secondary subnet CIDRs, EKS cluster name, VPC ID). `--check-recreation` applies to every output format, including `TF-RECREATION-HAZARD` SARIF rules for GitHub Code Scanning.
 - **OASIS SARIF v2.1.0 Export**: Generates industry-standard SARIF reports (`--format sarif`) for direct integration with GitHub Code Scanning.
-- **Git Optimization & In-Memory Caching**: Implements shallow cloning (`--depth 1`) and thread-safe repository caching to maximize analysis speed.
+- **Git Optimization & In-Memory Caching**: Implements shallow cloning (`--depth 1`) and a thread-safe repository cache that clones each repository once per run and reuses the local copy for every tag evaluation, so `--upgrade-path` across a major version no longer re-downloads the repository for each intermediate release.
 - **Semantic Versioning & Pinning**: Uses [`golang.org/x/mod/semver`](https://pkg.go.dev/golang.org/x/mod/semver) to detect major breaking bumps, minor additions, patch updates, and downgrade hazards.
 - **Breaking Change Detection**:
   - **Removed inputs**: Arguments passed to upstream that are no longer supported.
@@ -32,7 +32,7 @@
 - **Multi-Format Output**: Terminal text with visual indicators, GitHub-flavored Markdown for PR comments, machine-readable JSON for CI/CD gates, and SARIF for code scanning.
 - **Policy & Remediation Previews**: Enforce JSON-defined breaking-change, warning, downgrade, and maximum-bump rules; preview a unified patch for removed wrapper arguments without modifying Terraform files.
 - **Upgrade-Path Analysis**: Compare adjacent semantic-version Git tags or Registry releases across a major-version jump, identify the last continuously safe version, and emit text, Markdown, or JSON reports.
-- **Enterprise Test Coverage**: Validated via [Terratest](test/terratest/) on realistic GKE/EKS fixtures and [Golden Image / Golden File](test/golden/) methodology.
+- **Enterprise Test Coverage**: **100% statement coverage** across every package, enforced in CI. Validated via [Terratest](test/terratest/) on realistic GKE/EKS fixtures, [Golden Image / Golden File](test/golden/) regression testing, and native Go fuzz targets over every parser.
 
 ---
 
@@ -91,7 +91,7 @@ Directly compare two versions of an upstream module:
   --format text
 ```
 
-### 4. GitHub Action and Pre-Commit
+### 5. GitHub Action and Pre-Commit
 
 Use the Docker-based GitHub Action with explicit module inputs:
 
@@ -142,6 +142,7 @@ repos:
 - **Target Module**: `gke`
 - **Target Version**: `v30.0.0`
 - **Recommended Pin**: `version = "30.0.0"`
+- **Safest Known Pin**: `v29.0.0` — Keep the currently pinned upstream version until the wrapper compatibility issues are resolved.
 - **Verdict**: `BREAKING_CHANGES_DETECTED`
 
 > [!CAUTION]
@@ -149,20 +150,20 @@ repos:
 
 ### 🚨 Compatibility Issues (6)
 
-| Category | Target | Description | Remediation |
-| :--- | :--- | :--- | :--- |
-| `BrokenOutputDelegation` | `legacy_network_tag` | Wrapper output 'legacy_network_tag' references module.gke.legacy_network_tag, but output was removed | Update or remove output "legacy_network_tag" in wrapper outputs.tf |
-| `MissingRequiredInput` | `cluster_autoscaling_profile` | Target upstream v30.0.0 requires input 'cluster_autoscaling_profile' (no default), but wrapper call 'gke' does not provide it | Add argument 'cluster_autoscaling_profile = ...' to module "gke" block in wrapper |
-| `MissingRequiredInput` | `grant_registry_access` | Target upstream v30.0.0 requires input 'grant_registry_access' (no default), but wrapper call 'gke' does not provide it | Add argument 'grant_registry_access = ...' to module "gke" block in wrapper |
-| `PassedRemovedInput` | `ip_range_services` | Wrapper passes argument 'ip_range_services' to child module 'gke', but 'ip_range_services' is not an accepted input | Remove argument 'ip_range_services' from module "gke" block in wrapper |
-| `TypeMismatch` | `ip_range_pods` | Wrapper variable 'ip_range_pods' type 'string' is incompatible with upstream expected type 'list(string)' | Update variable "ip_range_pods" in wrapper to type = list(string) |
-| `TypeMismatch` | `zones` | Wrapper variable 'zones' type 'list(string)' differs from upstream 'set(string)': Type converted from list to set | Align variable "zones" with upstream type |
+| Category | Target | Description | Confidence | Remediation |
+| :--- | :--- | :--- | :--- | :--- |
+| `BrokenOutputDelegation` | `legacy_network_tag` | Wrapper output 'legacy_network_tag' references module.gke.legacy_network_tag, but output 'legacy_network_tag' was removed in target upstream v30.0.0 | 9/10 | Update or remove output "legacy_network_tag" in wrapper outputs.tf |
+| `MissingRequiredInput` | `cluster_autoscaling_profile` | Target upstream v30.0.0 requires input 'cluster_autoscaling_profile' (no default), but wrapper call 'gke' does not provide it | 9/10 | Add argument 'cluster_autoscaling_profile = ...' to module "gke" block in wrapper |
+| `MissingRequiredInput` | `grant_registry_access` | Target upstream v30.0.0 requires input 'grant_registry_access' (no default), but wrapper call 'gke' does not provide it | 9/10 | Add argument 'grant_registry_access = ...' to module "gke" block in wrapper |
+| `PassedRemovedInput` | `ip_range_services` | Wrapper passes argument 'ip_range_services' to child module 'gke', but 'ip_range_services' is not an accepted input in target upstream v30.0.0 | 9/10 | Remove argument 'ip_range_services' from module "gke" block in wrapper |
+| `TypeMismatch` | `ip_range_pods` | Wrapper variable 'ip_range_pods' type 'string' is incompatible with upstream expected type 'list(string)' | 8/10 | Update variable "ip_range_pods" in wrapper to type = list(string) |
+| `TypeMismatch` | `zones` | Wrapper variable 'zones' type 'list(string)' differs from upstream 'set(string)': Type converted from list to set (Terraform automatically coerces list to set, but ordering is not preserved) | 8/10 | Align variable "zones" with upstream type |
 
 ### 💡 Available Upstream Features (1)
 
-| Category | Target | Description |
-| :--- | :--- | :--- |
-| `OptionalVariableAvailable` | `enable_cost_allocation` | New optional upstream parameter 'enable_cost_allocation' (type bool) can be exposed in wrapper |
+| Category | Target | Description | Confidence |
+| :--- | :--- | :--- | :--- |
+| `OptionalVariableAvailable` | `enable_cost_allocation` | New optional upstream parameter 'enable_cost_allocation' (type bool) can be exposed in wrapper | 9/10 |
 ```
 
 ---
@@ -174,37 +175,79 @@ Full architectural and technical specifications are available under [`docs/`](do
 - [Architecture & Design](docs/ARCHITECTURE.md): Component breakdown, pipelines, and class diagrams.
 - [CLI Reference & CI/CD Guide](docs/CLI_USAGE.md): Complete flag reference, exit codes, and GitHub Actions integration.
 - [Compatibility Rules](docs/COMPATIBILITY_RULES.md): Detailed classification taxonomy for breaking changes, downgrades, and new features.
-- [Testing Methodology](docs/TESTING_METHODOLOGY.md): Terratest validation, golden file verification, and 100% coverage guidelines.
+- [Testing Methodology](docs/TESTING_METHODOLOGY.md): Unit, fuzz and Terratest validation, golden file verification, and the 100% coverage gate.
 - [Strategic Roadmap](docs/ROADMAP.md): Evolution plan covering pre-commit hooks, codemods, and multi-version planning.
 
 ---
 
 ## Testing & Quality Assurance
 
-This repository enforces **100% statement coverage** across all packages.
+Every package is held at **100% statement coverage**, and the gate is enforced in CI so it cannot
+silently regress.
 
-Run all unit, integration, and terratest suites:
+Run everything (gofmt, vet, unit tests, coverage gate, fuzz smoke run):
 
 ```bash
-go test -v -cover ./...
+./scripts/verify.sh          # default: 10s per fuzz target
+./scripts/verify.sh 60       # longer fuzz campaign
 ```
 
-Run Terratest validation against local Terraform engine:
+### Unit tests
+
+Run the unit suite and inspect per-package coverage:
+
+```bash
+go test -cover ./...
+go test -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out | grep -v '100.0%'   # must print nothing
+```
+
+### Fuzz tests
+
+Native Go fuzz targets cover every untrusted-input parser. Each one is seeded, runs as part of
+`go test`, and asserts a real invariant rather than "does not crash":
+
+| Target | Package | Invariant |
+| :--- | :--- | :--- |
+| `FuzzInspect` | `pkg/ast` | Inspect never panics and re-inspection is stable |
+| `FuzzCheckTypeCompatibility` | `pkg/ast` | Compatible is never breaking; `any` widening/narrowing rules hold |
+| `FuzzParseObjectSchema` | `pkg/ast` | Parsed attribute keys always match their recorded names |
+| `FuzzDiscoverCallSites` | `pkg/blastradius` | Consumer scanning never panics and always yields a complete call site |
+| `FuzzTerragruntInputKey` | `pkg/blastradius` | Terragrunt keys resolve to a name or cleanly fail |
+| `FuzzDiscoverJSONCallSites` | `pkg/blastradius` | Terraform JSON scanning never panics |
+| `FuzzPreviewRemovedInputs` | `pkg/codemod` | Patch generation never modifies the wrapper it inspects |
+| `FuzzUnifiedReplacement` | `pkg/codemod` | Generated patches always carry a valid unified diff header |
+| `FuzzIsRegistrySource` | `pkg/registry` | Local paths and VCS addresses are never treated as Registry sources |
+| `FuzzParseRegistrySource` | `pkg/registry` | Registry addresses parse completely or are rejected |
+| `FuzzNormalizeAndIsValid` | `pkg/semverutil` | Normalisation is idempotent and agrees with the semver library |
+| `FuzzDetermineBumpType` | `pkg/semverutil` | Bump classification always matches semver ordering |
+| `FuzzSort` | `pkg/semverutil` | Sorting preserves every element |
+
+Run a single target:
+
+```bash
+go test ./pkg/ast -run '^FuzzInspect$' -fuzz '^FuzzInspect$' -fuzztime 60s
+```
+
+### Terratest
+
+Runs `terraform init`/`validate`/`plan` against realistic GKE, EKS and object-schema fixtures,
+plus a golden-file suite and end-to-end CLI runs against the compiled binary:
 
 ```bash
 go test -v ./test/terratest
+```
+
+Regenerate the canonical golden artifacts:
+
+```bash
+UPDATE_GOLDEN=true go test -v ./test/terratest
 ```
 
 Run Docker DevSecOps static analysis and container security tests:
 
 ```bash
 go test -v ./test/docker
-```
-
-Regenerate canonical golden test artifacts:
-
-```bash
-UPDATE_GOLDEN=true go test -v ./test/terratest
 ```
 
 ---

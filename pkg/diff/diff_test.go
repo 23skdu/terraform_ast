@@ -307,3 +307,125 @@ func TestCompare_ValidationAndProviderAliasChanges(t *testing.T) {
 	assert.Equal(t, "VariableValidation", report.Warnings[0].Category)
 	assert.Equal(t, 6, report.Warnings[0].ConfidenceScore)
 }
+
+func TestCompare_PopulatesModuleName(t *testing.T) {
+	// The compared module is identified from the inspected module paths so reports and SARIF
+	// artifact locations are never blank.
+	report := Compare(
+		&ast.ModuleInfo{Path: "/tmp/checkouts/gke-v29"},
+		&ast.ModuleInfo{Path: "/tmp/checkouts/gke-v30"},
+		"v29.0.0", "v30.0.0")
+	assert.Equal(t, "gke-v30", report.ModuleName)
+
+	// Falls back to the old module when the new one has no path.
+	report = Compare(
+		&ast.ModuleInfo{Path: "/tmp/checkouts/gke-v29"},
+		&ast.ModuleInfo{},
+		"v29.0.0", "v30.0.0")
+	assert.Equal(t, "gke-v29", report.ModuleName)
+
+	// Remains empty when nothing identifies the module.
+	report = Compare(&ast.ModuleInfo{}, &ast.ModuleInfo{}, "v29.0.0", "v30.0.0")
+	assert.Equal(t, "", report.ModuleName)
+	report = Compare(nil, nil, "v29.0.0", "v30.0.0")
+	assert.Equal(t, "", report.ModuleName)
+
+	// Paths that normalise to the repository root stay meaningful.
+	report = Compare(&ast.ModuleInfo{}, &ast.ModuleInfo{Path: "/"}, "v1.0.0", "v2.0.0")
+	assert.Equal(t, "/", report.ModuleName)
+}
+
+func TestCompare_ProviderAliasRemovedAndSourceChanged(t *testing.T) {
+	oldMod := &ast.ModuleInfo{
+		RequiredProviders: map[string]ast.ProviderRequirement{
+			"aws": {
+				Name:                 "aws",
+				Source:               "hashicorp/aws",
+				VersionConstraints:   []string{">= 5.0"},
+				ConfigurationAliases: []string{"aws.west", "aws.east"},
+			},
+		},
+	}
+	newMod := &ast.ModuleInfo{
+		RequiredProviders: map[string]ast.ProviderRequirement{
+			"aws": {
+				Name:                 "aws",
+				Source:               "hashicorp/aws-fork",
+				VersionConstraints:   []string{">= 6.0"},
+				ConfigurationAliases: []string{"aws.west"},
+			},
+		},
+	}
+
+	report := Compare(oldMod, newMod, "1.0.0", "2.0.0")
+	require.Equal(t, 1, report.TotalBreaking, "only the provider source change is breaking")
+	require.Equal(t, 2, report.TotalWarnings, "the dropped alias and the bumped constraint both warn")
+
+	var sourceChange *DifferenceItem
+	for i := range report.BreakingChanges {
+		if report.BreakingChanges[i].Category == "ProviderSource" {
+			sourceChange = &report.BreakingChanges[i]
+		}
+	}
+	require.NotNil(t, sourceChange)
+	breaking := *sourceChange
+	assert.Equal(t, "ProviderSource", breaking.Category)
+	assert.Equal(t, "aws", breaking.Name)
+	assert.Equal(t, "hashicorp/aws", breaking.OldValue)
+	assert.Equal(t, "hashicorp/aws-fork", breaking.NewValue)
+	assert.Equal(t, 9, breaking.ConfidenceScore)
+
+	var aliasWarning *DifferenceItem
+	for i := range report.Warnings {
+		if report.Warnings[i].Category == "ProviderConfigurationAlias" {
+			aliasWarning = &report.Warnings[i]
+		}
+	}
+	require.NotNil(t, aliasWarning)
+	assert.Equal(t, "aws.east", aliasWarning.Name)
+	assert.Equal(t, SeverityWarning, aliasWarning.Severity)
+}
+
+func TestCompare_SafePinRationales(t *testing.T) {
+	t.Run("downgrade keeps the analyzed version pinned", func(t *testing.T) {
+		report := Compare(&ast.ModuleInfo{}, &ast.ModuleInfo{}, "v2.0.0", "v1.0.0")
+		assert.True(t, report.IsDowngrade)
+		assert.Equal(t, "v2.0.0", report.SafePinVersion)
+		assert.Contains(t, report.SafePinRationale, "downgrade")
+	})
+
+	t.Run("safe transition pins the target", func(t *testing.T) {
+		report := Compare(&ast.ModuleInfo{}, &ast.ModuleInfo{}, "v1.0.0", "v1.1.0")
+		assert.Equal(t, "v1.1.0", report.SafePinVersion)
+		assert.Contains(t, report.SafePinRationale, "no detected breaking changes")
+	})
+
+	t.Run("breaking transition keeps the analyzed version pinned", func(t *testing.T) {
+		oldMod := &ast.ModuleInfo{Variables: map[string]ast.VariableDef{
+			"gone": {Name: "gone", Type: "string"},
+		}}
+		report := Compare(oldMod, &ast.ModuleInfo{Variables: map[string]ast.VariableDef{}}, "v1.0.0", "v2.0.0")
+		assert.Equal(t, "v1.0.0", report.SafePinVersion)
+		assert.Contains(t, report.SafePinRationale, "until the breaking changes are resolved")
+	})
+
+	t.Run("breaking changes without any version information", func(t *testing.T) {
+		oldMod := &ast.ModuleInfo{Variables: map[string]ast.VariableDef{
+			"gone": {Name: "gone", Type: "string"},
+		}}
+		report := Compare(oldMod, &ast.ModuleInfo{Variables: map[string]ast.VariableDef{}}, "", "")
+		assert.Equal(t, 1, report.TotalBreaking)
+		assert.Empty(t, report.SafePinVersion)
+		assert.Contains(t, report.SafePinRationale, "No safe pin can be recommended")
+	})
+}
+
+func TestSameStrings(t *testing.T) {
+	assert.True(t, sameStrings(nil, nil))
+	assert.True(t, sameStrings([]string{"a"}, []string{"a"}))
+	assert.True(t, sameStrings([]string{"a", "b"}, []string{"b", "a"}), "ordering is not significant")
+
+	assert.False(t, sameStrings([]string{"a"}, []string{"a", "b"}), "different lengths")
+	assert.False(t, sameStrings([]string{"a", "a"}, []string{"a", "b"}), "duplicates collapse to a smaller set")
+	assert.False(t, sameStrings([]string{"a", "b"}, []string{"a", "c"}), "different members")
+}

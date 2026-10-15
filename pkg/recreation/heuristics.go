@@ -188,6 +188,25 @@ func AnalyzeWrapperHazards(res *wrapper.WrapperCompatibilityReport) []Recreation
 	return hazards
 }
 
+// FormatHazardsText converts hazards into a terminal-friendly alert block.
+func FormatHazardsText(hazards []RecreationHazard) string {
+	if len(hazards) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("⚠️  STATE DESTRUCTION & RECREATION HAZARDS (ForceNew):\n")
+	sb.WriteString("  Upgrading with the changes below may cause Terraform to destroy and re-create core cloud resources in state!\n")
+	for _, h := range hazards {
+		fmt.Fprintf(&sb, "  • [%s] %s (%s): %s\n", h.Severity, h.Variable, h.Resource, h.Description)
+		if h.Remediation != "" {
+			fmt.Fprintf(&sb, "    Remediation: %s\n", h.Remediation)
+		}
+	}
+	sb.WriteString("\n")
+	return sb.String()
+}
+
 // FormatHazardsMarkdown converts hazards into a formatted Markdown alert block.
 func FormatHazardsMarkdown(hazards []RecreationHazard) string {
 	if len(hazards) == 0 {
@@ -200,8 +219,8 @@ func FormatHazardsMarkdown(hazards []RecreationHazard) string {
 	sb.WriteString("| Variable | Target Resource | Severity | Destruction Hazard | Remediation |\n")
 	sb.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")
 	for _, h := range hazards {
-		sb.WriteString(fmt.Sprintf("| `%s` | `%s` | `%s` | %s | %s |\n",
-			h.Variable, h.Resource, h.Severity, h.Description, h.Remediation))
+		fmt.Fprintf(&sb, "| `%s` | `%s` | `%s` | %s | %s |\n",
+			h.Variable, h.Resource, h.Severity, h.Description, h.Remediation)
 	}
 	sb.WriteString("\n")
 	return sb.String()

@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -46,4 +48,28 @@ func TestEvaluatePolicy(t *testing.T) {
 	require.Len(t, unknownBump, 1)
 	assert.Equal(t, "max_bump", unknownBump[0].Rule)
 	assert.Contains(t, unknownBump[0].Message, "version information unavailable")
+}
+
+func TestLoadPolicyFromFile(t *testing.T) {
+	dir := t.TempDir()
+
+	valid := filepath.Join(dir, "policy.json")
+	require.NoError(t, os.WriteFile(valid, []byte(`{"block_breaking":true,"max_bump":" patch "}`), 0600))
+	got, err := Load(valid)
+	require.NoError(t, err)
+	assert.True(t, got.BlockBreaking)
+	assert.Equal(t, "PATCH", got.MaxBump)
+
+	_, err = Load(filepath.Join(dir, "missing.json"))
+	assert.ErrorContains(t, err, "open policy file")
+
+	invalid := filepath.Join(dir, "invalid.json")
+	require.NoError(t, os.WriteFile(invalid, []byte(`{"max_bump":"release"}`), 0600))
+	_, err = Load(invalid)
+	assert.ErrorContains(t, err, "invalid max_bump")
+}
+
+func TestDecodeRejectsTrailingGarbage(t *testing.T) {
+	_, err := Decode(strings.NewReader(`{"block_breaking":true} trailing`))
+	assert.ErrorContains(t, err, "trailing data")
 }

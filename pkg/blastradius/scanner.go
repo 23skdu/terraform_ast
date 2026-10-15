@@ -17,13 +17,6 @@ import (
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 )
 
-// TrackCrossModule performs multi-tiered variable taint tracking to follow an input through
-// nested wrapper modules down to its immutable target in the base upstream module.
-func TrackCrossModule(rootConsumer string, wrapperLayers []string, baseTarget string) error {
-	// TODO: Deep recursive graph analysis for cross-module mapping
-	return nil
-}
-
 // CallSite represents a root module consumer calling the wrapper module.
 type CallSite struct {
 	Dir                     string            `json:"dir"`
@@ -144,11 +137,7 @@ func discoverCallSites(searchDir, wrapperIdentifier string) ([]CallSite, error) 
 			return nil
 		}
 		if isJSON {
-			jsonCallSites, err := discoverJSONCallSites(src, path, normTarget)
-			if err != nil {
-				return err
-			}
-			callSites = append(callSites, jsonCallSites...)
+			callSites = append(callSites, discoverJSONCallSites(src, path, normTarget)...)
 			return nil
 		}
 
@@ -203,10 +192,12 @@ func discoverCallSites(searchDir, wrapperIdentifier string) ([]CallSite, error) 
 	return callSites, err
 }
 
-func discoverJSONCallSites(src []byte, path, targetIdentifier string) ([]CallSite, error) {
+// discoverJSONCallSites extracts wrapper call sites from Terraform JSON syntax. Files that cannot
+// be parsed or do not match the expected block schema simply contribute no call sites.
+func discoverJSONCallSites(src []byte, path, targetIdentifier string) []CallSite {
 	file, diags := hclparse.NewParser().ParseJSON(src, path)
 	if diags.HasErrors() || file == nil {
-		return nil, nil
+		return nil
 	}
 	schema := &hcl.BodySchema{
 		Blocks: []hcl.BlockHeaderSchema{
@@ -219,7 +210,7 @@ func discoverJSONCallSites(src []byte, path, targetIdentifier string) ([]CallSit
 	}
 	content, _, diags := file.Body.PartialContent(schema)
 	if diags.HasErrors() || content == nil {
-		return nil, nil
+		return nil
 	}
 	refs := make(map[string][]string)
 	for _, block := range content.Blocks {
@@ -262,7 +253,7 @@ func discoverJSONCallSites(src []byte, path, targetIdentifier string) ([]CallSit
 			OutputsReferenced: refs[block.Labels[0]],
 		})
 	}
-	return callSites, nil
+	return callSites
 }
 
 func parseTerragruntCallSite(src []byte, path, targetIdentifier string) (CallSite, bool) {
@@ -270,10 +261,8 @@ func parseTerragruntCallSite(src []byte, path, targetIdentifier string) (CallSit
 	if diags.HasErrors() || file == nil {
 		return CallSite{}, false
 	}
-	body, ok := file.Body.(*hclsyntax.Body)
-	if !ok {
-		return CallSite{}, false
-	}
+	// hclsyntax.ParseConfig always returns an *hclsyntax.Body for native syntax.
+	body := file.Body.(*hclsyntax.Body)
 
 	var source string
 	for _, block := range body.Blocks {
@@ -319,6 +308,11 @@ func parseTerragruntCallSite(src []byte, path, targetIdentifier string) (CallSit
 	}, true
 }
 
+// terragruntInputKey resolves a Terragrunt `inputs` object key to a static input name.
+//
+// HCL always wraps object keys in an ObjectConsKeyExpr; bare identifiers parse as a scope
+// traversal, while quoted keys and parenthesised expressions are reported as unresolvable so the
+// caller can flag the inputs as dynamically composed.
 func terragruntInputKey(expr hclsyntax.Expression) (string, bool) {
 	switch keyExpr := expr.(type) {
 	case *hclsyntax.ObjectConsKeyExpr:
@@ -326,10 +320,6 @@ func terragruntInputKey(expr hclsyntax.Expression) (string, bool) {
 			return "", false
 		}
 		return terragruntInputKey(keyExpr.Wrapped)
-	case *hclsyntax.LiteralValueExpr:
-		if keyExpr.Val.IsKnown() && !keyExpr.Val.IsNull() && keyExpr.Val.Type().FriendlyName() == "string" {
-			return keyExpr.Val.AsString(), true
-		}
 	case *hclsyntax.ScopeTraversalExpr:
 		if len(keyExpr.Traversal) == 1 {
 			if root, ok := keyExpr.Traversal[0].(hcl.TraverseRoot); ok {
@@ -508,10 +498,8 @@ func evaluateCallSiteImpact(
 	} else if !impact.CanSafelyUpdate {
 		impact.RiskScore = "MEDIUM"
 	} else {
+		// Incomplete analysis clears CanSafelyUpdate above, so it is scored here as MEDIUM.
 		impact.RiskScore = "LOW"
-	}
-	if impact.AnalysisIncomplete && impact.RiskScore == "LOW" {
-		impact.RiskScore = "MEDIUM"
 	}
 
 	return impact
@@ -532,21 +520,63 @@ func riskRank(r string) int {
 	}
 }
 
-// RenderJSON serializes the blast radius report to formatted JSON bytes.
-func (r *BlastRadiusReport) RenderJSON() ([]byte, error) {
-	return json.MarshalIndent(r, "", "  ")
+// RenderText formats the blast radius report for terminal output.
+func (r *BlastRadiusReport) RenderText() string {
+	if r == nil {
+		return ""
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "💥 BLAST-RADIUS DOWNSTREAM CONSUMER ANALYSIS\n")
+	fmt.Fprintf(&sb, "  Search Directory:  %s\n", r.SearchDir)
+	fmt.Fprintf(&sb, "  Wrapper:           %s\n", r.WrapperIdentifier)
+	fmt.Fprintf(&sb, "  Call Sites Scanned: %d\n", r.TotalCallSitesScanned)
+	fmt.Fprintf(&sb, "  Highest Risk:      %s\n", r.HighestRisk)
+	fmt.Fprintf(&sb, "  Can Safely Update: %t\n", r.CanSafelyUpdateAll)
+	fmt.Fprintf(&sb, "  %s\n", r.Summary)
+	for _, m := range r.ImpactedRootModules {
+		fmt.Fprintf(&sb, "  • [%s] %s (%s) safe_to_update=%t", m.RiskScore, m.ModuleName, m.Dir, m.CanSafelyUpdate)
+		var issues []string
+		if len(m.RemovedInputsPassed) > 0 {
+			issues = append(issues, fmt.Sprintf("removed inputs passed: %v", m.RemovedInputsPassed))
+		}
+		if len(m.MissingRequiredInputs) > 0 {
+			issues = append(issues, fmt.Sprintf("missing required inputs: %v", m.MissingRequiredInputs))
+		}
+		if len(m.RemovedOutputsReferenced) > 0 {
+			issues = append(issues, fmt.Sprintf("removed outputs used: %v", m.RemovedOutputsReferenced))
+		}
+		if len(m.RecreationHazards) > 0 {
+			issues = append(issues, fmt.Sprintf("recreation hazards: %v", m.RecreationHazards))
+		}
+		if m.AnalysisIncomplete {
+			issues = append(issues, "some dynamic inputs could not be analyzed")
+		}
+		if len(issues) > 0 {
+			sb.WriteString(": " + strings.Join(issues, "; "))
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+// RenderJSON serializes the blast radius report to formatted JSON bytes. Every field of the
+// report graph is a JSON-safe primitive or slice, so encoding cannot fail.
+func (r *BlastRadiusReport) RenderJSON() []byte {
+	encoded, _ := json.MarshalIndent(r, "", "  ")
+	return encoded
 }
 
 // RenderMarkdown formats the blast radius report into human-readable Markdown.
 func (r *BlastRadiusReport) RenderMarkdown() string {
 	var sb strings.Builder
 	sb.WriteString("# 💥 Blast-Radius Downstream Consumer Analysis\n\n")
-	sb.WriteString(fmt.Sprintf("- **Search Directory**: `%s`\n", r.SearchDir))
-	sb.WriteString(fmt.Sprintf("- **Wrapper Identifier**: `%s`\n", r.WrapperIdentifier))
-	sb.WriteString(fmt.Sprintf("- **Total Call Sites Scanned**: `%d`\n", r.TotalCallSitesScanned))
-	sb.WriteString(fmt.Sprintf("- **Highest Risk Detected**: `%s`\n", r.HighestRisk))
-	sb.WriteString(fmt.Sprintf("- **Can Safely Update All**: `%t`\n\n", r.CanSafelyUpdateAll))
-	sb.WriteString(fmt.Sprintf("> %s\n\n", r.Summary))
+	fmt.Fprintf(&sb, "- **Search Directory**: `%s`\n", r.SearchDir)
+	fmt.Fprintf(&sb, "- **Wrapper Identifier**: `%s`\n", r.WrapperIdentifier)
+	fmt.Fprintf(&sb, "- **Total Call Sites Scanned**: `%d`\n", r.TotalCallSitesScanned)
+	fmt.Fprintf(&sb, "- **Highest Risk Detected**: `%s`\n", r.HighestRisk)
+	fmt.Fprintf(&sb, "- **Can Safely Update All**: `%t`\n\n", r.CanSafelyUpdateAll)
+	fmt.Fprintf(&sb, "> %s\n\n", r.Summary)
 
 	if len(r.ImpactedRootModules) > 0 {
 		sb.WriteString("### Consumer Root Modules Impact Breakdown\n\n")

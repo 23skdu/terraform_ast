@@ -39,6 +39,7 @@ func PreviewRemovedInputs(dir, moduleName string, inputNames []string) (string, 
 
 	var patches []string
 	for _, path := range paths {
+		// #nosec G304 -- paths are joined from a directory entry read via os.ReadDir
 		original, err := os.ReadFile(path)
 		if err != nil {
 			return "", fmt.Errorf("read Terraform file %s: %w", path, err)

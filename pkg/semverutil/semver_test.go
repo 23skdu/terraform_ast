@@ -34,10 +34,6 @@ func TestSort(t *testing.T) {
 	sorted := Sort(input)
 	expected := []string{"invalid-1", "invalid-2", "1.0.0", "v1.5.0", "v2.0.0"}
 	assert.Equal(t, expected, sorted)
-
-	desc := SortDesc(input)
-	expectedDesc := []string{"v2.0.0", "v1.5.0", "1.0.0", "invalid-2", "invalid-1"}
-	assert.Equal(t, expectedDesc, desc)
 }
 
 func TestFilterValid(t *testing.T) {
@@ -66,9 +62,4 @@ func TestDetermineBumpType(t *testing.T) {
 		actual := DetermineBumpType(tt.oldVer, tt.newVer)
 		assert.Equal(t, tt.expected, actual, "BumpType(%s, %s)", tt.oldVer, tt.newVer)
 	}
-}
-
-func TestFormatVersionInfo(t *testing.T) {
-	res := FormatVersionInfo("1.0.0", "2.0.0")
-	assert.Equal(t, "1.0.0 -> 2.0.0 (MAJOR)", res)
 }

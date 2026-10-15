@@ -39,7 +39,7 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum
 
-      - name: Run Unit & Coverage Tests (100% Target)
+      - name: Run Unit & Coverage Tests
         run: |
           go test -v -cover ./...
 

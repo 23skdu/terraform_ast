@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
+	"github.com/23skdu/terraform_ast/pkg/policy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -49,8 +50,7 @@ func TestUpgradePathRenderers(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, report.RenderText(), "v1.0.0 -> v1.1.0")
 	assert.Contains(t, report.RenderMarkdown(), "| `v1.0.0` | `v1.1.0` |")
-	data, err := report.RenderJSON()
-	require.NoError(t, err)
+	data := report.RenderJSON()
 	var decoded UpgradePathReport
 	require.NoError(t, json.Unmarshal(data, &decoded))
 	assert.Equal(t, report.TargetVersion, decoded.TargetVersion)
@@ -71,4 +71,40 @@ func TestAnalyzeUpgradePathValidation(t *testing.T) {
 		{Version: "v2.0.0", Module: &ast.ModuleInfo{}},
 	})
 	assert.ErrorContains(t, err, "invalid version")
+}
+
+func TestAnalyzeUpgradePathRejectsNilSnapshot(t *testing.T) {
+	_, err := AnalyzeUpgradePath([]VersionSnapshot{
+		{Version: "v1.0.0", Module: &ast.ModuleInfo{}},
+		{Version: "v1.1.0", Module: nil},
+	})
+	assert.ErrorContains(t, err, "is nil")
+}
+
+func TestUpgradePathNilRenderers(t *testing.T) {
+	var report *UpgradePathReport
+	assert.Equal(t, "", report.RenderMarkdown())
+	assert.Equal(t, "", report.RenderText())
+	assert.Equal(t, "null", string(report.RenderJSON()), "a nil report marshals to a JSON null")
+}
+
+func TestUpgradePathRendersPolicyViolations(t *testing.T) {
+	report, err := AnalyzeUpgradePath([]VersionSnapshot{
+		{Version: "v1.0.0", Module: &ast.ModuleInfo{}},
+		{Version: "v1.1.0", Module: &ast.ModuleInfo{}},
+	})
+	require.NoError(t, err)
+	report.PolicyViolations = []policy.Violation{{Rule: "max_bump", Message: "bump too large"}}
+
+	markdown := report.RenderMarkdown()
+	assert.Contains(t, markdown, "## Policy Violations")
+	assert.Contains(t, markdown, "- **max_bump**: bump too large")
+
+	text := report.RenderText()
+	assert.Contains(t, text, "Policy violation (max_bump): bump too large")
+
+	var decoded UpgradePathReport
+	require.NoError(t, json.Unmarshal(report.RenderJSON(), &decoded))
+	require.Len(t, decoded.PolicyViolations, 1)
+	assert.Equal(t, "max_bump", decoded.PolicyViolations[0].Rule)
 }

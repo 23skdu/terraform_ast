@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -30,13 +31,15 @@ type Input struct {
 	BumpType        string
 }
 
-// Load reads and validates a JSON policy from path.
+// Load reads and validates a JSON policy from path. The path is supplied directly by the operator
+// through the --policy flag; it is never derived from analyzed Terraform content.
 func Load(path string) (*Policy, error) {
-	file, err := os.Open(path)
+	// #nosec G304 -- operator supplied --policy path, not derived from analyzed input
+	file, err := os.Open(filepath.Clean(path))
 	if err != nil {
 		return nil, fmt.Errorf("open policy file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	return Decode(file)
 }
 

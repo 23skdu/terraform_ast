@@ -41,11 +41,11 @@ Audits a local wrapper module (such as a Google GKE or AWS EKS wrapper) against 
 
 #### Flags:
 - `--wrapper <dir>`: Path to local wrapper module root.
-- `--upstream <dir|git-url|registry>`: Upstream module path, Git URL, or Terraform Registry identifier (e.g. `terraform-google-modules/kubernetes-engine/google`). Inferred from `module` block `source` if omitted.
+- `--upstream <dir|git-url|registry>`: Upstream module path, Git URL, or Terraform Registry identifier (e.g. `terraform-google-modules/kubernetes-engine/google`). Inferred from `module` block `source` if omitted. A source that resolves to a directory on disk is always treated as a local module, even when it has three or four path segments.
 - `--new-version <tag>`: Target upstream Git version or Registry version to pin (e.g. `v30.0.0` or `30.0.0`).
 - `--old-version <tag>`: Currently pinned upstream Git version (enables side-by-side upstream diff).
 - `--blast-radius <dir>`: Optional root directory (e.g. `./environments`) to recursively scan for downstream consumer root modules affected by breaking changes.
-- `--check-recreation`: Enables or disables state destruction and `ForceNew` hazard detection heuristics (default: `true`).
+- `--check-recreation`: Enables or disables state destruction and `ForceNew` hazard detection heuristics (default: `true`). Hazards are reported in every output format: an alert block in `text`/`markdown`, a `recreation_hazards` array in `json`, and `TF-RECREATION-HAZARD` SARIF results for code scanning.
 - `--format <text|markdown|json|sarif>`: Output format (default: `text`). Use `sarif` for GitHub Code Scanning.
 - `--output <file>`: Write report to destination file.
 - `--exit-code`: Returns non-zero exit code (1) if breaking changes are detected.
@@ -64,6 +64,16 @@ Example policy:
 ```
 
 `max_bump` accepts `PATCH`, `MINOR`, or `MAJOR`. Unspecified rules are disabled. A policy violation enforces a failing exit code even when `--exit-code` is not supplied.
+
+#### Machine-Readable Output
+
+`--format json` and `--format sarif` always emit a **single, valid document**. When `--blast-radius`
+is used, the downstream consumer scan is embedded in the same document rather than concatenated onto
+it:
+
+- `json`: the wrapper audit fields stay at the top level and a `blast_radius` object is added.
+- `sarif`: consumer modules that cannot be safely updated are added as `TF-BLAST-RADIUS-CONSUMER`
+  results pointing at the consuming directory. Only rules that back an emitted result are advertised.
 
 ---
 
@@ -116,15 +126,15 @@ Compares two versions of an upstream module directly:
 
 #### Flags:
 - `--old <dir|git-url|registry>`: Old/current upstream module source.
-- `--new <dir|git-url|registry>`: New/target upstream module source.
+- `--new <dir|git-url|registry>`: New/target upstream module source. Reports, JSON output and SARIF artifact locations are labelled with this source.
 - `--old-version <tag>`: Old Git tag or Registry release version.
 - `--new-version <tag>`: New Git tag or Registry release version.
-- `--check-recreation`: Evaluates immutable resource destruction hazards (default: `true`).
+- `--check-recreation`: Evaluates immutable resource destruction hazards (default: `true`) and emits them in every output format.
 - `--format <text|markdown|json|sarif>`: Output format (`text`, `markdown`, `json`, `sarif`).
 - `--output <file>`: Path to file destination.
 - `--exit-code`: Exits with code 1 if breaking changes exist.
 - `--policy <file>`: Applies the same JSON policy gates as wrapper audit mode.
-- `--upgrade-path`: Inspects each intermediate semantic-version Git tag or Registry release and reports adjacent compatibility transitions. Requires both version flags, the same source for `--old` and `--new`, and text, Markdown, or JSON output. For local directories, only the supplied endpoint snapshots are available.
+- `--upgrade-path`: Inspects each intermediate semantic-version Git tag or Registry release and reports adjacent compatibility transitions. Requires both version flags, the same source for `--old` and `--new`, and text, Markdown, or JSON output. For local directories, only the supplied endpoint snapshots are available. Git repositories are downloaded once and reused for every intermediate tag, so stepping across a major version does not re-clone per release.
 
 ---
 

@@ -2,6 +2,7 @@ package diff
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -30,6 +31,7 @@ func Compare(oldMod, newMod *ast.ModuleInfo, oldVer, newVer string) *DiffReport 
 	isDowngrade := (bump == semverutil.BumpDowngrade)
 
 	report := &DiffReport{
+		ModuleName:  moduleDisplayName(newMod, oldMod),
 		OldVersion:  oldVer,
 		NewVersion:  newVer,
 		BumpType:    bump,
@@ -63,27 +65,33 @@ func Compare(oldMod, newMod *ast.ModuleInfo, oldVer, newVer string) *DiffReport 
 	return report
 }
 
-func recommendSafePin(report *DiffReport) {
-	if report.IsDowngrade {
-		if report.OldVersion != "" {
-			report.SafePinVersion = report.OldVersion
-			report.SafePinRationale = "The analyzed target is a downgrade; keep the currently analyzed version pinned."
-		} else {
-			report.SafePinRationale = "The analyzed target is a downgrade; no safe pin can be recommended without a known current version."
+// moduleDisplayName derives a human readable identifier for the compared module so that reports
+// and SARIF artifact locations are never blank when callers do not supply an explicit source.
+func moduleDisplayName(mods ...*ast.ModuleInfo) string {
+	for _, mod := range mods {
+		if trimmed := strings.TrimSpace(mod.Path); trimmed != "" {
+			return filepath.Base(filepath.Clean(trimmed))
 		}
-		return
 	}
-	if report.CanSafelyUpdate && report.NewVersion != "" {
+	return ""
+}
+
+func recommendSafePin(report *DiffReport) {
+	switch {
+	case report.IsDowngrade:
+		// IsDowngrade is only set when both versions parse as valid semver, so the currently
+		// analyzed version is always known here.
+		report.SafePinVersion = report.OldVersion
+		report.SafePinRationale = "The analyzed target is a downgrade; keep the currently analyzed version pinned."
+	case report.CanSafelyUpdate && report.NewVersion != "":
 		report.SafePinVersion = report.NewVersion
 		report.SafePinRationale = "The analyzed target version has no detected breaking changes."
-		return
-	}
-	if report.TotalBreaking > 0 && report.OldVersion != "" {
+	case report.TotalBreaking > 0 && report.OldVersion != "":
 		report.SafePinVersion = report.OldVersion
 		report.SafePinRationale = "Keep the currently analyzed version pinned until the breaking changes are resolved."
-		return
+	default:
+		report.SafePinRationale = "No safe pin can be recommended from the supplied version information."
 	}
-	report.SafePinRationale = "No safe pin can be recommended from the supplied version information."
 }
 
 func scoreConfidence(report *DiffReport) {

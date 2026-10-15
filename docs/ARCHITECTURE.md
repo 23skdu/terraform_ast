@@ -52,21 +52,24 @@ graph TD
 - **Capabilities**:
   - Canonicalizes version strings (ensuring standard `v` prefix).
   - Determines semver bump transitions: `MAJOR` (breaking), `MINOR` (features), `PATCH` (fixes), `DOWNGRADE`, `IDENTICAL`, and `INVALID`.
-  - Filters and sorts tags deterministically in ascending or descending order.
+  - Filters non-semver tags and sorts the remainder deterministically in ascending order.
 
 ### 3. `pkg/gitops` (Git Operations & Version Extraction)
 - **Engine**: Powered by `github.com/go-git/go-git/v5`.
 - **Capabilities**:
   - Clones remote repositories with shallow clone optimization (`--depth 1`) or inspects local Git checkouts in-place.
-  - In-memory repository caching avoids redundant downloads across multiple tag evaluations.
+  - A thread-safe in-memory `RepositoryCache` (`gitops.GlobalCache`) keeps one shared clone per repository, so repeated tag evaluations and multi-version upgrade paths re-clone from the local copy instead of re-downloading. Extracted versions are memoised per source and ref, and everything is released by `Clear()` when the run ends.
   - Extracts all semantic version tags from Git references.
   - Checks out specific tags, branches, or commits into isolated staging directories for AST comparison.
 
 ### 4. `pkg/registry` (Terraform Registry Protocol Client)
 - **Capabilities**:
+  - `IsRegistrySource` and `ParseRegistrySource` agree on exactly one grammar (`namespace/name/provider`,
+    optionally hostname-prefixed) and reject empty components, so a malformed address can never
+    become a request against a partially empty registry path.
   - Native client implementing the official Terraform Registry Service Discovery protocol (`https://registry.terraform.io/v1/modules/...`).
-  - Resolves available module versions and downloads release tarballs.
-  - Verifies package checksums and extracts target modules and submodules into sandboxed directories for AST inspection.
+  - Resolves available module versions and downloads release tarballs, retrying transient failures with exponential backoff.
+  - Extracts target modules and submodules into sandboxed directories for AST inspection, rejecting archive entries that escape the destination directory.
 
 ### 5. `pkg/diff` (Upstream Diff Comparator)
 - **Capabilities**:
@@ -79,14 +82,15 @@ graph TD
 
 ### 6. `pkg/recreation` (ForceNew Destruction & Hazard Analysis)
 - **Capabilities**:
-  - Encodes infrastructure destruction heuristics for immutable cloud resources (GKE cluster name, project ID, location, secondary subnet CIDR blocks, AWS EKS cluster name, VPC ID, KMS key specifications).
+  - Encodes infrastructure destruction heuristics for immutable cloud resources (GKE cluster name, project ID, location, region, network, subnetwork and secondary subnet CIDR blocks; AWS EKS cluster name, VPC ID and cluster IP family).
   - Flags breaking input shifts that trigger provider `ForceNew` destruction/recreation cycles, preventing catastrophic data loss and downtime during module upgrades.
 
 ### 7. `pkg/blastradius` (Downstream Consumer & Environment Scanner)
 - **Capabilities**:
-  - Recursively traverses root modules, environment directories (e.g. `environments/dev`, `environments/prod`), and terragrunt configurations.
-  - Identifies which downstream consumers invoke target modules and pin specific versions.
-  - Maps breaking upstream changes directly to impacted environments and downstream root module inputs.
+  - Recursively traverses root modules, environment directories (e.g. `environments/dev`, `environments/prod`), and terragrunt `terragrunt.hcl` configurations.
+  - Identifies which downstream consumers invoke the audited wrapper, along with the inputs they pass and the outputs they consume.
+  - Maps breaking upstream changes directly to impacted environments and downstream root module inputs, and reports per-consumer risk scores.
+  - Dynamic Terragrunt inputs that cannot be resolved statically are flagged as incomplete analysis rather than silently ignored.
 
 ### 8. `pkg/wrapper` (Wrapper Compatibility & Pin Analyzer)
 - **Capabilities**:
@@ -104,8 +108,11 @@ graph TD
   - Formats results into interactive terminal text with status indicators (`🚨`, `✨`, `⚠️`, `💡`).
   - Generates GitHub-flavored Markdown with alert callouts (`> [!CAUTION]`, `> [!WARNING]`, `> [!NOTE]`) and tables.
   - Serializes machine-readable JSON for CI/CD pipeline automation.
-  - Generates **OASIS SARIF v2.1.0** reports for direct ingestion into GitHub Code Scanning and security dashboards.
-  - Provides golden file assertion helpers (`AssertGoldenMatch`) for canonical regression testing.
+  - Generates **OASIS SARIF v2.1.0** reports for direct ingestion into GitHub Code Scanning and security dashboards, advertising only the rules that back an emitted result.
+  - Emits recreation hazards and downstream consumer findings in every format, including as first-class `TF-RECREATION-HAZARD` and `TF-BLAST-RADIUS-CONSUMER` SARIF rules.
+  - Golden-file regression helpers live in `internal/goldentest`, keeping `testing` and the assertion libraries out of the shipped binary.
+  - JSON and SARIF encoders return plain bytes rather than an error: the report graph is composed
+    exclusively of JSON-safe types, so encoding cannot fail and no unreachable error path exists.
 
 ---
 

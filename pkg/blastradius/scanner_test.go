@@ -7,8 +7,11 @@ import (
 
 	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zclconf/go-cty/cty"
 )
 
 func TestScanDirectory_ErrorsAndEmpty(t *testing.T) {
@@ -92,8 +95,7 @@ output "net_tag" {
 	assert.Equal(t, "CRITICAL", report.HighestRisk)
 
 	// Check JSON and Markdown rendering
-	jsonBytes, err := report.RenderJSON()
-	require.NoError(t, err)
+	jsonBytes := report.RenderJSON()
 	assert.Contains(t, string(jsonBytes), "env-impacted")
 
 	md := report.RenderMarkdown()
@@ -344,7 +346,336 @@ func TestRenderMarkdown_WithSafeConsumer(t *testing.T) {
 	assert.Contains(t, md, "None")
 }
 
-func TestTrackCrossModule(t *testing.T) {
-	err := TrackCrossModule("consumer", []string{"wrapper"}, "base")
-	assert.NoError(t, err)
+func TestRenderText(t *testing.T) {
+	var nilReport *BlastRadiusReport
+	assert.Equal(t, "", nilReport.RenderText())
+
+	rep := &BlastRadiusReport{
+		SearchDir:             "/app",
+		WrapperIdentifier:     "mod",
+		TotalCallSitesScanned: 2,
+		CanSafelyUpdateAll:    false,
+		HighestRisk:           "CRITICAL",
+		Summary:               "breaking impacts detected",
+		ImpactedRootModules: []RootModuleImpact{
+			{
+				Dir:                      "/app/prod",
+				ModuleName:               "prod_cluster",
+				RiskScore:                "CRITICAL",
+				CanSafelyUpdate:          false,
+				RemovedInputsPassed:      []string{"ip_range_services"},
+				MissingRequiredInputs:    []string{"grant_registry_access"},
+				RemovedOutputsReferenced: []string{"legacy_network_tag"},
+				RecreationHazards:        []string{"location"},
+			},
+			{
+				Dir:             "/app/qa",
+				ModuleName:      "qa_cluster",
+				RiskScore:       "LOW",
+				CanSafelyUpdate: true,
+			},
+			{
+				Dir:                "/app/dynamic",
+				ModuleName:         "dynamic_cluster",
+				RiskScore:          "MEDIUM",
+				CanSafelyUpdate:    false,
+				AnalysisIncomplete: true,
+			},
+		},
+	}
+
+	text := rep.RenderText()
+	assert.Contains(t, text, "BLAST-RADIUS DOWNSTREAM CONSUMER ANALYSIS")
+	assert.Contains(t, text, "Call Sites Scanned: 2")
+	assert.Contains(t, text, "Highest Risk:      CRITICAL")
+	assert.Contains(t, text, "prod_cluster")
+	assert.Contains(t, text, "removed inputs passed: [ip_range_services]")
+	assert.Contains(t, text, "missing required inputs: [grant_registry_access]")
+	assert.Contains(t, text, "removed outputs used: [legacy_network_tag]")
+	assert.Contains(t, text, "recreation hazards: [location]")
+	assert.Contains(t, text, "some dynamic inputs could not be analyzed")
+	assert.Contains(t, text, "qa_cluster (/app/qa) safe_to_update=true")
+}
+
+func TestDiscoverCallSitesSkipsUnreadableAndHiddenPaths(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0750))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "vendor"), 0750))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".terraform", "modules"), 0750))
+
+	consumer := `
+module "wrapper" {
+  source = "../wrapper"
+}
+`
+	// Hidden, vendor and .terraform trees must never be traversed.
+	for _, dir := range []string{".git", "vendor", ".terraform/modules"} {
+		require.NoError(t, os.WriteFile(filepath.Join(root, dir, "main.tf"), []byte(consumer), 0600))
+	}
+	// A non-Terraform file and an unreadable Terraform file are skipped.
+	require.NoError(t, os.WriteFile(filepath.Join(root, "README.md"), []byte("module \"wrapper\" {}"), 0600))
+	unreadable := filepath.Join(root, "locked.tf")
+	require.NoError(t, os.WriteFile(unreadable, []byte(consumer), 0000))
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0644) })
+
+	if _, err := os.ReadFile(unreadable); err != nil {
+		t.Skip("filesystem allows reading mode-000 files; skipping the unreadable-file branch")
+	}
+
+	sites, err := discoverCallSites(root, "wrapper")
+	require.NoError(t, err)
+	assert.Empty(t, sites)
+}
+
+func TestDiscoverJSONCallSitesSkipsUnparsableFiles(t *testing.T) {
+	// Malformed JSON: ParseJSON fails.
+	sites := discoverJSONCallSites([]byte("{not json"), "main.tf.json", "wrapper")
+	assert.Nil(t, sites)
+
+	// Valid JSON that does not contain the module block schema.
+	sites = discoverJSONCallSites([]byte(`{"provider":{"aws":{}}}`), "main.tf.json", "wrapper")
+	assert.Nil(t, sites)
+}
+
+func TestDiscoverJSONCallSitesIgnoresUnusableModuleBlocks(t *testing.T) {
+	// module without a source, a non-matching source, and a valid call.
+	src := `{
+  "module": {
+    "sourceless": {"region": "us"},
+    "other": {"source": "./somewhere-else"},
+    "match": {"source": "../wrapper", "region": "us"}
+  }
+}`
+	sites := discoverJSONCallSites([]byte(src), "main.tf.json", "wrapper")
+	require.Len(t, sites, 1)
+	assert.Equal(t, "match", sites[0].ModuleName)
+}
+
+func TestParseTerragruntCallSiteRejectsUnusableFiles(t *testing.T) {
+	target := "wrapper"
+
+	// Unparsable HCL.
+	_, ok := parseTerragruntCallSite([]byte("terragrunt {"), "terragrunt.hcl", target)
+	assert.False(t, ok)
+
+	// No terraform block carrying a source.
+	_, ok = parseTerragruntCallSite([]byte(`terraform {}`), "terragrunt.hcl", target)
+	assert.False(t, ok)
+
+	// Source that does not point at the wrapper.
+	_, ok = parseTerragruntCallSite([]byte(`terraform { source = "./elsewhere" }`), "terragrunt.hcl", target)
+	assert.False(t, ok)
+}
+
+func TestParseTerragruntCallSiteFlagsDynamicInputs(t *testing.T) {
+	src := `
+terraform {
+  source = "./wrapper"
+}
+inputs = {
+  static_key = "value"
+  (local.dynamic_key) = "value"
+  1 = "numeric key"
+  true = "boolean key"
+}
+`
+	site, ok := parseTerragruntCallSite([]byte(src), "envs/dev/terragrunt.hcl", "wrapper")
+	require.True(t, ok)
+	assert.True(t, site.InputAnalysisIncomplete)
+	assert.Contains(t, site.PassedInputs, "static_key")
+}
+
+func TestParseTerragruntCallSiteFlagsNonLiteralInputs(t *testing.T) {
+	src := `
+terraform {
+  source = "./wrapper"
+}
+inputs = local.inputs
+`
+	site, ok := parseTerragruntCallSite([]byte(src), "envs/dev/terragrunt.hcl", "wrapper")
+	require.True(t, ok)
+	assert.True(t, site.InputAnalysisIncomplete)
+	assert.Empty(t, site.PassedInputs)
+}
+
+func TestTerragruntInputKey(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"quoted key", `inputs = { "key" = "value" }`},
+		{"bare identifier key", `inputs = { key = "value" }`},
+		{"parenthesised key", `inputs = { (var.dynamic_key) = "value" }`},
+		{"computed parenthesised key", `inputs = { (1 + 2) = "value" }`},
+		{"numeric key", `inputs = { 1 = "value" }`},
+		{"boolean key", `inputs = { true = "value" }`},
+		{"null key", `inputs = { null = "value" }`},
+		{"multi step traversal key", `inputs = { a.b = "value" }`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			file, diags := hclsyntax.ParseConfig([]byte(tc.src), "terragrunt.hcl", hcl.Pos{Line: 1, Column: 1})
+			require.False(t, diags.HasErrors())
+			inputs, ok := file.Body.(*hclsyntax.Body).Attributes["inputs"].Expr.(*hclsyntax.ObjectConsExpr)
+			require.True(t, ok)
+
+			key, resolved := terragruntInputKey(inputs.Items[0].KeyExpr)
+			if tc.name == "bare identifier key" {
+				assert.True(t, resolved, "expected a resolvable key")
+				assert.Equal(t, "key", key)
+				return
+			}
+			assert.False(t, resolved)
+			assert.Empty(t, key)
+		})
+	}
+}
+
+func TestExtractModuleReferencesHandlesInvalidSource(t *testing.T) {
+	refs := extractModuleReferences([]byte("this is not { valid hcl"))
+	assert.Empty(t, refs)
+}
+
+func TestAddModuleReferencesWithSeenIgnoresUnusableTraversals(t *testing.T) {
+	refs := map[string][]string{}
+	seen := map[string]map[string]struct{}{}
+
+	addModuleReferencesWithSeen(refs, seen, []hcl.Traversal{
+		// Shorter than a module.<call>.<output> reference.
+		{hcl.TraverseRoot{Name: "module"}},
+		{hcl.TraverseRoot{Name: "var"}, hcl.TraverseAttr{Name: "x"}},
+		{hcl.TraverseRoot{Name: "module"}, hcl.TraverseAttr{Name: "gke"}},
+		// Root is not "module".
+		{hcl.TraverseRoot{Name: "data"}, hcl.TraverseAttr{Name: "aws"}, hcl.TraverseAttr{Name: "id"}},
+		// Second step is an index rather than an attribute.
+		{hcl.TraverseRoot{Name: "module"}, hcl.TraverseIndex{Key: cty.NumberIntVal(0)}, hcl.TraverseAttr{Name: "out"}},
+	})
+	assert.Empty(t, refs)
+}
+
+func TestDiscoverCallSitesPropagatesWalkErrors(t *testing.T) {
+	root := t.TempDir()
+	blocked := filepath.Join(root, "blocked")
+	require.NoError(t, os.MkdirAll(blocked, 0750))
+	require.NoError(t, os.Chmod(blocked, 0000))
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0750) })
+
+	if _, err := os.ReadDir(blocked); err == nil {
+		t.Skip("filesystem allows reading mode-000 directories; skipping the walk error branch")
+	}
+
+	_, err := discoverCallSites(root, "wrapper")
+	require.Error(t, err)
+}
+
+func TestDiscoverJSONCallSitesRejectsSchemaMismatchedJSON(t *testing.T) {
+	// A block body that is not a JSON object produces a schema diagnostic.
+	sites := discoverJSONCallSites([]byte(`{"module": {"gke": "not-an-object"}}`), "main.tf.json", "wrapper")
+	assert.Nil(t, sites)
+
+	sites = discoverJSONCallSites([]byte(`{"module": "not-an-object"}`), "main.tf.json", "wrapper")
+	assert.Nil(t, sites)
+}
+
+func TestParseTerragruntCallSiteIgnoresNonTerraformBlocks(t *testing.T) {
+	src := `
+locals {
+  region = "us-central1"
+}
+terraform {
+  source = "./wrapper"
+}
+`
+	site, ok := parseTerragruntCallSite([]byte(src), "envs/dev/terragrunt.hcl", "wrapper")
+	require.True(t, ok)
+	assert.Equal(t, "./wrapper", site.Source)
+}
+
+func TestEvaluateCallSiteImpact_BlockingTypeMismatchIsMediumRisk(t *testing.T) {
+	impact := evaluateCallSiteImpact(CallSite{
+		Dir:        "/envs/dev",
+		ModuleName: "dev_cluster",
+		PassedInputs: map[string]string{
+			"zones": "var.zones",
+		},
+	}, nil, &wrapper.WrapperCompatibilityReport{
+		TargetModuleName: "gke",
+		Issues: []wrapper.WrapperIssue{
+			{
+				Severity:    diff.SeverityBreaking,
+				Category:    "TypeMismatch",
+				Target:      "zones",
+				Description: "Wrapper variable 'zones' type changed incompatibly",
+			},
+		},
+	})
+	assert.False(t, impact.CanSafelyUpdate)
+	assert.Equal(t, "MEDIUM", impact.RiskScore)
+}
+
+func TestAddModuleReferencesDedupesExistingEntries(t *testing.T) {
+	refs := map[string][]string{"gke": {"endpoint"}}
+	traversals := []hcl.Traversal{
+		{hcl.TraverseRoot{Name: "module"}, hcl.TraverseAttr{Name: "gke"}, hcl.TraverseAttr{Name: "endpoint"}},
+		{hcl.TraverseRoot{Name: "module"}, hcl.TraverseAttr{Name: "gke"}, hcl.TraverseAttr{Name: "name"}},
+		{hcl.TraverseRoot{Name: "module"}, hcl.TraverseAttr{Name: "gke"}, hcl.TraverseAttr{Name: "name"}},
+	}
+
+	addModuleReferences(refs, traversals)
+	assert.ElementsMatch(t, []string{"endpoint", "name"}, refs["gke"])
+}
+
+func TestEvaluateCallSiteImpact_IncompleteAnalysisOnly(t *testing.T) {
+	impact := evaluateCallSiteImpact(CallSite{
+		Dir:                     "/envs/dev",
+		ModuleName:              "dev_cluster",
+		InputAnalysisIncomplete: true,
+	}, nil, nil)
+	assert.False(t, impact.CanSafelyUpdate)
+	assert.Equal(t, "MEDIUM", impact.RiskScore)
+}
+
+func TestEvaluateCallSiteImpact_IncompleteAnalysisIsAlwaysMedium(t *testing.T) {
+	impact := evaluateCallSiteImpact(CallSite{
+		Dir:                     "/envs/dev",
+		ModuleName:              "dev_cluster",
+		InputAnalysisIncomplete: true,
+	}, nil, &wrapper.WrapperCompatibilityReport{})
+	assert.False(t, impact.CanSafelyUpdate)
+	assert.Equal(t, "MEDIUM", impact.RiskScore)
+}
+
+func TestRenderMarkdownRendersIncompleteAnalysis(t *testing.T) {
+	rep := &BlastRadiusReport{
+		SearchDir:             "/app",
+		WrapperIdentifier:     "mod",
+		TotalCallSitesScanned: 1,
+		HighestRisk:           "MEDIUM",
+		ImpactedRootModules: []RootModuleImpact{
+			{
+				Dir:                "/app/dev",
+				ModuleName:         "dev_cluster",
+				RiskScore:          "MEDIUM",
+				CanSafelyUpdate:    false,
+				AnalysisIncomplete: true,
+			},
+		},
+	}
+	md := rep.RenderMarkdown()
+	assert.Contains(t, md, "Some dynamic inputs could not be analyzed")
+}
+
+// TestDiscoverCallSites_EmptyModuleLabel pins the behaviour of `module "" {}`, which HCL accepts
+// and which must not be mistaken for an unparsable file.
+func TestDiscoverCallSites_EmptyModuleLabel(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "main.tf"), []byte(`module "" { source = "../wrapper" }`), 0600))
+
+	sites, err := discoverCallSites(root, "wrapper")
+	require.NoError(t, err)
+	require.Len(t, sites, 1)
+	assert.Empty(t, sites[0].ModuleName)
+	assert.NotEmpty(t, sites[0].File)
+	assert.NotNil(t, sites[0].PassedInputs)
 }

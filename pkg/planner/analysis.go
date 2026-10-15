@@ -42,16 +42,19 @@ func AnalyzeUpgradePath(snapshots []VersionSnapshot) (*UpgradePathReport, error)
 	if len(snapshots) < 2 {
 		return nil, fmt.Errorf("at least two version snapshots are required")
 	}
-	for i, snapshot := range snapshots {
+	var previous *VersionSnapshot
+	for i := range snapshots {
+		snapshot := &snapshots[i]
 		if snapshot.Module == nil {
 			return nil, fmt.Errorf("module snapshot for version %s is nil", snapshot.Version)
 		}
 		if !semverutil.IsValid(snapshot.Version) {
 			return nil, fmt.Errorf("invalid version %q in upgrade path", snapshot.Version)
 		}
-		if i > 0 && semverutil.Compare(snapshots[i-1].Version, snapshot.Version) >= 0 {
-			return nil, fmt.Errorf("upgrade path versions must be strictly ascending: %s then %s", snapshots[i-1].Version, snapshot.Version)
+		if previous != nil && semverutil.Compare(previous.Version, snapshot.Version) >= 0 {
+			return nil, fmt.Errorf("upgrade path versions must be strictly ascending: %s then %s", previous.Version, snapshot.Version)
 		}
+		previous = snapshot
 	}
 
 	report := &UpgradePathReport{
@@ -84,9 +87,11 @@ func AnalyzeUpgradePath(snapshots []VersionSnapshot) (*UpgradePathReport, error)
 	return report, nil
 }
 
-// RenderJSON serializes an upgrade path report.
-func (r *UpgradePathReport) RenderJSON() ([]byte, error) {
-	return json.MarshalIndent(r, "", "  ")
+// RenderJSON serializes an upgrade path report. Every field of the report graph is a JSON-safe
+// primitive, slice or struct of those, so encoding cannot fail and no error is returned.
+func (r *UpgradePathReport) RenderJSON() []byte {
+	encoded, _ := json.MarshalIndent(r, "", "  ")
+	return encoded
 }
 
 // RenderMarkdown formats an upgrade path and adjacent compatibility verdicts.

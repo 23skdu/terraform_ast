@@ -39,6 +39,10 @@ func main() {
 
 // Execute runs the CLI application with given arguments and streams.
 func Execute(args []string, stdout, stderr io.Writer) int {
+	// Repositories and extracted versions are owned by the shared gitops cache; release them
+	// when the run finishes so temporary directories never outlive the process.
+	defer gitops.GlobalCache.Clear()
+
 	fs := flag.NewFlagSet("tfastdiff", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
@@ -84,7 +88,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		var err error
 		policyConfig, err = policy.Load(policyPath)
 		if err != nil {
-			fmt.Fprintf(stderr, "Error loading policy %s: %v\n", policyPath, err)
+			_, _ = fmt.Fprintf(stderr, "Error loading policy %s: %v\n", policyPath, err)
 			return 2
 		}
 	}
@@ -92,7 +96,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	// Mode 1: Wrapper Audit Mode
 	if wrapperPath != "" {
 		if upgradePath {
-			fmt.Fprintln(stderr, "Error: --upgrade-path is only available in direct comparison mode")
+			_, _ = fmt.Fprintln(stderr, "Error: --upgrade-path is only available in direct comparison mode")
 			return 2
 		}
 		return runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir, checkRecreation, enforceExit1, fixPreview, policyConfig, stdout, stderr)
@@ -101,13 +105,13 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	// Mode 2: Direct Upstream Comparison Mode
 	if oldPath != "" || newPath != "" {
 		if fixPreview {
-			fmt.Fprintln(stderr, "Error: --fix-preview is only available in wrapper audit mode")
+			_, _ = fmt.Fprintln(stderr, "Error: --fix-preview is only available in wrapper audit mode")
 			return 2
 		}
 		return runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile, checkRecreation, enforceExit1, upgradePath, policyConfig, stdout, stderr)
 	}
 
-	fmt.Fprintln(stderr, "Error: Must specify either --wrapper <dir> OR --old <path> and --new <path>")
+	_, _ = fmt.Fprintln(stderr, "Error: Must specify either --wrapper <dir> OR --old <path> and --new <path>")
 	fs.Usage()
 	return 2
 }
@@ -115,7 +119,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir string, checkRecreation, enforceExit1, fixPreview bool, policyConfig *policy.Policy, stdout, stderr io.Writer) int {
 	wInfo, err := ast.Inspect(wrapperPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "Error inspecting wrapper module %s: %v\n", wrapperPath, err)
+		_, _ = fmt.Fprintf(stderr, "Error inspecting wrapper module %s: %v\n", wrapperPath, err)
 		return 1
 	}
 
@@ -130,7 +134,7 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 	}
 
 	if upstreamPath == "" {
-		fmt.Fprintln(stderr, "Error: upstream module path not specified and could not be deduced from wrapper")
+		_, _ = fmt.Fprintln(stderr, "Error: upstream module path not specified and could not be deduced from wrapper")
 		return 1
 	}
 
@@ -145,7 +149,7 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 	if registry.IsRegistrySource(upstreamPath) {
 		tmpTarget, err := mkdirTemp("", "tf_registry_*")
 		if err != nil {
-			fmt.Fprintf(stderr, "Error creating temp dir: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error creating temp dir: %v\n", err)
 			return 1
 		}
 		cleanupDirs = append(cleanupDirs, tmpTarget)
@@ -154,24 +158,19 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 		if ver == "" {
 			ver, err = client.GetLatestVersion(context.Background(), upstreamPath)
 			if err != nil {
-				fmt.Fprintf(stderr, "Error checking out target upstream version: %v\n", err)
+				_, _ = fmt.Fprintf(stderr, "Error checking out target upstream version: %v\n", err)
 				return 1
 			}
 		}
 		if err := client.DownloadModule(context.Background(), upstreamPath, ver, tmpTarget); err != nil {
-			fmt.Fprintf(stderr, "Error checking out target upstream version: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error checking out target upstream version: %v\n", err)
 			return 1
 		}
 		targetDir = tmpTarget
 	} else if isGitURL(upstreamPath) || (newVersion != "" && isGitRepo(upstreamPath)) {
-		tmpTarget, err := mkdirTemp("", "tf_upstream_target_*")
+		tmpTarget, err := gitops.GlobalCache.GetOrExtract(upstreamPath, newVersion, newCachedDir("tf_upstream_target_*"))
 		if err != nil {
-			fmt.Fprintf(stderr, "Error creating temp dir: %v\n", err)
-			return 1
-		}
-		cleanupDirs = append(cleanupDirs, tmpTarget)
-		if err := gitops.ExtractVersionToDirShallow(upstreamPath, newVersion, tmpTarget); err != nil {
-			fmt.Fprintf(stderr, "Error checking out target upstream version: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error checking out target upstream version: %v\n", err)
 			return 1
 		}
 		targetDir = tmpTarget
@@ -179,7 +178,7 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 
 	targetInfo, err := ast.Inspect(targetDir)
 	if err != nil {
-		fmt.Fprintf(stderr, "Error inspecting target upstream module %s: %v\n", targetDir, err)
+		_, _ = fmt.Fprintf(stderr, "Error inspecting target upstream module %s: %v\n", targetDir, err)
 		return 1
 	}
 
@@ -196,13 +195,8 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 				}
 			}
 		} else if isGitURL(upstreamPath) || isGitRepo(upstreamPath) {
-			tmpPinned, err := mkdirTemp("", "tf_upstream_pinned_*")
-			if err != nil {
-				fmt.Fprintf(stderr, "Error creating temp dir: %v\n", err)
-				return 1
-			}
-			cleanupDirs = append(cleanupDirs, tmpPinned)
-			if err := gitops.ExtractVersionToDirShallow(upstreamPath, oldVersion, tmpPinned); err == nil {
+			tmpPinned, err := gitops.GlobalCache.GetOrExtract(upstreamPath, oldVersion, newCachedDir("tf_upstream_pinned_*"))
+			if err == nil {
 				pinnedDir = tmpPinned
 			}
 		}
@@ -233,7 +227,7 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 		}
 		preview, err := codemod.PreviewRemovedInputs(wrapperPath, res.TargetModuleName, removedInputs)
 		if err != nil {
-			fmt.Fprintf(stderr, "Error generating fix preview: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error generating fix preview: %v\n", err)
 			return 1
 		}
 		if preview == "" {
@@ -241,7 +235,7 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 				"Only removed arguments in the wrapper's Terraform module block are currently patchable; no files were changed.\n"
 		}
 		if err := writeOutput(outputFile, preview, stdout); err != nil {
-			fmt.Fprintf(stderr, "Error writing fix preview: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error writing fix preview: %v\n", err)
 			return 1
 		}
 		if enforceExit1 && !res.CanSafelyUpdate {
@@ -253,48 +247,28 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 		return 0
 	}
 
-	var outContent string
-	switch format {
-	case "json":
-		b, _ := report.RenderWrapperJSON(res)
-		outContent = string(b)
-	case "sarif":
-		b, _ := report.RenderWrapperSARIF(res)
-		outContent = string(b)
-	case "markdown":
-		outContent = report.RenderWrapperMarkdown(res)
-		if checkRecreation {
-			hazards := recreation.AnalyzeWrapperHazards(res)
-			if len(hazards) > 0 {
-				outContent += recreation.FormatHazardsMarkdown(hazards)
-			}
-		}
-	default:
-		outContent = report.RenderWrapperText(res)
-	}
-
 	canSafelyUpdate := res.CanSafelyUpdate
 
+	findings := report.Findings{}
+	if checkRecreation {
+		findings.RecreationHazards = recreation.AnalyzeWrapperHazards(res)
+	}
 	if blastRadiusDir != "" {
 		blastReport, err := blastradius.ScanDirectory(blastRadiusDir, wrapperPath, wInfo, res)
 		if err != nil {
-			fmt.Fprintf(stderr, "Error scanning blast radius: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error scanning blast radius: %v\n", err)
 			return 1
 		}
 		if !blastReport.CanSafelyUpdateAll {
 			canSafelyUpdate = false
 		}
-		switch format {
-		case "json":
-			bj, _ := blastReport.RenderJSON()
-			outContent += "\n" + string(bj)
-		default:
-			outContent += "\n\n" + blastReport.RenderMarkdown()
-		}
+		findings.BlastRadius = blastReport
 	}
 
+	outContent := renderWrapperOutput(format, res, findings)
+
 	if err := writeOutput(outputFile, outContent, stdout); err != nil {
-		fmt.Fprintf(stderr, "Error writing output: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "Error writing output: %v\n", err)
 		return 1
 	}
 
@@ -306,19 +280,19 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 
 func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile string, checkRecreation, enforceExit1, analyzeUpgradePath bool, policyConfig *policy.Policy, stdout, stderr io.Writer) int {
 	if oldPath == "" || newPath == "" {
-		fmt.Fprintln(stderr, "Error: Both --old and --new must be specified for module comparison")
+		_, _ = fmt.Fprintln(stderr, "Error: Both --old and --new must be specified for module comparison")
 		return 2
 	}
 	if analyzeUpgradePath && (oldVersion == "" || newVersion == "") {
-		fmt.Fprintln(stderr, "Error: --upgrade-path requires --old-version and --new-version")
+		_, _ = fmt.Fprintln(stderr, "Error: --upgrade-path requires --old-version and --new-version")
 		return 2
 	}
 	if analyzeUpgradePath && semverutil.Compare(oldVersion, newVersion) >= 0 {
-		fmt.Fprintln(stderr, "Error: --upgrade-path requires --new-version to be greater than --old-version")
+		_, _ = fmt.Fprintln(stderr, "Error: --upgrade-path requires --new-version to be greater than --old-version")
 		return 2
 	}
 	if analyzeUpgradePath && (format == "sarif") {
-		fmt.Fprintln(stderr, "Error: --upgrade-path supports text, markdown, and json formats")
+		_, _ = fmt.Fprintln(stderr, "Error: --upgrade-path supports text, markdown, and json formats")
 		return 2
 	}
 
@@ -333,7 +307,7 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 	if registry.IsRegistrySource(oldPath) {
 		tmpOld, err := mkdirTemp("", "tf_registry_old_*")
 		if err != nil {
-			fmt.Fprintf(stderr, "Error creating temp dir: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error creating temp dir: %v\n", err)
 			return 1
 		}
 		cleanupDirs = append(cleanupDirs, tmpOld)
@@ -343,19 +317,14 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 			ver, _ = client.GetLatestVersion(context.Background(), oldPath)
 		}
 		if err := client.DownloadModule(context.Background(), oldPath, ver, tmpOld); err != nil {
-			fmt.Fprintf(stderr, "Error checking out old version: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error checking out old version: %v\n", err)
 			return 1
 		}
 		actualOld = tmpOld
 	} else if isGitURL(oldPath) || (oldVersion != "" && isGitRepo(oldPath)) {
-		tmpOld, err := mkdirTemp("", "tf_old_*")
+		tmpOld, err := gitops.GlobalCache.GetOrExtract(oldPath, oldVersion, newCachedDir("tf_old_*"))
 		if err != nil {
-			fmt.Fprintf(stderr, "Error creating temp dir: %v\n", err)
-			return 1
-		}
-		cleanupDirs = append(cleanupDirs, tmpOld)
-		if err := gitops.ExtractVersionToDirShallow(oldPath, oldVersion, tmpOld); err != nil {
-			fmt.Fprintf(stderr, "Error checking out old version: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error checking out old version: %v\n", err)
 			return 1
 		}
 		actualOld = tmpOld
@@ -365,7 +334,7 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 	if registry.IsRegistrySource(newPath) {
 		tmpNew, err := mkdirTemp("", "tf_registry_new_*")
 		if err != nil {
-			fmt.Fprintf(stderr, "Error creating temp dir: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error creating temp dir: %v\n", err)
 			return 1
 		}
 		cleanupDirs = append(cleanupDirs, tmpNew)
@@ -375,19 +344,14 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 			ver, _ = client.GetLatestVersion(context.Background(), newPath)
 		}
 		if err := client.DownloadModule(context.Background(), newPath, ver, tmpNew); err != nil {
-			fmt.Fprintf(stderr, "Error checking out new version: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error checking out new version: %v\n", err)
 			return 1
 		}
 		actualNew = tmpNew
 	} else if isGitURL(newPath) || (newVersion != "" && isGitRepo(newPath)) {
-		tmpNew, err := mkdirTemp("", "tf_new_*")
+		tmpNew, err := gitops.GlobalCache.GetOrExtract(newPath, newVersion, newCachedDir("tf_new_*"))
 		if err != nil {
-			fmt.Fprintf(stderr, "Error creating temp dir: %v\n", err)
-			return 1
-		}
-		cleanupDirs = append(cleanupDirs, tmpNew)
-		if err := gitops.ExtractVersionToDirShallow(newPath, newVersion, tmpNew); err != nil {
-			fmt.Fprintf(stderr, "Error checking out new version: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error checking out new version: %v\n", err)
 			return 1
 		}
 		actualNew = tmpNew
@@ -400,7 +364,7 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 		var err error
 		oldInfo, err = ast.Inspect(actualOld)
 		if err != nil {
-			return fmt.Errorf("Error inspecting old module %s: %v", actualOld, err)
+			return fmt.Errorf("inspecting old module %s: %w", actualOld, err)
 		}
 		return nil
 	})
@@ -409,22 +373,35 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 		var err error
 		newInfo, err = ast.Inspect(actualNew)
 		if err != nil {
-			return fmt.Errorf("Error inspecting new module %s: %v", actualNew, err)
+			return fmt.Errorf("inspecting new module %s: %w", actualNew, err)
 		}
 		return nil
 	})
 
 	if err := g.Wait(); err != nil {
-		fmt.Fprintf(stderr, "%v\n", err)
+		_, _ = fmt.Fprintf(stderr, "Error comparing modules: %v\n", err)
 		return 1
 	}
 
 	diffReport := diff.Compare(oldInfo, newInfo, oldVersion, newVersion)
+	// Identify the compared module by the source the user asked for, so reports and SARIF
+	// artifact locations name the module instead of a temporary extraction directory.
+	comparedSource := comparisonSource(newPath, oldPath)
+	if comparedSource != "" {
+		diffReport.ModuleName = comparedSource
+	}
 	if analyzeUpgradePath {
 		pathReport, err := analyzeUpgradePathVersions(oldPath, newPath, oldVersion, newVersion, oldInfo, newInfo)
 		if err != nil {
-			fmt.Fprintf(stderr, "Error analyzing upgrade path: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error analyzing upgrade path: %v\n", err)
 			return 1
+		}
+		if comparedSource != "" {
+			for _, step := range pathReport.Steps {
+				if step.Diff != nil {
+					step.Diff.ModuleName = comparedSource
+				}
+			}
 		}
 		if policyConfig != nil {
 			for _, step := range pathReport.Steps {
@@ -439,19 +416,14 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 		var content string
 		switch format {
 		case "json":
-			data, err := pathReport.RenderJSON()
-			if err != nil {
-				fmt.Fprintf(stderr, "Error encoding upgrade path report: %v\n", err)
-				return 1
-			}
-			content = string(data)
+			content = string(pathReport.RenderJSON())
 		case "markdown":
 			content = pathReport.RenderMarkdown()
 		default:
 			content = pathReport.RenderText()
 		}
 		if err := writeOutput(outputFile, content, stdout); err != nil {
-			fmt.Fprintf(stderr, "Error writing output: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error writing output: %v\n", err)
 			return 1
 		}
 		if (enforceExit1 && !pathReport.CanSafelyUpdateAll) || len(pathReport.PolicyViolations) > 0 {
@@ -468,28 +440,14 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 		})
 	}
 
-	var outContent string
-	switch format {
-	case "json":
-		b, _ := report.RenderJSON(diffReport)
-		outContent = string(b)
-	case "sarif":
-		b, _ := report.RenderSARIF(diffReport)
-		outContent = string(b)
-	case "markdown":
-		outContent = report.RenderMarkdown(diffReport)
-		if checkRecreation {
-			hazards := recreation.AnalyzeHazards(diffReport)
-			if len(hazards) > 0 {
-				outContent += recreation.FormatHazardsMarkdown(hazards)
-			}
-		}
-	default:
-		outContent = report.RenderText(diffReport)
+	findings := report.Findings{}
+	if checkRecreation {
+		findings.RecreationHazards = recreation.AnalyzeHazards(diffReport)
 	}
+	outContent := renderDiffOutput(format, diffReport, findings)
 
 	if err := writeOutput(outputFile, outContent, stdout); err != nil {
-		fmt.Fprintf(stderr, "Error writing output: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "Error writing output: %v\n", err)
 		return 1
 	}
 
@@ -497,6 +455,55 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 		return 1
 	}
 	return 0
+}
+
+// renderWrapperOutput renders a wrapper audit, including the optional recreation hazards and
+// downstream consumer scan, in the requested format. Machine-readable formats stay single valid
+// documents instead of concatenating a second report onto the first.
+func renderWrapperOutput(format string, res *wrapper.WrapperCompatibilityReport, findings report.Findings) string {
+	switch format {
+	case "json":
+		return string(report.RenderWrapperJSON(res, findings))
+	case "sarif":
+		return string(report.RenderWrapperSARIF(res, findings))
+	case "markdown":
+		out := report.RenderWrapperMarkdown(res)
+		if len(findings.RecreationHazards) > 0 {
+			out += recreation.FormatHazardsMarkdown(findings.RecreationHazards)
+		}
+		if findings.BlastRadius != nil {
+			out += "\n" + findings.BlastRadius.RenderMarkdown()
+		}
+		return out
+	default:
+		return report.RenderWrapperText(res, findings)
+	}
+}
+
+// renderDiffOutput renders a direct comparison in the requested format.
+func renderDiffOutput(format string, diffReport *diff.DiffReport, findings report.Findings) string {
+	switch format {
+	case "json":
+		return string(report.RenderJSON(diffReport, findings))
+	case "sarif":
+		return string(report.RenderSARIF(diffReport, findings))
+	case "markdown":
+		out := report.RenderMarkdown(diffReport)
+		if len(findings.RecreationHazards) > 0 {
+			out += recreation.FormatHazardsMarkdown(findings.RecreationHazards)
+		}
+		return out
+	default:
+		return report.RenderText(diffReport, findings)
+	}
+}
+
+// comparisonSource returns the user facing identifier of the compared module source.
+func comparisonSource(newPath, oldPath string) string {
+	if trimmed := strings.TrimSpace(newPath); trimmed != "" {
+		return trimmed
+	}
+	return strings.TrimSpace(oldPath)
 }
 
 func analyzeUpgradePathVersions(source, newSource, oldVersion, newVersion string, oldInfo, newInfo *ast.ModuleInfo) (*planner.UpgradePathReport, error) {
@@ -526,29 +533,39 @@ func analyzeUpgradePathVersions(source, newSource, oldVersion, newVersion string
 }
 
 func inspectModuleVersion(source, version string) (*ast.ModuleInfo, error) {
-	directory, err := mkdirTemp("", "tfastdiff_upgrade_step_*")
-	if err != nil {
-		return nil, fmt.Errorf("create temporary module directory: %w", err)
-	}
-	defer os.RemoveAll(directory)
-
 	if registry.IsRegistrySource(source) {
+		directory, err := mkdirTemp("", "tfastdiff_upgrade_step_*")
+		if err != nil {
+			return nil, fmt.Errorf("create temporary module directory: %w", err)
+		}
+		defer func() { _ = os.RemoveAll(directory) }()
 		if err := newRegistryClient().DownloadModule(context.Background(), source, version, directory); err != nil {
 			return nil, fmt.Errorf("download registry module %s@%s: %w", source, version, err)
 		}
-	} else if isGitURL(source) || isGitRepo(source) {
-		if err := gitops.ExtractVersionToDirShallow(source, version, directory); err != nil {
+		return ast.Inspect(directory)
+	}
+	if isGitURL(source) || isGitRepo(source) {
+		directory, err := gitops.GlobalCache.GetOrExtract(source, version, newCachedDir("tfastdiff_upgrade_step_*"))
+		if err != nil {
 			return nil, fmt.Errorf("checkout repository version %s: %w", version, err)
 		}
-	} else {
-		return nil, fmt.Errorf("cannot retrieve intermediate version %s from a non-versioned local directory", version)
+		return ast.Inspect(directory)
 	}
-	return ast.Inspect(directory)
+	return nil, fmt.Errorf("cannot retrieve intermediate version %s from a non-versioned local directory", version)
+}
+
+// newCachedDir builds the directory factory handed to the shared repository cache so that
+// temporary directory creation stays under the CLI's own (injectable) mkdirTemp seam.
+func newCachedDir(pattern string) gitops.DirFactory {
+	return func() (string, error) {
+		return mkdirTemp("", pattern)
+	}
 }
 
 func isGitURL(path string) bool {
 	return strings.HasPrefix(path, "http://") ||
 		strings.HasPrefix(path, "https://") ||
+		strings.HasPrefix(path, "file://") ||
 		strings.HasPrefix(path, "git@") ||
 		strings.HasPrefix(path, "git::")
 }

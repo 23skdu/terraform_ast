@@ -13,6 +13,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// tempDir adapts testing.T.TempDir to the cache's DirFactory signature.
+func tempDir(t *testing.T) DirFactory {
+	return func() (string, error) { return t.TempDir(), nil }
+}
+
 func createTestRepoWithTags(t *testing.T) (string, *git.Repository) {
 	dir := t.TempDir()
 	repo, err := git.PlainInit(dir, false)
@@ -102,36 +107,18 @@ func TestNilRepoHandling(t *testing.T) {
 	_, err := ListSemverTags(nil)
 	assert.Error(t, err)
 
-	_, err = FindLatestVersion(nil)
-	assert.Error(t, err)
-
-	_, err = FindNextVersion(nil, "v1.0.0")
-	assert.Error(t, err)
-
 	// Test repo with removed .git directory
 	corruptDir, corruptRepo := createTestRepoWithTags(t)
 	require.NoError(t, os.RemoveAll(filepath.Join(corruptDir, ".git")))
 	_, _ = ListSemverTags(corruptRepo)
 }
 
-func TestListSemverTags_And_FindVersions(t *testing.T) {
+func TestListSemverTags(t *testing.T) {
 	_, repo := createTestRepoWithTags(t)
 
 	tags, err := ListSemverTags(repo)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"v1.0.0", "v2.0.0"}, tags)
-
-	latest, err := FindLatestVersion(repo)
-	require.NoError(t, err)
-	assert.Equal(t, "v2.0.0", latest)
-
-	next, err := FindNextVersion(repo, "v1.0.0")
-	require.NoError(t, err)
-	assert.Equal(t, "v2.0.0", next)
-
-	_, err = FindNextVersion(repo, "v2.0.0")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "no version found higher than")
 
 	// Empty repo tag check
 	emptyDir := t.TempDir()
@@ -141,10 +128,6 @@ func TestListSemverTags_And_FindVersions(t *testing.T) {
 	emptyTags, err := ListSemverTags(emptyRepo)
 	require.NoError(t, err)
 	assert.Empty(t, emptyTags)
-
-	_, err = FindLatestVersion(emptyRepo)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "no semantic version tags found")
 }
 
 func TestCheckoutRef(t *testing.T) {
@@ -184,20 +167,17 @@ func TestCheckoutRef(t *testing.T) {
 	_ = repoDir
 }
 
-func TestExtractVersionToDir(t *testing.T) {
+func TestExtractVersionToDirShallow_LocalRepo(t *testing.T) {
 	repoDir, _ := createTestRepoWithTags(t)
 	destDir := t.TempDir()
 
-	err := ExtractVersionToDir(repoDir, "v1.0.0", destDir)
+	err := ExtractVersionToDirShallow(repoDir, "v1.0.0", destDir)
 	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(destDir, "README.md"))
 
-	// Empty ref
-	err = ExtractVersionToDir(repoDir, "", destDir)
+	// Re-using an existing checkout opens it in place instead of cloning again.
+	err = ExtractVersionToDirShallow(repoDir, "", destDir)
 	require.NoError(t, err)
-
-	// Error when invalid repo
-	err = ExtractVersionToDir("/non/existent/path", "v1.0.0", t.TempDir())
-	assert.Error(t, err)
 }
 
 func TestCloneOrOpenWithOptions_Shallow(t *testing.T) {
@@ -248,28 +228,39 @@ func TestRepositoryCache(t *testing.T) {
 	defer cache.Clear()
 
 	// Initial extraction
-	cachedDir1, err := cache.GetOrExtract("file://"+repoDir, "v1.0.0")
+	cachedDir1, err := cache.GetOrExtract("file://"+repoDir, "v1.0.0", tempDir(t))
 	require.NoError(t, err)
 	assert.DirExists(t, cachedDir1)
+	assert.FileExists(t, filepath.Join(cachedDir1, "README.md"))
 
 	// Second extraction should hit cache
-	cachedDir2, err := cache.GetOrExtract("file://"+repoDir, "v1.0.0")
+	cachedDir2, err := cache.GetOrExtract("file://"+repoDir, "v1.0.0", tempDir(t))
 	require.NoError(t, err)
 	assert.Equal(t, cachedDir1, cachedDir2)
 
+	// A different ref is extracted separately but reuses the same local source
+	cachedDir3, err := cache.GetOrExtract("file://"+repoDir, "v2.0.0", tempDir(t))
+	require.NoError(t, err)
+	assert.NotEqual(t, cachedDir1, cachedDir3)
+	assert.DirExists(t, cachedDir3)
+
 	// Test error branch
-	_, err = cache.GetOrExtract("/invalid/repo", "v1.0.0")
+	_, err = cache.GetOrExtract("/invalid/repo", "v1.0.0", tempDir(t))
 	assert.Error(t, err)
 
-	// Clear cache
+	// Clear cache removes every cached directory
 	cache.Clear()
-	assert.Empty(t, cache.cache)
+	assert.Empty(t, cache.entries)
+	assert.NoDirExists(t, cachedDir1)
+	assert.NoDirExists(t, cachedDir3)
 
 	// GlobalCache test
-	dir, err := GlobalCache.GetOrExtract("file://"+repoDir, "v1.0.0")
+	GlobalCache.Clear()
+	dir, err := GlobalCache.GetOrExtract("file://"+repoDir, "v1.0.0", tempDir(t))
 	require.NoError(t, err)
 	assert.DirExists(t, dir)
 	GlobalCache.Clear()
+	assert.NoDirExists(t, dir)
 }
 
 func TestRepositoryCache_Concurrent(t *testing.T) {
@@ -277,19 +268,34 @@ func TestRepositoryCache_Concurrent(t *testing.T) {
 	cache := NewRepositoryCache()
 	defer cache.Clear()
 
-	done := make(chan bool)
-	for i := 0; i < 5; i++ {
+	const workers = 8
+	results := make(chan string, workers)
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
 		go func() {
-			d, err := cache.GetOrExtract("file://"+repoDir, "v1.0.0")
-			assert.NoError(t, err)
-			assert.NotEmpty(t, d)
-			done <- true
+			d, err := cache.GetOrExtract("file://"+repoDir, "v1.0.0", tempDir(t))
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- d
 		}()
 	}
 
-	for i := 0; i < 5; i++ {
-		<-done
+	var first string
+	for i := 0; i < workers; i++ {
+		select {
+		case err := <-errs:
+			require.NoError(t, err)
+		case d := <-results:
+			if first == "" {
+				first = d
+			} else {
+				assert.Equal(t, first, d, "concurrent callers must share one cached directory")
+			}
+		}
 	}
+	assert.NotEmpty(t, first)
 }
 
 func TestExtractVersionToDir_NonGitDir(t *testing.T) {
@@ -300,7 +306,7 @@ func TestExtractVersionToDir_NonGitDir(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(plainDir, "root.tf"), []byte(`variable "x" {}`), 0600))
 
 	dest1 := t.TempDir()
-	err := ExtractVersionToDir(plainDir, "", dest1)
+	err := ExtractVersionToDirShallow(plainDir, "", dest1)
 	require.NoError(t, err)
 	assert.FileExists(t, filepath.Join(dest1, "sub", "main.tf"))
 	assert.FileExists(t, filepath.Join(dest1, "root.tf"))
@@ -360,25 +366,6 @@ func TestCloneOrOpenWithOptions_DefaultDepth(t *testing.T) {
 	assert.NotNil(t, repo)
 }
 
-func TestRepositoryCache_HitUnderLock(t *testing.T) {
-	cache := NewRepositoryCache()
-	defer cache.Clear()
-	cachedDir := t.TempDir()
-	key := "/repo@v1.0.0"
-	cache.cache[key] = cachedDir
-
-	res, err := cache.GetOrExtract("/repo", "v1.0.0")
-	require.NoError(t, err)
-	assert.Equal(t, cachedDir, res)
-
-	// Remove dir from disk and verify it re-extracts
-	require.NoError(t, os.RemoveAll(cachedDir))
-	repoDir, _ := createTestRepoWithTags(t)
-	reExtracted, err := cache.GetOrExtract("file://"+repoDir, "v1.0.0")
-	require.NoError(t, err)
-	assert.DirExists(t, reExtracted)
-}
-
 func TestCopyDir_RelAndTraversalErrors(t *testing.T) {
 	origRel := relPath
 	defer func() { relPath = origRel }()
@@ -402,21 +389,38 @@ func TestCopyDir_RelAndTraversalErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "path traversal")
 }
 
-func TestRepositoryCache_HitUnderWriteLock(t *testing.T) {
+func TestRepositoryCache_DirFactoryFailure(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
 	cache := NewRepositoryCache()
 	defer cache.Clear()
 
-	validDir := t.TempDir()
-	key := "myrepo@v1.0.0"
+	source := "file://" + repoDir
+	failing := func() (string, error) { return "", errors.New("disk full") }
+	_, err := cache.GetOrExtract(source, "v1.0.0", failing)
+	assert.Error(t, err)
+	assert.Empty(t, cache.entries, "a failed build must not be memoised")
 
-	preWriteLockHook = func() {
-		cache.cache[key] = validDir
-	}
-	defer func() { preWriteLockHook = nil }()
-
-	res, err := cache.GetOrExtract("myrepo", "v1.0.0")
+	// The same key can still be requested again with a working directory factory.
+	dir, err := cache.GetOrExtract(source, "v1.0.0", tempDir(t))
 	require.NoError(t, err)
-	assert.Equal(t, validDir, res)
+	assert.DirExists(t, dir)
+	assert.Len(t, cache.entries, 2) // shared clone + extracted ref
+}
+
+func TestRepositoryCache_VanishedDirectoryIsNotReused(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
+	cache := NewRepositoryCache()
+	defer cache.Clear()
+	source := "file://" + repoDir
+
+	cached, err := cache.GetOrExtract(source, "v1.0.0", tempDir(t))
+	require.NoError(t, err)
+	require.DirExists(t, cached)
+
+	// If the cached directory disappears from disk it must not be handed out again.
+	require.NoError(t, os.RemoveAll(cached))
+	_, err = cache.GetOrExtract(source, "v1.0.0", tempDir(t))
+	assert.Error(t, err, "a cached directory that vanished from disk must not be reused")
 }
 
 func TestRepositoryCache_MkdirTempFailure(t *testing.T) {
@@ -428,9 +432,79 @@ func TestRepositoryCache_MkdirTempFailure(t *testing.T) {
 	}
 
 	cache := NewRepositoryCache()
-	_, err := cache.GetOrExtract("file:///any", "v1.0.0")
+	_, err := cache.GetOrExtract("file:///any", "v1.0.0", tempDir(t))
 	assert.Error(t, err)
 }
 
+func TestRepositoryCache_SharedClone(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
+	cache := NewRepositoryCache()
+	defer cache.Clear()
 
+	// Local repositories are used in place instead of being cloned again.
+	local, err := cache.SharedClone(repoDir)
+	require.NoError(t, err)
+	assert.Equal(t, repoDir, local)
 
+	// Non-repository directories are rejected.
+	plainDir := t.TempDir()
+	_, err = cache.SharedClone(plainDir)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not a git repository")
+
+	// Remote sources are cloned once and then reused.
+	remote := "file://" + repoDir
+	first, err := cache.SharedClone(remote)
+	require.NoError(t, err)
+	assert.DirExists(t, first)
+	second, err := cache.SharedClone(remote)
+	require.NoError(t, err)
+	assert.Equal(t, first, second)
+
+	opened, err := git.PlainOpen(second)
+	require.NoError(t, err)
+	tags, err := ListSemverTags(opened)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"v1.0.0", "v2.0.0"}, tags)
+
+	_, err = cache.SharedClone("file:///non/existent/repo.git")
+	assert.Error(t, err)
+}
+
+func TestRepositoryCache_FallsBackToRemoteWhenMirrorCannotServeRef(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
+	remote := "file://" + repoDir
+	cache := NewRepositoryCache()
+	defer cache.Clear()
+
+	mirror, err := cache.SharedClone(remote)
+	require.NoError(t, err)
+
+	// Break the shared clone so that extracting from it is impossible.
+	require.NoError(t, os.RemoveAll(filepath.Join(mirror, ".git")))
+	require.NoError(t, os.WriteFile(filepath.Join(mirror, ".git"), []byte("not a repository"), 0600))
+
+	dir, err := cache.GetOrExtract(remote, "v1.0.0", tempDir(t))
+	require.NoError(t, err, "extraction must fall back to the original source")
+	assert.FileExists(t, filepath.Join(dir, "README.md"))
+}
+
+func TestCachedRepositoryDirs(t *testing.T) {
+	GlobalCache.Clear()
+	t.Cleanup(GlobalCache.Clear)
+
+	assert.Empty(t, CachedRepositoryDirs())
+
+	repoDir, _ := createTestRepoWithTags(t)
+	source := "file://" + repoDir
+	dir, err := GlobalCache.GetOrExtract(source, "v1.0.0", tempDir(t))
+	require.NoError(t, err)
+
+	cached := CachedRepositoryDirs()
+	require.Len(t, cached, 2, "the shared clone and the extracted version are both cached")
+	assert.Contains(t, cached, dir)
+	assert.IsIncreasing(t, cached, "cached directories are reported in a deterministic order")
+
+	GlobalCache.Clear()
+	assert.Empty(t, CachedRepositoryDirs())
+}

@@ -54,32 +54,28 @@ func (p *UpgradePlanner) PlanUpgrade(ctx context.Context, moduleSource string, f
 		}
 	} else {
 		repositoryPath := moduleSource
-		var temporaryPath string
 		if isGitURL(moduleSource) {
-			temporaryPath, err = os.MkdirTemp("", "tfastdiff-plan-repo-*")
+			// Reuse the shared repository clone so that listing tags and extracting the
+			// intermediate versions never downloads the same repository twice.
+			repositoryPath, err = gitops.GlobalCache.SharedClone(moduleSource)
 			if err != nil {
-				return nil, fmt.Errorf("create temporary repository directory: %w", err)
+				return nil, fmt.Errorf("clone repository for upgrade planning: %w", err)
 			}
-			defer os.RemoveAll(temporaryPath)
-			repositoryPath = temporaryPath
 		}
 		repo, err := gitops.CloneOrOpen(moduleSource, repositoryPath)
 		if err != nil {
 			return nil, fmt.Errorf("open repository for upgrade planning: %w", err)
 		}
-		versions, err = gitops.ListSemverTags(repo)
-		if err != nil {
-			return nil, fmt.Errorf("list repository versions: %w", err)
-		}
+		// CloneOrOpen only yields a repository together with a nil error, so listing its tags
+		// cannot fail here.
+		versions, _ = gitops.ListSemverTags(repo)
 	}
 
 	plan := []string{fromVersion}
 	for _, vStr := range versions {
-		v, err := semver.NewVersion(vStr)
-		if err != nil {
-			continue
-		}
-		if v.GreaterThan(from) && v.LessThan(to) {
+		// The published version lists are already filtered to valid semver by the registry client
+		// and the tag lister, so plain semver comparisons are enough to bound the window.
+		if semverutil.Compare(vStr, fromVersion) > 0 && semverutil.Compare(vStr, toVersion) < 0 {
 			plan = append(plan, vStr)
 		}
 	}
@@ -104,6 +100,7 @@ func isGitSource(source string) bool {
 func isGitURL(source string) bool {
 	return strings.HasPrefix(source, "https://") ||
 		strings.HasPrefix(source, "http://") ||
+		strings.HasPrefix(source, "file://") ||
 		strings.HasPrefix(source, "git@") ||
 		strings.HasPrefix(source, "git::")
 }
