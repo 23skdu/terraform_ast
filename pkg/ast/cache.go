@@ -49,19 +49,65 @@ func moduleFingerprint(dir string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
+var (
+	persistentCacheMu  sync.RWMutex
+	persistentCacheDir string
+)
+
+// SetPersistentCacheDir sets the directory path for L2 persistent disk caching.
+func SetPersistentCacheDir(dir string) {
+	persistentCacheMu.Lock()
+	defer persistentCacheMu.Unlock()
+	if strings.TrimSpace(dir) == "" {
+		persistentCacheDir = ""
+		return
+	}
+	persistentCacheDir = filepath.Clean(dir)
+}
+
+// GetPersistentCacheDir returns the current L2 persistent disk cache directory.
+func GetPersistentCacheDir() string {
+	persistentCacheMu.RLock()
+	defer persistentCacheMu.RUnlock()
+	return persistentCacheDir
+}
+
+// ClearPersistentCache removes all files in the L2 persistent disk cache directory.
+func ClearPersistentCache() error {
+	dir := GetPersistentCacheDir()
+	if dir == "" {
+		return nil
+	}
+	return os.RemoveAll(dir)
+}
+
 func cachedModule(path, fingerprint string) (*ModuleInfo, bool, error) {
 	moduleCache.Lock()
 	entry, exists := moduleCache.entries[path]
 	moduleCache.Unlock()
-	if !exists || entry.fingerprint != fingerprint {
-		return nil, false, nil
+	if exists && entry.fingerprint == fingerprint {
+		var info ModuleInfo
+		if err := json.Unmarshal(entry.data, &info); err != nil {
+			return nil, false, fmt.Errorf("failed to decode cached module inspection for %s: %w", path, err)
+		}
+		return &info, true, nil
 	}
 
-	var info ModuleInfo
-	if err := json.Unmarshal(entry.data, &info); err != nil {
-		return nil, false, fmt.Errorf("failed to decode cached module inspection for %s: %w", path, err)
+	diskDir := GetPersistentCacheDir()
+	if diskDir != "" {
+		diskFile := filepath.Join(diskDir, fingerprint+".json")
+		// #nosec G304 -- disk cache file path
+		data, err := os.ReadFile(diskFile)
+		if err == nil {
+			var info ModuleInfo
+			if err := json.Unmarshal(data, &info); err == nil {
+				_ = cacheModule(path, fingerprint, &info)
+				return &info, true, nil
+			}
+		}
 	}
-	return &info, true, nil
+
+	return nil, false, nil
 }
 
 // forgetModuleCacheEntry drops a cached inspection so the next request re-reads the module.
@@ -95,6 +141,14 @@ func cacheModule(path, fingerprint string, info *ModuleInfo) error {
 		oldest := moduleCache.order[0]
 		moduleCache.order = moduleCache.order[1:]
 		delete(moduleCache.entries, oldest)
+	}
+
+	diskDir := GetPersistentCacheDir()
+	if diskDir != "" {
+		if err := os.MkdirAll(diskDir, 0o750); err == nil {
+			diskFile := filepath.Join(diskDir, fingerprint+".json")
+			_ = os.WriteFile(diskFile, data, 0o600)
+		}
 	}
 	return nil
 }

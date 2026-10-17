@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/23skdu/terraform_ast/pkg/gitops"
 	"github.com/23skdu/terraform_ast/pkg/registry"
 	"github.com/go-git/go-git/v5"
@@ -1493,4 +1494,154 @@ func TestInspectModuleVersion_RegistryDownloadFailure(t *testing.T) {
 	_, err := inspectModuleVersion("hashicorp/consul/aws", "1.0.0")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "download registry module hashicorp/consul/aws@1.0.0")
+}
+
+func TestExecute_FixMode(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+
+	// Both --fix and --fix-preview
+	code := Execute([]string{"--wrapper", t.TempDir(), "--fix", "--fix-preview"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "Cannot specify both --fix and --fix-preview")
+
+	// --fix in compare mode
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", t.TempDir(), "--new", t.TempDir(), "--fix"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--fix is only available in wrapper audit mode")
+
+	// Upstream module with removed argument
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "kept" { type = string }`), 0600))
+
+	// Wrapper without module call fails
+	noCallWrapper := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(noCallWrapper, "main.tf"), []byte(`variable "v" { type = string }`), 0600))
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--wrapper", noCallWrapper, "--upstream", upstreamDir, "--fix"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error applying fixes")
+
+	// Wrapper with module call and removable argument
+	wrapperDir := t.TempDir()
+	wrapperFile := filepath.Join(wrapperDir, "main.tf")
+	require.NoError(t, os.WriteFile(wrapperFile, []byte(`module "child" {
+  source = "`+upstreamDir+`"
+  kept   = "val"
+  old    = "val"
+}
+`), 0600))
+
+	// Write output error
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir, "--upstream", upstreamDir, "--fix",
+		"--output", "/invalid/directory/not/exists/out.txt",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error writing fix output")
+
+	// Reset wrapper file content with removable argument
+	require.NoError(t, os.WriteFile(wrapperFile, []byte(`module "child" {
+  source = "`+upstreamDir+`"
+  kept   = "val"
+  old    = "val"
+}
+`), 0600))
+
+	// Apply fix successfully
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--fix"}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "Applied fixes to 1 file(s):")
+	afterContent, err := os.ReadFile(wrapperFile)
+	require.NoError(t, err)
+	assert.NotContains(t, string(afterContent), `old    = "val"`)
+	assert.Contains(t, string(afterContent), `kept`)
+
+	// Re-running when nothing left to fix yields explanatory message
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--fix"}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "No fixes were applied; no patchable arguments found.")
+
+	// Exit code enforcement with --fix
+	brokenUpstream := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(brokenUpstream, "main.tf"), []byte(`variable "new_required" { type = string }`), 0600))
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--wrapper", wrapperDir, "--upstream", brokenUpstream, "--fix", "--exit-code"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+
+	// Policy enforcement with --fix
+	policyFile := filepath.Join(t.TempDir(), "policy.json")
+	require.NoError(t, os.WriteFile(policyFile, []byte(`{"block_breaking":true}`), 0600))
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--wrapper", wrapperDir, "--upstream", brokenUpstream, "--fix", "--policy", policyFile}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+}
+
+func TestExecute_ProviderSchema(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+
+	// Invalid schema path
+	code := Execute([]string{"--wrapper", t.TempDir(), "--provider-schema", "/non/existent/schema.json"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "Error loading provider schema")
+
+	// Valid schema path in compare mode
+	schemaJSON := `{
+  "format_version": "1.0",
+  "provider_schemas": {
+    "google": {
+      "resource_schemas": {
+        "google_compute_instance": {
+          "block": {
+            "attributes": {
+              "zone": {
+                "type": "string",
+                "requires_replace": true
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+	schemaFile := filepath.Join(t.TempDir(), "schema.json")
+	require.NoError(t, os.WriteFile(schemaFile, []byte(schemaJSON), 0600))
+
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(oldDir, "main.tf"), []byte(`variable "zone" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(newDir, "main.tf"), []byte(`variable "zone" { type = number }`), 0600))
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", oldDir, "--new", newDir,
+		"--provider-schema", schemaFile,
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "STATE DESTRUCTION & RECREATION HAZARDS")
+	assert.Contains(t, stdout.String(), "google_compute_instance")
+}
+
+func TestExecute_CacheDir(t *testing.T) {
+	cacheDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--old", t.TempDir(), "--new", t.TempDir(),
+		"--cache-dir", cacheDir,
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Equal(t, cacheDir, ast.GetPersistentCacheDir())
+	ast.SetPersistentCacheDir("")
 }

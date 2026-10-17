@@ -126,15 +126,29 @@ func LookupHazard(moduleName, varName string) (HazardDescriptor, bool) {
 
 // AnalyzeHazards inspects a DiffReport and identifies any breaking changes or warnings that present recreation hazards.
 func AnalyzeHazards(diffReport *diff.DiffReport) []RecreationHazard {
+	return AnalyzeHazardsWithRegistry(diffReport, nil)
+}
+
+// AnalyzeHazardsWithRegistry inspects a DiffReport using both dynamic schema registry and static heuristics.
+func AnalyzeHazardsWithRegistry(diffReport *diff.DiffReport, registry *DynamicHazardRegistry) []RecreationHazard {
 	if diffReport == nil {
 		return nil
+	}
+
+	lookup := func(name string) (HazardDescriptor, bool) {
+		if registry != nil {
+			if desc, ok := registry.Lookup(name); ok {
+				return desc, true
+			}
+		}
+		return LookupHazard(diffReport.ModuleName, name)
 	}
 
 	var hazards []RecreationHazard
 
 	// Check breaking changes
 	for _, item := range diffReport.BreakingChanges {
-		if desc, ok := LookupHazard(diffReport.ModuleName, item.Name); ok {
+		if desc, ok := lookup(item.Name); ok {
 			hazards = append(hazards, RecreationHazard{
 				Variable:    item.Name,
 				Resource:    desc.Resource,
@@ -149,7 +163,7 @@ func AnalyzeHazards(diffReport *diff.DiffReport) []RecreationHazard {
 
 	// Check warnings (e.g. type widenings on hazardous attributes)
 	for _, item := range diffReport.Warnings {
-		if desc, ok := LookupHazard(diffReport.ModuleName, item.Name); ok {
+		if desc, ok := lookup(item.Name); ok {
 			hazards = append(hazards, RecreationHazard{
 				Variable:    item.Name,
 				Resource:    desc.Resource,
@@ -167,13 +181,27 @@ func AnalyzeHazards(diffReport *diff.DiffReport) []RecreationHazard {
 
 // AnalyzeWrapperHazards inspects a WrapperCompatibilityReport for recreation hazards.
 func AnalyzeWrapperHazards(res *wrapper.WrapperCompatibilityReport) []RecreationHazard {
+	return AnalyzeWrapperHazardsWithRegistry(res, nil)
+}
+
+// AnalyzeWrapperHazardsWithRegistry inspects a WrapperCompatibilityReport with dynamic schema support.
+func AnalyzeWrapperHazardsWithRegistry(res *wrapper.WrapperCompatibilityReport, registry *DynamicHazardRegistry) []RecreationHazard {
 	if res == nil {
 		return nil
 	}
 
+	lookup := func(name string) (HazardDescriptor, bool) {
+		if registry != nil {
+			if desc, ok := registry.Lookup(name); ok {
+				return desc, true
+			}
+		}
+		return LookupHazard(res.TargetModuleName, name)
+	}
+
 	var hazards []RecreationHazard
 	for _, item := range res.Issues {
-		if desc, ok := LookupHazard(res.TargetModuleName, item.Target); ok {
+		if desc, ok := lookup(item.Target); ok {
 			hazards = append(hazards, RecreationHazard{
 				Variable:    item.Target,
 				Resource:    desc.Resource,

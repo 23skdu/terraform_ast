@@ -69,3 +69,19 @@ func FuzzUnifiedReplacement(f *testing.F) {
 		}
 	})
 }
+
+// FuzzFormatMovedBlocks checks moved block synthesis for arbitrary input addresses.
+func FuzzFormatMovedBlocks(f *testing.F) {
+	for _, seed := range []string{"module.a", "module.b", "aws_instance.web", ""} {
+		f.Add(seed, seed+"_new")
+	}
+
+	f.Fuzz(func(t *testing.T, from, to string) {
+		res := FormatMovedBlocks([]MovedBlock{{From: from, To: to}})
+		if strings.TrimSpace(from) != "" && strings.TrimSpace(to) != "" {
+			if !strings.Contains(res, "moved {") {
+				t.Fatalf("expected moved block for valid addresses: %q", res)
+			}
+		}
+	})
+}

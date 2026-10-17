@@ -69,7 +69,7 @@ func TestPlanUpgradeIncludesIntermediateGitTags(t *testing.T) {
 	signature := &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()}
 
 	for _, version := range []string{"v1.0.0", "v1.2.0", "v1.2.0-rc.1", "v2.0.0", "not-a-version"} {
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(fmt.Sprintf("# %s\n", version)), 0600))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), fmt.Appendf(nil, "# %s\n", version), 0600))
 		_, err = worktree.Add("main.tf")
 		require.NoError(t, err)
 		commit, err := worktree.Commit(version, &git.CommitOptions{Author: signature, Committer: signature})
@@ -94,7 +94,7 @@ func TestPlanUpgradeClonesGitURLThroughSharedCache(t *testing.T) {
 	signature := &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()}
 
 	for _, version := range []string{"v1.0.0", "v1.1.0", "v2.0.0"} {
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(fmt.Sprintf("# %s\n", version)), 0600))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), fmt.Appendf(nil, "# %s\n", version), 0600))
 		_, err = worktree.Add("main.tf")
 		require.NoError(t, err)
 		commit, err := worktree.Commit(version, &git.CommitOptions{Author: signature, Committer: signature})

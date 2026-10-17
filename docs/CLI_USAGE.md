@@ -49,8 +49,10 @@ Audits a local wrapper module (such as a Google GKE or AWS EKS wrapper) against 
 - `--format <text|markdown|json|sarif>`: Output format (default: `text`). Use `sarif` for GitHub Code Scanning.
 - `--output <file>`: Write report to destination file.
 - `--exit-code`: Returns non-zero exit code (1) if breaking changes are detected.
-- `--policy <file>`: Apply an optional JSON CI policy. Policy violations are included in text, Markdown, JSON, and SARIF output and return exit code 1.
 - `--fix-preview`: Emit a preview-only unified patch for removed arguments passed by the wrapper. Currently supports removal of direct module-call arguments; it does not change files or apply other remediation types.
+- `--fix`: Apply fixes in-place to remove wrapper arguments no longer accepted upstream. Uses `hclwrite` to preserve comments and formatting. Mutually exclusive with `--fix-preview`.
+- `--provider-schema <file>`: Optional path to a provider schema JSON file (`terraform providers schema -json`). Dynamically extracts `requires_replace` metadata across resources and nested blocks to detect ForceNew recreation hazards across any cloud provider.
+- `--cache-dir <dir>`: Optional path to an on-disk directory for persistent L2 AST caching, accelerating monorepo traversals and pre-commit checks.
 
 Example policy:
 
@@ -134,6 +136,8 @@ Compares two versions of an upstream module directly:
 - `--output <file>`: Path to file destination.
 - `--exit-code`: Exits with code 1 if breaking changes exist.
 - `--policy <file>`: Applies the same JSON policy gates as wrapper audit mode.
+- `--provider-schema <file>`: Supply a provider schema JSON file (`terraform providers schema -json`) for dynamic ForceNew recreation detection across all providers.
+- `--cache-dir <dir>`: Optional path to an on-disk directory for persistent L2 AST caching.
 - `--upgrade-path`: Inspects each intermediate semantic-version Git tag or Registry release and reports adjacent compatibility transitions. Requires both version flags, the same source for `--old` and `--new`, and text, Markdown, or JSON output. For local directories, only the supplied endpoint snapshots are available. Git repositories are downloaded once and reused for every intermediate tag, so stepping across a major version does not re-clone per release.
 
 ---
@@ -278,4 +282,128 @@ jobs:
                 body: body
               });
             }
+```
+
+---
+
+## 🎯 Production Real-World Use Cases
+
+### Use Case 1: Pre-Upgrade Breaking Change Audit for Enterprise Wrappers
+Platform engineering teams maintain standardized Terraform wrapper modules (such as an internal GKE or EKS wrapper). Before bumping the upstream version pin, run `tfastdiff` to verify compatibility:
+
+```bash
+# Audit wrapper module against target Google GKE upstream release
+tfastdiff \
+  --wrapper ./modules/gke-wrapper \
+  --upstream terraform-google-modules/kubernetes-engine/google \
+  --old-version 29.0.0 \
+  --new-version 30.0.0 \
+  --format markdown \
+  --exit-code
+```
+**Outcome**:
+- Identifies removed variables passed by the wrapper.
+- Highlights newly required upstream variables missing in the wrapper call.
+- Flags output delegations referencing dropped upstream outputs.
+- Recommends the exact version pinning constraint.
+
+---
+
+### Use Case 2: Monorepo Downstream Blast-Radius & Terragrunt Impact Analysis
+When modifying or upgrading a shared module in an infrastructure monorepo, determine which environment stacks (`dev`, `staging`, `prod`) will break:
+
+```bash
+# Scan all environments and Terragrunt configurations invoking the wrapper
+tfastdiff \
+  --wrapper ./modules/eks-wrapper \
+  --upstream terraform-aws-modules/eks/aws \
+  --new-version 20.0.0 \
+  --blast-radius ./environments \
+  --format text
+```
+**Outcome**:
+- Traverses all subdirectories in `./environments` for `.tf` and `terragrunt.hcl` files.
+- Maps breaking changes to affected root modules.
+- Assigns per-consumer risk classifications (`CRITICAL`, `WARNING`, `SAFE`).
+- Emits incomplete expression warnings if dynamic Terragrunt expressions cannot be resolved statically.
+
+---
+
+### Use Case 3: Automated In-Place Codemod Refactoring (`--fix`)
+When upstream modules drop deprecated arguments, manually updating wrapper configurations across multiple files is error-prone. Use `--fix` to automatically remove obsolete arguments in-place:
+
+```bash
+# First preview the changes safely without mutating files
+tfastdiff \
+  --wrapper ./modules/gke-wrapper \
+  --upstream terraform-google-modules/kubernetes-engine/google \
+  --new-version 30.0.0 \
+  --fix-preview
+
+# Apply the fixes directly in-place
+tfastdiff \
+  --wrapper ./modules/gke-wrapper \
+  --upstream terraform-google-modules/kubernetes-engine/google \
+  --new-version 30.0.0 \
+  --fix
+```
+**Outcome**:
+- Parses files with `hclwrite`, removing obsolete arguments from `module "..."` blocks while preserving comments and indentation.
+
+---
+
+### Use Case 4: Dynamic Provider Schema Immutability & ForceNew Hazard Detection
+Detect infrastructure recreation hazards where an input variable change triggers provider-level resource destruction:
+
+```bash
+# 1. Export provider schema JSON from initialized Terraform project
+terraform providers schema -json > provider-schema.json
+
+# 2. Run tfastdiff with dynamic schema inspection
+tfastdiff \
+  --wrapper ./modules/cloud-sql-wrapper \
+  --upstream GoogleCloudPlatform/sql-db/google \
+  --new-version 18.0.0 \
+  --provider-schema provider-schema.json \
+  --format markdown
+```
+**Outcome**:
+- Ingests `requires_replace` metadata across resource attributes.
+- Alerts if attributes like database instance name or storage type trigger complete resource rebuilds and data destruction.
+
+---
+
+### Use Case 5: Multi-Version Upgrade Planning across Intermediate Releases
+When planning an upgrade across multiple major versions (e.g. GKE `v25.0.0` to `v31.0.0`), inspect intermediate release boundaries:
+
+```bash
+tfastdiff \
+  --old https://github.com/terraform-google-modules/terraform-google-kubernetes-engine.git \
+  --new https://github.com/terraform-google-modules/terraform-google-kubernetes-engine.git \
+  --old-version v25.0.0 \
+  --new-version v31.0.0 \
+  --upgrade-path \
+  --format markdown
+```
+**Outcome**:
+- Evaluates each intermediate semantic version transition.
+- Identifies the highest contiguous "safe harbor" version reachable without breaking changes.
+- Aggregates deprecation warnings introduced in intermediate versions before removal.
+
+---
+
+### Use Case 6: Accelerated Monorepo Scanning with Persistent L2 AST Caching
+In large monorepos with hundreds of modules, accelerate repeated runs and pre-commit checks:
+
+```bash
+tfastdiff \
+  --wrapper ./modules/vpc-wrapper \
+  --upstream terraform-aws-modules/vpc/aws \
+  --new-version 5.0.0 \
+  --blast-radius ./live \
+  --cache-dir ~/.cache/tfastdiff
+```
+**Outcome**:
+- Reuses pre-parsed AST binary definitions for unchanged files keyed by SHA-256 fingerprint.
+- Reduces full-repository scans from tens of seconds to sub-second runtimes.
 ```

@@ -552,7 +552,8 @@ func (r *BlastRadiusReport) RenderText() string {
 			issues = append(issues, "some dynamic inputs could not be analyzed")
 		}
 		if len(issues) > 0 {
-			sb.WriteString(": " + strings.Join(issues, "; "))
+			sb.WriteString(": ")
+			sb.WriteString(strings.Join(issues, "; "))
 		}
 		sb.WriteString("\n")
 	}

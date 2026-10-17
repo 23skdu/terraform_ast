@@ -12,6 +12,7 @@ import (
 	"github.com/23skdu/terraform_ast/internal/goldentest"
 	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/23skdu/terraform_ast/pkg/blastradius"
+	"github.com/23skdu/terraform_ast/pkg/codemod"
 	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/gitops"
 	"github.com/23skdu/terraform_ast/pkg/planner"
@@ -715,4 +716,45 @@ func runGit(t *testing.T, dir string, args ...string) {
 	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "git %v failed: %s", args, output)
+}
+
+func TestTerratest_CodemodAndProviderSchema(t *testing.T) {
+	parent := t.TempDir()
+	upstreamDir := filepath.Join(parent, "upstream_gke_v1")
+	require.NoError(t, os.MkdirAll(upstreamDir, 0o750))
+	copyFixtureTree(t, "../fixtures/upstream_gke_v1", upstreamDir)
+
+	dir := filepath.Join(parent, "gke_wrapper")
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	copyFixtureTree(t, "../fixtures/gke_wrapper", dir)
+
+	// Test codemod.ApplyRemovedInputs on a real fixture with optional input
+	modified, err := codemod.ApplyRemovedInputs(dir, "gke", []string{"zones"})
+	require.NoError(t, err)
+	assert.NotEmpty(t, modified)
+
+	// Test codemod.AddMissingInputs
+	added, err := codemod.AddMissingInputs(dir, "gke", map[string]string{"grant_registry_access": "true"})
+	require.NoError(t, err)
+	assert.NotEmpty(t, added)
+
+	opts := &terraform.Options{TerraformDir: dir, NoColor: true}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(filepath.Join(dir, ".terraform"))
+		_ = os.Remove(filepath.Join(dir, ".terraform.lock.hcl"))
+	})
+	terraform.InitAndValidateContext(t, context.Background(), opts)
+
+	// Test moved block synthesis
+	movedPath := filepath.Join(dir, "moved.tf")
+	require.NoError(t, codemod.WriteMovedBlocks(movedPath, []codemod.MovedBlock{
+		{From: "module.gke.google_container_cluster.primary", To: "module.gke.google_container_cluster.cluster"},
+	}))
+	movedContent, err := os.ReadFile(movedPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(movedContent), "moved {")
+	assert.Contains(t, string(movedContent), "from = module.gke.google_container_cluster.primary")
+
+	// Validate with Terratest after adding moved blocks
+	terraform.InitAndValidateContext(t, context.Background(), opts)
 }

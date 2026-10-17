@@ -4,129 +4,128 @@ This document outlines the strategic future development roadmap for `terraform_a
 
 ---
 
-## 🗺️ Roadmap Overview
+## 🗺️ Roadmap Architecture
 
 ```mermaid
-flowchart LR
-    A[v0.1.0 Released\nAST Analysis, Registry, Blast Radius, SARIF, ForceNew] --> B[Phase 2: CI/CD & Developer Experience\nStep 10: Pre-Commit & GitHub Actions]
-    B --> C[Phase 3: Automated Remediation\nStep 3: hclwrite Codemods & State Refactoring]
-    C --> D[Phase 4: Multi-Version Evolution\nStep 5: Transitive Changelog & Milestone Planner]
+flowchart TD
+    A[Delivered: v0.1.0 - v0.6.0\nAST Engine, Codemod --fix, moved Blocks, Dynamic Provider Schema, L2 Cache, Terratest] --> B[Phase 1: Deep Semantic Taint & Language Evolution\nStep 13: Full EvalContext & Taint Analysis\nStep 15: Modern HCL / OpenTofu 1.6-1.9 Blocks]
+    B --> C[Phase 2: Enterprise DevSecOps & Governance\nStep 16: Hermetic SLSA L3, Cosign & Syft SBOM\nStep 20: Rego/OPA Engine & IDE LSP Daemon]
+    C --> D[Phase 3: Continuous Quality & Cloud Emulation\nStep 17: Multi-Cloud Golden Suite & Upstream Drift\nStep 18: Differential Fuzzing vs Native TF Core\nStep 19: LocalStack Terratest Emulated Plan State]
 ```
 
 ---
 
-## 🚀 Future Milestones
+## 🚀 Active Future Milestones
 
-### P0 — Core Analysis Quality & Trust
+### Milestone 1 — Deep Semantic Taint & Language Evolution
 
-**Target Milestone**: `v0.2.0`  
-**Focus**: *Accuracy, signal quality, and enterprise adoption*
-
-**Delivery status**: Complete for this milestone. The implementation adds Terraform JSON scanning, module meta-argument handling, variable validation/nullability and provider-alias comparisons, confidence-scored findings, content-fingerprint inspection caching, and Terragrunt consumer scanning. Dynamic Terragrunt input expressions are explicitly reported as incomplete analysis. Every package is covered at 100% statement level by unit tests, and each untrusted-input parser has a seeded fuzz target asserting a real invariant.
+**Target Milestone**: `v0.7.0`  
+**Focus**: *HCL EvalContext, variable dependency taint analysis, and modern Terraform/OpenTofu language constructs*
 
 #### Objectives
-- **Broader Terraform Coverage**:
-  - Expand AST parsing and diffing to handle `dynamic` blocks, `for_each` / `count`, `locals`, validation blocks, provider aliases, and nested expression-heavy configs.
-  - Reduce false negatives across real-world modules and improve analysis fidelity.
-- **Semantic Compatibility Detection**:
-  - Move beyond naming and type checks to reason about effective semantics: optional vs required inputs, nullability, computed values, object-shape compatibility, and map/list/set conversion risk.
-  - Distinguish truly breaking changes from cosmetic or low-risk adjustments.
-- **Confidence Scoring & Severity Tuning**:
-  - Add confidence levels and risk classification to each finding to help users prioritize the highest-impact issues.
-  - Reduce noise from low-confidence warnings while surfacing critical upgrade hazards clearly.
-- **Expanded Blast Radius Analysis**:
-  - Include Terragrunt layouts, workspace overlays, generated configs, and multi-environment inheritance in downstream impact analysis.
-  - Improve the utility of consumer-impact reporting for platform and infrastructure teams.
-- **Performance & Incremental Caching**:
-  - Add file-level cache invalidation, parallel scanning, and incremental AST reuse to speed up large monorepo evaluations.
-  - Improve developer responsiveness in CI and pre-commit workflows.
+- **Step 13: Full Evaluation Context & HCL Variable Dependency Taint Analysis**:
+  - Build an embedded HCL evaluation engine (`hcl.EvalContext`) with pure implementations of standard Terraform built-in functions (`concat`, `merge`, `lookup`, `try`, `can`, `coalesce`, `element`, `jsondecode`).
+  - Resolve dynamic Terragrunt expressions and wrapper variable delegations that currently trigger `AnalysisIncomplete`.
+  - Perform semantic taint analysis: trace input variables through intermediate `locals` and child module blocks to precisely identify whether an upstream breaking change reaches an active resource attribute or remains dead code.
+  - *Quality & Verification Gate*:
+    - Fuzz Testing: `FuzzEvalContextExpressions` fuzzing complex, deeply nested, and circular HCL expressions.
+    - Terratest: Real-world fixtures validating dynamic Terragrunt modules (`test/fixtures/terragrunt_dynamic_consumer`) with byte-exact golden comparisons.
+
+- **Step 15: OpenTofu & Modern Terraform 1.6–1.9 AST Feature Support**:
+  - Expand AST parser (`pkg/ast`) and diff comparator (`pkg/diff`) to provide first-class support for modern declarative language constructs:
+    - `removed {}` blocks (Terraform 1.7+ & OpenTofu 1.6+): Distinguish between destructive resource removals and soft resource lifecycles (`destroy = false`).
+    - `check {}` blocks (Terraform 1.5+) and continuous assertion blocks.
+    - Custom provider functions (`function "..." {}` introduced in Terraform 1.8+).
+    - Client-side state encryption configuration blocks (OpenTofu 1.7+).
+    - Programmatic `import {}` blocks (Terraform 1.5+).
+  - Treat graceful attribute deprecations and non-destructive `removed` declarations as non-breaking safe transitions.
+  - *Quality & Verification Gate*:
+    - Complete Fuzz Coverage: Seeded fuzz tests for every modern block syntax (`FuzzParseModernHCLBlocks`).
+    - 100% statement coverage across all AST extraction and diff inspection branches.
 
 ---
 
-### P1 — Operational Remediation & Safe Upgrade Guidance
+### Milestone 2 — Enterprise DevSecOps, Supply Chain Security & Governance
 
-**Target Milestone**: `v0.3.0`  
-**Focus**: *Actionable fixes and safer rollout decisions*
-
-**Delivery status**: Core scope delivered: policy gates, safe-pin rationale, remediation guidance, and a preview-only removed-argument patch generator. Interactive explainability and broader remediation coverage remain future work.
+**Target Milestone**: `v0.8.0`  
+**Focus**: *SLSA Level 3 provenance, Cosign signing, Syft SBOM, and OPA/Rego policy governance*
 
 #### Objectives
-- **Auto-Remediation Suggestions**:
-  - Generate exact fix guidance for missing arguments, removed inputs, type mismatches, and broken output delegation.
-  - Emit suggested code snippets and patch-ready remediation steps to accelerate upgrades.
-- **Safe Pin Recommendation Engine**:
-  - Compute the minimum or recommended safe version to pin to, along with rationale and upgrade path guidance.
-  - Support teams that need an operational answer rather than just a lint-style report.
-- **Policy-Driven Rule Sets**:
-  - Allow organizations to define custom compatibility policies (for example, “block any removed input” or “allow only minor version bumps”).
-  - Turn `tfastdiff` into a policy-enforced upgrade gate rather than a passive reporter.
-- **Guided UX & Explainability**:
-  - Add an interactive audit mode that explains why each issue is breaking and what action to take next.
-  - Reduce the learning curve for operators and module maintainers.
+- **Step 16: Hermetic SLSA Level 3 Provenance, Cosign Keyless Attestations & Syft SBOM DevSecOps**:
+  - Achieve **SLSA Build Level 3** compliance via hermetic, reproducible GitHub Actions builders.
+  - Sign container images and standalone binaries with **Sigstore Cosign** using keyless OpenID Connect (OIDC) GitHub identity tokens and transparency log (Rekor) entries.
+  - Generate comprehensive Software Bill of Materials (SBOM) in both **CycloneDX** and **SPDX** formats using **Syft** at build time, publishing them as cryptographically attested OCI artifacts.
+  - Integrate automated static vulnerability scanning with **Trivy** and **Grype**, enforcing a zero-critical and zero-high CVE gate in CI before image release.
+  - *Quality & Verification Gate*:
+    - Container DevSecOps Suite (`test/docker`): Programmatically verify Cosign signature integrity, attestation payloads, and SBOM completeness against the built distroless container.
+    - Runtime Hardening: Enforce read-only root filesystems (`--read-only`), `no-new-privileges:true`, and strict non-root UID `65532:65532`.
+
+- **Step 20: Rego / OPA & CUE Policy Engine Integration with IDE Language Server Protocol (LSP)**:
+  - Upgrade `pkg/policy` from flat JSON threshold gates to a full **Open Policy Agent (OPA / Rego)** and **CUE** evaluation engine.
+  - Empower enterprise platform engineering teams to define expressive, context-aware architectural policies (e.g. "disallow any breaking changes in modules tagged `pci-dss`", "require manual review if blast radius spans more than 5 production environments", "forbid provider major version jumps without signed architectural exception").
+  - Introduce `tfastdiff daemon` implementing the official **Language Server Protocol (LSP)** for VS Code, Neovim, and JetBrains IDEs.
+  - Compute background AST diffs and blast-radius diagnostics within <50ms of saving `.tf` files, surfacing real-time inline warnings and quick-fix codemod actions directly in developer editors.
+  - *Quality & Verification Gate*:
+    - Policy Unit Suite: 100% statement coverage testing complex Rego rule sets, input mocking, and boundary conditions.
+    - LSP Conformance Test: Automated JSON-RPC protocol test suite verifying diagnostic latency, cancellation tokens, and code action responses.
 
 ---
 
-### P2 — Developer Workflow & Automation
+### Milestone 3 — Advanced Continuous Quality Verification & Cloud Emulation
 
-**Target Milestone**: `v0.4.0`  
-**Focus**: *Integration into developer workflows and CI/CD automation*
-
-**Delivery status**: Core integration delivered: pre-commit hook metadata, a Docker-based GitHub Action, and a reusable audit workflow that emits SARIF and upserts a PR summary. Marketplace publication and the <300ms pre-commit fast path remain future work.
+**Target Milestone**: `v0.9.0`  
+**Focus**: *Multi-cloud golden test matrix, differential compiler fuzzing, and emulated Terratest plan validation*
 
 #### Objectives
-- **Step 10: Pre-Commit Hook & GitHub Action Packaging**:
-  - Deliver official `.pre-commit-hooks.yaml` integration allowing platform teams to run `tfastdiff` as a pre-commit check before pushing code.
-  - Fast-path verification: leverage shallow clones and cached AST representations to keep pre-commit execution times under 300ms.
-- **GitHub Actions Packaging**:
-  - Provide a turnkey composite action (`action.yml`) available on GitHub Marketplace.
-  - Seamless integration with GitHub Code Scanning by auto-exporting and uploading SARIF reports (`--format sarif`).
-- **Interactive Pull Request Commenting**:
-  - Automated PR bot comments detailing:
-    - Executive summary and safety verdict badge (`SAFE_TO_UPDATE`, `BREAKING_CHANGES`, `CRITICAL_HAZARDS`).
-    - Collapsible Markdown tables of removed inputs and widened constraints.
-    - Blast-radius summary of all affected internal environments.
-  - Enforce zero breaking changes in production branches via `--exit-code`.
-- **Automation & Integration Enhancements**:
-  - Improve GitHub/GitLab PR reporting, add richer JSON schema output, and strengthen SARIF metadata for direct scanning integration.
-  - Make the tool easier to plug into CI/CD and compliance workflows.
+- **Step 17: Multi-Cloud Golden Image Test Matrix with Automated Upstream Drift Detection**:
+  - Expand the canonical golden test framework (`internal/goldentest`) into an enterprise-wide multi-cloud test matrix spanning:
+    - **Google Cloud**: GKE, Cloud Foundation Fabric, VPC, Cloud SQL.
+    - **AWS**: EKS, VPC, RDS, IAM.
+    - **Azure**: AKS, Virtual Network, PostgreSQL Flexible Server.
+  - Deploy a daily scheduled automated workflow that pulls latest releases from the public Terraform Registry, executes `tfastdiff`, and compares findings against canonical golden files.
+  - Automatically detect undocumented upstream breaking changes, upstream release retractions, or semantic regressions before platform consumers update.
+  - *Quality & Verification Gate*:
+    - Byte-exact verification across JSON, Markdown, and SARIF golden baselines with workspace path sanitization (`<WORKSPACE>`).
+    - Automated GitHub Issue creation and PR baseline updates when upstream drift is detected.
+
+- **Step 18: Differential Fuzzing Engine against Native HashiCorp & OpenTofu Cores**:
+  - Build an automated differential fuzzing harness (`pkg/ast/diff_fuzz_test.go`) combining grammar-based AST synthesis with native Go fuzzing.
+  - Simultaneously execute `tfastdiff` AST inspection and official `terraform validate -json` / `tofu validate -json` compilers on generated HCL snippets, automatically flagging discrepancies or false negatives.
+  - Implement property-based invariant testing using `pgregory.net/rapid` asserting mathematical algebraic properties:
+    - **Identity Invariant**: $\Delta(A \to A) = \emptyset$ (comparing identical versions produces zero breaking changes and zero warnings).
+    - **Triangle Inequality & Transitivity**: For any version sequence $A \to B \to C$, the union of stepwise differences must be a superset of the direct difference:
+      $$\Delta(A \to B) \cup \Delta(B \to C) \supseteq \Delta(A \to C)$$
+  - *Quality & Verification Gate*:
+    - Long-running continuous fuzzing job running in CI asserting zero crashes and zero compiler discrepancies across $10^6$ iterations.
+
+- **Step 19: Terratest End-to-End Emulated Cloud Infrastructure Provisioning & Plan State Validation**:
+  - Extend `test/terratest` from syntax validation to end-to-end plan state execution using local cloud emulators (**LocalStack** for AWS and **Google Cloud SDK Emulators** / `fake-gcs-server` for GCP).
+  - Formally verify runtime safety guarantees:
+    - When `tfastdiff` issues a `SAFE_TO_UPDATE` verdict, Terratest runs `terraform plan` against the emulated state and confirms `Plan: 0 to destroy`.
+    - When `tfastdiff` flags a recreation hazard (`ForceNew`), Terratest confirms that native Terraform plan output explicitly flags `(forces replacement)` on the targeted resource address.
+  - *Quality & Verification Gate*:
+    - Fully offline, reproducible Terratest suite executing within containerized CI runners without requiring real cloud credentials or generating cloud costs.
 
 ---
 
-### P3 — Automated Remediation & Long-Horizon Upgrade Planning
+## 📦 Delivered Capabilities & Release History
 
-**Target Milestone**: `v0.5.0`  
-**Focus**: *Codemods, migration support, and multi-version planning*
+The following roadmap items and milestones have been fully implemented, verified, and delivered with 100.0% statement test coverage:
 
-**Delivery status**: Partial. Multi-version analysis is available for Git tags and Registry releases, and `--fix-preview` generates a non-mutating patch for removed wrapper arguments. State-migration synthesis, changelog/release-note correlation, and the remaining codemod transformations are not implemented.
-
-#### Objectives
-- **Step 3: Automated Migration Codemod Generator (`hclwrite`)**:
-  - Leverage `github.com/hashicorp/hcl/v2/hclwrite` to programmatically rewrite wrapper modules and root consumer modules without stripping user comments or altering whitespace conventions.
-  - Automatically insert missing required inputs with commented TODO placeholders or recommended defaults.
-  - Transform deprecated variable names and map legacy outputs to their new upstream counterparts.
-- **State Migration Script Synthesis**:
-  - When upstream modules refactor internal resource names or move resources into child submodules, generate corresponding `terraform state mv` shell scripts and Terraform `moved {}` blocks (Terraform 1.1+).
-  - Prevent accidental resource destruction and recreation during complex state realignments.
-- **Interactive CLI Fix Mode**:
-  - Introduce `tfastdiff --fix` to interactively preview unified diffs (`git diff`) and apply fixes in-place.
-- **Step 5: Multi-Version Changelog Aggregator & Upgrade Path Planner**:
-  - Enable planning across major version leaps (e.g. upgrading Google GKE module directly from `v25.0.0` to `v31.0.0`, or AWS EKS from `v18.0.0` to `v20.0.0`).
-  - Scan all intermediate semver tags, resolving each successive diff:
-    $$\Delta(\text{v25} \to \text{v31}) = \sum_{i=25}^{30} \Delta(\text{v}_i \to \text{v}_{i+1})$$
-  - Surface deprecation warnings that occurred in intermediate releases before attributes were completely dropped.
-- **Changelog & GitHub Releases Integration**:
-  - Query upstream Git tags and release notes to cross-reference AST differences with documented breaking changes and migration notices.
-  - Link AST findings directly to relevant upstream PRs and GitHub Release URLs.
-- **Phased Upgrade Milestone Generation**:
-  - Automatically compute intermediate "safe harbor" versions where breaking changes are minimized, enabling teams to stage upgrades in smaller, lower-risk deployments.
+| Milestone | Delivered Scope | Key Capabilities |
+| :--- | :--- | :--- |
+| **v0.1.0 – v0.2.0** | **P0: Core Analysis Quality & Trust** | Terraform HCL/JSON AST parser, module meta-arguments (`count`/`for_each`/`providers`), confidence scoring, variable validation & nullability diffing, SHA-256 fingerprint caching, Terragrunt consumer inspection. |
+| **v0.3.0** | **P1: Operational Remediation & Safe Pinning** | Semantic policy evaluation engine (`pkg/policy`), safe-pin recommendation engine (`pkg/planner`), actionable remediation guidance, and preview patch synthesis. |
+| **v0.4.0** | **P2: Developer Workflow & Automation** | Pre-commit hook configuration (`.pre-commit-hooks.yaml`), Docker-based GitHub Action (`action.yml`), SARIF v2.1.0 output formatting for GitHub Code Scanning, and automated PR comment summaries. |
+| **v0.5.0** | **P3: Automated Migration Codemods & Planner** | In-place refactoring (`--fix`) and preview (`--fix-preview`) via `hclwrite`, automatic `moved {}` block synthesis, missing required input injection, and multi-version transitive Git tag upgrade path planner. |
+| **v0.6.0** | **P4: Dynamic Schema & High-Performance Scaling** | Attribute-level dynamic provider schema ForceNew hazard detection (`DynamicHazardRegistry`, `terraform providers schema -json`), parallel AST worker pools (`InspectModulesParallel`), and persistent L2 content-addressable disk cache (`--cache-dir`). |
 
 ---
 
-## 📊 Summary Matrix
+## 📊 Future Roadmap Summary Matrix
 
-| Priority | Milestone | Feature Area | Primary Value | Key Technology |
+| Milestone | Target | Feature Area | Primary Value | Key Technology |
 | :--- | :--- | :--- | :--- | :--- |
-| **P0** | **v0.2.0** | **Core Analysis Quality** | Improve correctness, risk signal, and trust in findings | AST analysis, semantic diffing, caching |
-| **P1** | **v0.3.0** | **Operational Remediation** | Turn findings into decisive safe-upgrade guidance | Policy rules, remediation suggestions, explainability |
-| **P2** | **v0.4.0** | **Developer Workflow Automation** | Prevent regressions before merge in real engineering workflows | Pre-commit hooks, GitHub Actions, SARIF |
-| **P3** | **v0.5.0** | **Automated Migration & Upgrade Planning** | Enable codemods and phased multi-version modernization | `hclwrite`, semver graphs, migration tooling |
+| **v0.7.0** | Future | **Semantic Taint & Language Evolution** | Deep expression evaluation and modern HCL/OpenTofu syntax | `hcl.EvalContext`, taint analysis, modern HCL blocks |
+| **v0.8.0** | Future | **Enterprise DevSecOps & Governance** | Cryptographic supply chain verification and IDE real-time feedback | SLSA L3, Cosign, Syft SBOM, OPA/Rego, LSP Daemon |
+| **v0.9.0** | Future | **Continuous Quality & Cloud Emulation** | Upstream drift detection, differential fuzzing, and offline plan validation | Golden matrix, differential fuzzing, LocalStack Terratest |

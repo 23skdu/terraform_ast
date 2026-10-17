@@ -47,20 +47,23 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 
 	var (
-		wrapperPath     string
-		upstreamPath    string
-		oldPath         string
-		newPath         string
-		oldVersion      string
-		newVersion      string
-		format          string
-		outputFile      string
-		blastRadiusDir  string
-		checkRecreation bool
-		enforceExit1    bool
-		policyPath      string
-		fixPreview      bool
-		upgradePath     bool
+		wrapperPath        string
+		upstreamPath       string
+		oldPath            string
+		newPath            string
+		oldVersion         string
+		newVersion         string
+		format             string
+		outputFile         string
+		blastRadiusDir     string
+		checkRecreation    bool
+		enforceExit1       bool
+		policyPath         string
+		fixPreview         bool
+		fixMode            bool
+		upgradePath        bool
+		providerSchemaPath string
+		cacheDir           string
 	)
 
 	fs.StringVar(&wrapperPath, "wrapper", "", "Path to the Terraform module wrapper directory")
@@ -76,10 +79,32 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&enforceExit1, "exit-code", false, "Exit with code 1 if breaking changes are detected")
 	fs.StringVar(&policyPath, "policy", "", "Optional JSON policy file for CI enforcement")
 	fs.BoolVar(&fixPreview, "fix-preview", false, "Preview a patch removing wrapper arguments no longer accepted upstream (never edits files)")
+	fs.BoolVar(&fixMode, "fix", false, "Apply fixes in-place to remove wrapper arguments no longer accepted upstream")
 	fs.BoolVar(&upgradePath, "upgrade-path", false, "Analyze each intermediate semantic version between --old-version and --new-version")
+	fs.StringVar(&providerSchemaPath, "provider-schema", "", "Optional path to terraform providers schema -json file for dynamic ForceNew recreation detection")
+	fs.StringVar(&cacheDir, "cache-dir", "", "Optional path to directory for persistent L2 AST caching")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+
+	if fixMode && fixPreview {
+		_, _ = fmt.Fprintln(stderr, "Error: Cannot specify both --fix and --fix-preview")
+		return 2
+	}
+
+	if cacheDir != "" {
+		ast.SetPersistentCacheDir(cacheDir)
+	}
+
+	var dynamicRegistry *recreation.DynamicHazardRegistry
+	if providerSchemaPath != "" {
+		ps, err := recreation.LoadProviderSchema(providerSchemaPath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error loading provider schema %s: %v\n", providerSchemaPath, err)
+			return 2
+		}
+		dynamicRegistry = recreation.NewDynamicHazardRegistry(ps)
 	}
 
 	format = strings.ToLower(strings.TrimSpace(format))
@@ -99,7 +124,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stderr, "Error: --upgrade-path is only available in direct comparison mode")
 			return 2
 		}
-		return runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir, checkRecreation, enforceExit1, fixPreview, policyConfig, stdout, stderr)
+		return runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir, checkRecreation, enforceExit1, fixPreview, fixMode, policyConfig, dynamicRegistry, stdout, stderr)
 	}
 
 	// Mode 2: Direct Upstream Comparison Mode
@@ -108,7 +133,11 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stderr, "Error: --fix-preview is only available in wrapper audit mode")
 			return 2
 		}
-		return runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile, checkRecreation, enforceExit1, upgradePath, policyConfig, stdout, stderr)
+		if fixMode {
+			_, _ = fmt.Fprintln(stderr, "Error: --fix is only available in wrapper audit mode")
+			return 2
+		}
+		return runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile, checkRecreation, enforceExit1, upgradePath, policyConfig, dynamicRegistry, stdout, stderr)
 	}
 
 	_, _ = fmt.Fprintln(stderr, "Error: Must specify either --wrapper <dir> OR --old <path> and --new <path>")
@@ -116,7 +145,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	return 2
 }
 
-func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir string, checkRecreation, enforceExit1, fixPreview bool, policyConfig *policy.Policy, stdout, stderr io.Writer) int {
+func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir string, checkRecreation, enforceExit1, fixPreview, fixMode bool, policyConfig *policy.Policy, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
 	wInfo, err := ast.Inspect(wrapperPath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "Error inspecting wrapper module %s: %v\n", wrapperPath, err)
@@ -246,12 +275,42 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 		}
 		return 0
 	}
+	if fixMode {
+		var removedInputs []string
+		for _, issue := range res.Issues {
+			if issue.Category == "PassedRemovedInput" {
+				removedInputs = append(removedInputs, issue.Target)
+			}
+		}
+		modified, err := codemod.ApplyRemovedInputs(wrapperPath, res.TargetModuleName, removedInputs)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error applying fixes: %v\n", err)
+			return 1
+		}
+		var msg string
+		if len(modified) == 0 {
+			msg = "No fixes were applied; no patchable arguments found.\n"
+		} else {
+			msg = fmt.Sprintf("Applied fixes to %d file(s):\n  %s\n", len(modified), strings.Join(modified, "\n  "))
+		}
+		if err := writeOutput(outputFile, msg, stdout); err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error writing fix output: %v\n", err)
+			return 1
+		}
+		if enforceExit1 && !res.CanSafelyUpdate {
+			return 1
+		}
+		if len(res.PolicyViolations) > 0 {
+			return 1
+		}
+		return 0
+	}
 
 	canSafelyUpdate := res.CanSafelyUpdate
 
 	findings := report.Findings{}
 	if checkRecreation {
-		findings.RecreationHazards = recreation.AnalyzeWrapperHazards(res)
+		findings.RecreationHazards = recreation.AnalyzeWrapperHazardsWithRegistry(res, dynamicRegistry)
 	}
 	if blastRadiusDir != "" {
 		blastReport, err := blastradius.ScanDirectory(blastRadiusDir, wrapperPath, wInfo, res)
@@ -278,7 +337,7 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 	return 0
 }
 
-func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile string, checkRecreation, enforceExit1, analyzeUpgradePath bool, policyConfig *policy.Policy, stdout, stderr io.Writer) int {
+func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile string, checkRecreation, enforceExit1, analyzeUpgradePath bool, policyConfig *policy.Policy, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
 	if oldPath == "" || newPath == "" {
 		_, _ = fmt.Fprintln(stderr, "Error: Both --old and --new must be specified for module comparison")
 		return 2
@@ -442,7 +501,7 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 
 	findings := report.Findings{}
 	if checkRecreation {
-		findings.RecreationHazards = recreation.AnalyzeHazards(diffReport)
+		findings.RecreationHazards = recreation.AnalyzeHazardsWithRegistry(diffReport, dynamicRegistry)
 	}
 	outContent := renderDiffOutput(format, diffReport, findings)
 
