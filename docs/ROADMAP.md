@@ -244,12 +244,16 @@ packages. The remaining order is unchanged:
 Emoji have been removed from `README.md` and every file under `docs/`. Two consequences worth
 recording, so a future change does not reintroduce the problem by accident:
 
-- **The CLI still prints status markers.** `pkg/report` and `pkg/recreation` emit leading symbols
-  for breaking changes, new features, warnings, recreation hazards, and policy violations. That is
-  product output, not documentation, so it was left alone. The two sample-output blocks in
-  `README.md` were previously verbatim copies of real output and are now not. Stripping the markers
-  from the product as well would be a breaking change for anyone grepping the output, and would
-  require regenerating the golden files under `test/golden/`.
+- **Emoji are gone from the tool itself, not just the prose.** The status markers `pkg/report`,
+  `pkg/recreation`, and `pkg/blastradius` used to prefix every section heading have been removed,
+  and the five affected golden files under `test/golden/` were regenerated so they match. The
+  repository now contains zero pictographs across Go sources, tests, fixtures, goldens,
+  documentation, and workflows. Consumers who grep the output for a glyph must switch to the
+  ASCII section headings (`BREAKING CHANGES (n):`, `NEW FEATURES (n):`, `WARNINGS & NON-BREAKING
+  CHANGES (n):`, `POLICY VIOLATIONS (n):`, `WRAPPER ISSUES (n):`,
+  `UNUSED UPSTREAM FEATURES AVAILABLE (n):`, `BLAST-RADIUS DOWNSTREAM CONSUMER ANALYSIS`,
+  `STATE DESTRUCTION & RECREATION HAZARDS (ForceNew):`). Markdown output lost only the glyph, not
+  the `###` heading level, so severity signalling there is unchanged.
 - **Typographic arrows are not emoji.** U+2190..U+21FF was deliberately excluded from the removal.
   `variable → local → module` and `hashicorp/google → hashicorp/google-beta` carry meaning that a
   bare removal would destroy.

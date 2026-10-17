@@ -9,7 +9,7 @@
 > [!CAUTION]
 > **CANNOT SAFELY UPDATE: Detected 4 breaking change(s) between v19.0.0 and v20.0.0. Wrapper must be updated before pinning.**
 
-### 🚨 Breaking Changes (4)
+### Breaking Changes (4)
 
 | Category | Name | Description | Confidence | Remediation |
 | :--- | :--- | :--- | :--- | :--- |
@@ -18,14 +18,14 @@
 | `Variable` | `legacy_security_group_id` | Input variable 'legacy_security_group_id' was removed in upstream version | 9/10 | Remove variable 'legacy_security_group_id' from wrapper or module callers before upgrading |
 | `Variable` | `manage_aws_auth_configmap` | Input variable 'manage_aws_auth_configmap' was removed in upstream version | 9/10 | Remove variable 'manage_aws_auth_configmap' from wrapper or module callers before upgrading |
 
-### ✨ New Features (2)
+### New Features (2)
 
 | Category | Name | Description | Confidence |
 | :--- | :--- | :--- | :--- |
 | `Output` | `access_entries` | New output 'access_entries' available in upstream | 9/10 |
 | `Variable` | `enable_cluster_creator_admin_permissions` | New optional variable 'enable_cluster_creator_admin_permissions' available in upstream | 9/10 |
 
-### ⚠️ Warnings (2)
+### Warnings (2)
 
 | Category | Name | Description | Confidence | Remediation |
 | :--- | :--- | :--- | :--- | :--- |

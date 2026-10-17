@@ -322,7 +322,7 @@ func FormatHazardsText(hazards []RecreationHazard) string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("⚠️  STATE DESTRUCTION & RECREATION HAZARDS (ForceNew):\n")
+	sb.WriteString("STATE DESTRUCTION & RECREATION HAZARDS (ForceNew):\n")
 	sb.WriteString("  Upgrading with the changes below may cause Terraform to destroy and re-create core cloud resources in state!\n")
 	for _, h := range hazards {
 		fmt.Fprintf(&sb, "  • [%s] %s (%s): %s\n", h.Severity, h.Variable, displayResource(hazardDescriptorFor(h)), h.Description)
@@ -341,7 +341,7 @@ func FormatHazardsMarkdown(hazards []RecreationHazard) string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("\n### ⚠️ State Destruction & Recreation Hazards (ForceNew)\n\n")
+	sb.WriteString("\n### State Destruction & Recreation Hazards (ForceNew)\n\n")
 	sb.WriteString("> **CAUTION**: Upgrading with the changes below may cause Terraform to destroy and re-create core cloud resources in state!\n\n")
 	sb.WriteString("| Variable | Target Resource | Severity | Destruction Hazard | Remediation |\n")
 	sb.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")

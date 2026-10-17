@@ -534,7 +534,7 @@ func (r *BlastRadiusReport) RenderText() string {
 		return ""
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "💥 BLAST-RADIUS DOWNSTREAM CONSUMER ANALYSIS\n")
+	fmt.Fprintf(&sb, "BLAST-RADIUS DOWNSTREAM CONSUMER ANALYSIS\n")
 	fmt.Fprintf(&sb, "  Search Directory:  %s\n", r.SearchDir)
 	fmt.Fprintf(&sb, "  Wrapper:           %s\n", r.WrapperIdentifier)
 	fmt.Fprintf(&sb, "  Call Sites Scanned: %d\n", r.TotalCallSitesScanned)
@@ -579,7 +579,7 @@ func (r *BlastRadiusReport) RenderJSON() []byte {
 // RenderMarkdown formats the blast radius report into human-readable Markdown.
 func (r *BlastRadiusReport) RenderMarkdown() string {
 	var sb strings.Builder
-	sb.WriteString("# 💥 Blast-Radius Downstream Consumer Analysis\n\n")
+	sb.WriteString("# Blast-Radius Downstream Consumer Analysis\n\n")
 	fmt.Fprintf(&sb, "- **Search Directory**: `%s`\n", r.SearchDir)
 	fmt.Fprintf(&sb, "- **Wrapper Identifier**: `%s`\n", r.WrapperIdentifier)
 	fmt.Fprintf(&sb, "- **Total Call Sites Scanned**: `%d`\n", r.TotalCallSitesScanned)

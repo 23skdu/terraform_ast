@@ -10,7 +10,7 @@
 > [!CAUTION]
 > **CANNOT SAFELY PIN: Wrapper has 4 breaking issue(s) with upstream v20.0.0. Resolve remediation steps before pinning.**
 
-### 🚨 Compatibility Issues (5)
+### Compatibility Issues (5)
 
 | Category | Target | Description | Confidence | Remediation |
 | :--- | :--- | :--- | :--- | :--- |
@@ -20,7 +20,7 @@
 | `PassedRemovedInput` | `manage_aws_auth_configmap` | Wrapper passes argument 'manage_aws_auth_configmap' to child module 'eks', but 'manage_aws_auth_configmap' is not an accepted input in target upstream v20.0.0 | 9/10 | Remove argument 'manage_aws_auth_configmap' from module "eks" block in wrapper |
 | `TypeMismatch` | `subnet_ids` | Wrapper variable 'subnet_ids' type 'list(string)' differs from upstream 'set(string)': Type converted from list to set (Terraform automatically coerces list to set, but ordering is not preserved) | 8/10 | Align variable "subnet_ids" with upstream type |
 
-### 💡 Available Upstream Features (3)
+### Available Upstream Features (3)
 
 | Category | Target | Description | Confidence |
 | :--- | :--- | :--- | :--- |

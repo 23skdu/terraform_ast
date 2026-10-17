@@ -224,17 +224,17 @@ func GenerateDriftIssuePayload(reports []*DriftReport) (string, error) {
 	}
 
 	if len(drifted) == 0 {
-		return "## ✅ Upstream Multi-Cloud Drift Matrix: All Baselines Intact\n\nNo unexpected drift or undocumented breaking changes detected.", nil
+		return "## Upstream Multi-Cloud Drift Matrix: All Baselines Intact\n\nNo unexpected drift or undocumented breaking changes detected.", nil
 	}
 
 	var sb strings.Builder
-	sb.WriteString("# ⚠️ Upstream Multi-Cloud Module Drift Detected\n\n")
+	sb.WriteString("# Upstream Multi-Cloud Module Drift Detected\n\n")
 	sb.WriteString("The automated daily upstream scan detected discrepancies between canonical golden baselines and current registry outputs.\n\n")
 	sb.WriteString("| Cloud Provider | Module | Upstream Source | Baseline Breaking | Actual Breaking | Status |\n")
 	sb.WriteString("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
 
 	for _, d := range drifted {
-		sb.WriteString(fmt.Sprintf("| **%s** | %s | `%s` | %d | %d | ⚠️ DRIFT |\n",
+		sb.WriteString(fmt.Sprintf("| **%s** | %s | `%s` | %d | %d | DRIFT |\n",
 			d.Spec.Provider, d.Spec.Name, d.Spec.Source, d.BaselineBreakingCount, d.ActualBreakingCount))
 	}
 
