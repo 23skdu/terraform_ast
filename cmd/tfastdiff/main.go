@@ -84,6 +84,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		upgradePath        bool
 		providerSchemaPath string
 		cacheDir           string
+		clearCache         bool
 		lspDaemon          bool
 		registryTimeout    time.Duration
 	)
@@ -120,6 +121,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&upgradePath, "upgrade-path", false, "Analyze each intermediate semantic version between --old-version and --new-version")
 	fs.StringVar(&providerSchemaPath, "provider-schema", "", "Optional path to terraform providers schema -json file for dynamic ForceNew recreation detection")
 	fs.StringVar(&cacheDir, "cache-dir", "", "Optional path to directory for persistent L2 AST caching")
+	fs.BoolVar(&clearCache, "clear-cache", false, "Remove cached module inspections from --cache-dir and exit")
 	fs.BoolVar(&lspDaemon, "lsp", false, "Start Language Server Protocol (LSP) daemon for IDE integration")
 	fs.DurationVar(&registryTimeout, "registry-timeout", defaultRegistryTimeout, "Maximum time to spend retrying and waiting on a single Terraform Registry request")
 
@@ -173,6 +175,19 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 
 	if cacheDir != "" {
 		ast.SetPersistentCacheDir(cacheDir)
+	}
+
+	if clearCache {
+		if cacheDir == "" {
+			_, _ = fmt.Fprintln(stderr, "Error: --clear-cache requires --cache-dir")
+			return 2
+		}
+		if err := ast.ClearPersistentCache(); err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error clearing cache %s: %v\n", cacheDir, err)
+			return 1
+		}
+		_, _ = fmt.Fprintf(stdout, "Cleared cached module inspections from %s\n", cacheDir)
+		return 0
 	}
 
 	var dynamicRegistry *recreation.DynamicHazardRegistry

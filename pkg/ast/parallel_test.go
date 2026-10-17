@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -52,9 +53,119 @@ func TestPersistentCacheLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "string", info3.Variables["p"].Type)
 
-	// Clear persistent cache
+	// Clearing removes the cache entries but keeps the directory itself. It used to delete the
+	// whole tree, so `--cache-dir .` destroyed the repository.
 	require.NoError(t, ClearPersistentCache())
-	assert.NoDirExists(t, cacheDir)
+	assert.DirExists(t, cacheDir, "the cache directory itself must survive a clear")
+	remaining, err := os.ReadDir(cacheDir)
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "cache entries must be removed")
+
+	// A second clear of an already-empty directory is a no-op, not an error.
+	require.NoError(t, ClearPersistentCache())
+
+	// Clearing a directory that no longer exists is not an error either.
+	require.NoError(t, os.RemoveAll(cacheDir))
+	require.NoError(t, ClearPersistentCache())
+}
+
+// TestClearPersistentCacheRefusesForeignDirectories is the regression test for the destructive
+// behaviour: ClearPersistentCache used to call os.RemoveAll on whatever --cache-dir named, so a
+// typo destroyed an unrelated directory. It now refuses anything it did not write.
+func TestClearPersistentCacheRefusesForeignDirectories(t *testing.T) {
+	t.Run("refuses a directory holding a non-cache file", func(t *testing.T) {
+		dir := t.TempDir()
+		victim := filepath.Join(dir, "main.tf")
+		require.NoError(t, os.WriteFile(victim, []byte(`variable "p" { type = string }`), 0o600))
+		t.Cleanup(func() { SetPersistentCacheDir("") })
+		SetPersistentCacheDir(dir)
+
+		err := ClearPersistentCache()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "refusing to clear")
+		assert.FileExists(t, victim, "a file this cache never wrote must not be deleted")
+	})
+
+	t.Run("refuses the repository root", func(t *testing.T) {
+		// The realistic footgun: --cache-dir .
+		dir := t.TempDir()
+		readme := filepath.Join(dir, "README.md")
+		require.NoError(t, os.WriteFile(readme, []byte("# module"), 0o600))
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "modules"), 0o750))
+		t.Cleanup(func() { SetPersistentCacheDir("") })
+		SetPersistentCacheDir(dir)
+
+		err := ClearPersistentCache()
+		require.Error(t, err)
+		assert.FileExists(t, readme)
+		assert.DirExists(t, filepath.Join(dir, "modules"))
+	})
+
+	t.Run("refuses a json file that is not a fingerprint", func(t *testing.T) {
+		// A .json suffix alone is not enough: the name must be a hex SHA-256, which is the only
+		// shape cacheModule writes.
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0o600))
+		t.Cleanup(func() { SetPersistentCacheDir("") })
+		SetPersistentCacheDir(dir)
+
+		err := ClearPersistentCache()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "refusing to clear")
+		assert.FileExists(t, filepath.Join(dir, "package.json"))
+	})
+
+	t.Run("clears a directory holding only cache entries", func(t *testing.T) {
+		dir := t.TempDir()
+		fingerprint := strings.Repeat("a", 64)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, fingerprint+".json"), []byte("{}"), 0o600))
+		t.Cleanup(func() { SetPersistentCacheDir("") })
+		SetPersistentCacheDir(dir)
+
+		require.NoError(t, ClearPersistentCache())
+		entries, err := os.ReadDir(dir)
+		require.NoError(t, err)
+		assert.Empty(t, entries)
+	})
+
+	t.Run("reports an unreadable cache directory", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root: directory permissions are not enforced")
+		}
+		dir := t.TempDir()
+		require.NoError(t, os.Chmod(dir, 0o000))
+		t.Cleanup(func() {
+			_ = os.Chmod(dir, 0o700)
+			SetPersistentCacheDir("")
+		})
+		SetPersistentCacheDir(dir)
+
+		err := ClearPersistentCache()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to read cache directory")
+	})
+}
+
+// TestIsCacheFingerprint pins the filename contract directly, including the shapes it must reject.
+func TestIsCacheFingerprint(t *testing.T) {
+	fingerprint := strings.Repeat("0", 64)
+
+	assert.True(t, isCacheFingerprint(fingerprint+".json"), "a 64-char hex name is a cache entry")
+	assert.True(t, isCacheFingerprint(strings.Repeat("a1b2c3d4", 8)+".json"))
+
+	// Wrong length.
+	assert.False(t, isCacheFingerprint(strings.Repeat("a", 63)+".json"))
+	assert.False(t, isCacheFingerprint(strings.Repeat("a", 65)+".json"))
+
+	// Not hex.
+	assert.False(t, isCacheFingerprint(strings.Repeat("z", 64)+".json"))
+	assert.False(t, isCacheFingerprint(strings.Repeat("A", 64)+".json"), "uppercase hex is not written")
+
+	// Missing or wrong suffix.
+	assert.False(t, isCacheFingerprint(fingerprint))
+	assert.False(t, isCacheFingerprint(fingerprint+".yaml"))
+	assert.False(t, isCacheFingerprint(fingerprint+".json.bak"))
+	assert.False(t, isCacheFingerprint(""))
 }
 
 func TestInspectModulesParallel(t *testing.T) {
@@ -92,4 +203,27 @@ func TestInspectModulesParallel(t *testing.T) {
 	cancel()
 	_, err = InspectModulesParallel(canceledCtx, []string{dir1, dir2}, 1)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+// TestClearPersistentCacheReportsRemovalFailure covers the per-entry removal failing after the
+// directory has been validated. Contents are checked before anything is removed, so this only
+// happens when the directory becomes unwritable mid-clear.
+func TestClearPersistentCacheReportsRemovalFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+	dir := t.TempDir()
+	fingerprint := strings.Repeat("b", 64)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, fingerprint+".json"), []byte("{}"), 0o600))
+	// The name validates, so the guard passes; the unlink then fails on the read-only directory.
+	require.NoError(t, os.Chmod(dir, 0o500))
+	t.Cleanup(func() {
+		_ = os.Chmod(dir, 0o700)
+		SetPersistentCacheDir("")
+	})
+	SetPersistentCacheDir(dir)
+
+	err := ClearPersistentCache()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to remove cache entry")
 }

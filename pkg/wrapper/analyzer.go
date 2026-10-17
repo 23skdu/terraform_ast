@@ -2,6 +2,7 @@ package wrapper
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -42,6 +43,68 @@ type WrapperCompatibilityReport struct {
 	Summary             string             `json:"summary"`
 }
 
+// selectTargetCalls returns the wrapper's module calls to audit, in a deterministic order.
+//
+// Every call is returned, not just one. The previous implementation sorted the call names and
+// broke on the first, so a wrapper calling several upstream modules was audited against exactly
+// one of them and the rest were never checked: a removed input passed to any other call was
+// reported as safe.
+func selectTargetCalls(wrapperMod *ast.ModuleInfo, targetUpstream *ast.ModuleInfo) []ast.ModuleCallDef {
+	names := make([]string, 0, len(wrapperMod.ModuleCalls))
+	for name := range wrapperMod.ModuleCalls {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	calls := make([]ast.ModuleCallDef, 0, len(names))
+	for _, name := range names {
+		calls = append(calls, wrapperMod.ModuleCalls[name])
+	}
+	return calls
+}
+
+// callNames renders the audited call names for the report.
+func callNames(calls []ast.ModuleCallDef) []string {
+	names := make([]string, 0, len(calls))
+	for _, call := range calls {
+		names = append(names, call.Name)
+	}
+	return names
+}
+
+// targetsAnyCall reports whether an output delegation names one of the audited module calls.
+func targetsAnyCall(moduleName string, calls []ast.ModuleCallDef) bool {
+	for _, call := range calls {
+		if call.Name == moduleName {
+			return true
+		}
+	}
+	return false
+}
+
+// passedByEveryCall reports whether every audited call forwards the named input.
+func passedByEveryCall(input string, calls []ast.ModuleCallDef) bool {
+	if len(calls) == 0 {
+		return false
+	}
+	for _, call := range calls {
+		if !slices.Contains(call.PassedInputs, input) {
+			return false
+		}
+	}
+	return true
+}
+
+// sortedKeys returns a map's keys in ascending order, so generated findings are deterministic.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // AnalyzeWrapper verifies whether a wrapper module can safely update and pin to targetUpstream.
 func AnalyzeWrapper(
 	wrapperMod *ast.ModuleInfo,
@@ -73,66 +136,58 @@ func AnalyzeWrapper(
 		RemediationSteps: []string{},
 	}
 
-	// 1. Identify child module call in wrapper (e.g. "gke" or "eks")
-	var targetCall *ast.ModuleCallDef
-	moduleCallNames := make([]string, 0, len(wrapperMod.ModuleCalls))
-	for name := range wrapperMod.ModuleCalls {
-		moduleCallNames = append(moduleCallNames, name)
-	}
-	sort.Strings(moduleCallNames)
-	for _, name := range moduleCallNames {
-		mc := wrapperMod.ModuleCalls[name]
-		m := mc
-		targetCall = &m
-		report.TargetModuleName = mc.Name
-		break
-	}
+	// 1. Identify the child module call(s) the wrapper makes. A wrapper may call more than one
+	// upstream module, and every one of them has to be checked: auditing only the
+	// alphabetically-first call silently ignored the others, so a removed input passed to a
+	// second call was reported as safe.
+	calls := selectTargetCalls(wrapperMod, targetUpstream)
+	report.TargetModuleName = strings.Join(callNames(calls), ", ")
 
 	passedInputSet := make(map[string]bool)
-	if targetCall != nil {
-		for _, inp := range targetCall.PassedInputs {
+	for _, call := range calls {
+		for _, inp := range call.PassedInputs {
 			passedInputSet[inp] = true
 		}
 	}
 
-	// 2. Check if wrapper passes inputs removed or missing in target upstream
-	for inp := range passedInputSet {
-		if _, exists := targetUpstream.Variables[inp]; !exists {
-			callName := "upstream"
-			if targetCall != nil {
-				callName = targetCall.Name
+	// 2. Check if the wrapper passes inputs the target upstream no longer accepts, and 3. check
+	// for required inputs it does not supply. Both are evaluated per module call: aggregating the
+	// calls hid a removed input passed to any call other than the selected one, and hid a required
+	// input that only some calls supply.
+	for _, call := range calls {
+		for _, inp := range call.PassedInputs {
+			if _, exists := targetUpstream.Variables[inp]; !exists {
+				report.Issues = append(report.Issues, WrapperIssue{
+					Severity:    diff.SeverityBreaking,
+					Category:    "PassedRemovedInput",
+					Target:      inp,
+					Description: fmt.Sprintf("Wrapper passes argument '%s' to child module '%s', but '%s' is not an accepted input in target upstream %s", inp, call.Name, inp, targetVersion),
+					Remediation: fmt.Sprintf("Remove argument '%s' from module \"%s\" block in wrapper", inp, call.Name),
+				})
 			}
-			report.Issues = append(report.Issues, WrapperIssue{
-				Severity:    diff.SeverityBreaking,
-				Category:    "PassedRemovedInput",
-				Target:      inp,
-				Description: fmt.Sprintf("Wrapper passes argument '%s' to child module '%s', but '%s' is not an accepted input in target upstream %s", inp, callName, inp, targetVersion),
-				Remediation: fmt.Sprintf("Remove argument '%s' from module \"%s\" block in wrapper", inp, callName),
-			})
 		}
-	}
 
-	// 3. Check if target upstream requires inputs that wrapper does NOT supply
-	for varName, upVar := range targetUpstream.Variables {
-		if upVar.Required && !upVar.HasDefault {
-			if !passedInputSet[varName] {
-				callName := "upstream"
-				if targetCall != nil {
-					callName = targetCall.Name
-				}
+		for _, varName := range sortedKeys(targetUpstream.Variables) {
+			upVar := targetUpstream.Variables[varName]
+			if !upVar.Required || upVar.HasDefault {
+				continue
+			}
+			if !slices.Contains(call.PassedInputs, varName) {
 				report.Issues = append(report.Issues, WrapperIssue{
 					Severity:    diff.SeverityBreaking,
 					Category:    "MissingRequiredInput",
 					Target:      varName,
-					Description: fmt.Sprintf("Target upstream %s requires input '%s' (no default), but wrapper call '%s' does not provide it", targetVersion, varName, callName),
-					Remediation: fmt.Sprintf("Add argument '%s = ...' to module \"%s\" block in wrapper", varName, callName),
+					Description: fmt.Sprintf("Target upstream %s requires input '%s' (no default), but wrapper call '%s' does not provide it", targetVersion, varName, call.Name),
+					Remediation: fmt.Sprintf("Add argument '%s = ...' to module \"%s\" block in wrapper", varName, call.Name),
 				})
 			}
 		}
 	}
 
-	// 4. Check wrapper variable type consistency against target upstream
-	for varName, wVar := range wrapperMod.Variables {
+	// 4. Check wrapper variable type consistency against target upstream. Iterated in name order so
+	// the report is stable across runs.
+	for _, varName := range sortedKeys(wrapperMod.Variables) {
+		wVar := wrapperMod.Variables[varName]
 		if upVar, exists := targetUpstream.Variables[varName]; exists {
 			wrapperNullable := wVar.Nullable == nil || *wVar.Nullable
 			upstreamNullable := upVar.Nullable == nil || *upVar.Nullable
@@ -167,8 +222,14 @@ func AnalyzeWrapper(
 		}
 	}
 
-	// 5. Check broken wrapper output delegations
-	for outName, ref := range wrapperMod.WrapperOutputReferences {
+	// 5. Check broken wrapper output delegations, in name order for a stable report.
+	// Only delegations aimed at a selected call are checked: an output reading from a module the
+	// audit did not target cannot be judged against this upstream.
+	for _, outName := range sortedKeys(wrapperMod.WrapperOutputReferences) {
+		ref := wrapperMod.WrapperOutputReferences[outName]
+		if !targetsAnyCall(ref.TargetModule, calls) {
+			continue
+		}
 		if _, exists := targetUpstream.Outputs[ref.TargetOutput]; !exists {
 			report.Issues = append(report.Issues, WrapperIssue{
 				Severity:    diff.SeverityBreaking,
@@ -190,9 +251,12 @@ func AnalyzeWrapper(
 		}
 	}
 
-	// 7. Check new optional features available for adoption
-	for varName, upVar := range targetUpstream.Variables {
-		if !upVar.Required && upVar.HasDefault && !passedInputSet[varName] {
+	// 7. Check new optional features available for adoption, in name order for a stable report.
+	// An optional input counts as adopted only when every selected call passes it, so a variable
+	// forwarded to one call and missing from another is still offered as an improvement.
+	for _, varName := range sortedKeys(targetUpstream.Variables) {
+		upVar := targetUpstream.Variables[varName]
+		if !upVar.Required && upVar.HasDefault && !passedByEveryCall(varName, calls) {
 			if _, inWrapper := wrapperMod.Variables[varName]; !inWrapper {
 				report.NewFeatureAdoptions = append(report.NewFeatureAdoptions, WrapperIssue{
 					Severity:    diff.SeverityNewFeature,

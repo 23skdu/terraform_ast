@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -72,13 +73,63 @@ func GetPersistentCacheDir() string {
 	return persistentCacheDir
 }
 
-// ClearPersistentCache removes all files in the L2 persistent disk cache directory.
+// cacheEntryPattern is the naming scheme of every file this cache writes.
+const cacheEntryPattern = ".json"
+
+// ClearPersistentCache removes the cached module inspections.
+//
+// It deliberately deletes only the cache artefacts, by pattern, and refuses to act on a directory
+// that does not look like one. The previous implementation called os.RemoveAll on whatever path
+// the operator passed to --cache-dir, so `--cache-dir .` destroyed the repository, and a typo in
+// the path destroyed an unrelated directory.
 func ClearPersistentCache() error {
 	dir := GetPersistentCacheDir()
 	if dir == "" {
 		return nil
 	}
-	return os.RemoveAll(dir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read cache directory %s: %w", dir, err)
+	}
+
+	// Refuse to clear a directory holding anything this cache did not write.
+	var candidates []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, cacheEntryPattern) || !isCacheFingerprint(name) {
+			return fmt.Errorf("refusing to clear %s: it contains %q, which is not a cache entry", dir, name)
+		}
+		candidates = append(candidates, name)
+	}
+
+	sort.Strings(candidates)
+	for _, name := range candidates {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			return fmt.Errorf("failed to remove cache entry %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// isCacheFingerprint reports whether a filename is exactly a hex SHA-256 followed by ".json",
+// which is the only shape cacheModule writes.
+func isCacheFingerprint(name string) bool {
+	base := strings.TrimSuffix(name, cacheEntryPattern)
+	if base == name || len(base) != sha256.Size*2 {
+		return false
+	}
+	for _, r := range base {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func cachedModule(path, fingerprint string) (*ModuleInfo, bool, error) {

@@ -2019,3 +2019,64 @@ func TestExecute_PinnedInspectionFailureIsReported(t *testing.T) {
 	assert.Contains(t, stderr.String(), "Error inspecting pinned upstream module")
 	assert.Empty(t, stdout.String())
 }
+
+// TestExecute_ClearCache covers roadmap #5. ast.ClearPersistentCache used to call os.RemoveAll on
+// whatever --cache-dir named, so `--cache-dir .` destroyed the repository. It now deletes only
+// the cache entries and refuses a directory holding anything else.
+func TestExecute_ClearCache(t *testing.T) {
+	dir := t.TempDir()
+	moduleDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(moduleDir, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+
+	// Populate the persistent cache.
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--old", moduleDir, "--new", moduleDir,
+		"--cache-dir", dir, "--registry-timeout", "5s",
+	}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.NotEmpty(t, entries, "precondition: the inspection populated the cache")
+
+	// Clearing removes the entries and keeps the directory.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--cache-dir", dir, "--clear-cache"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "Cleared cached module inspections")
+	assert.DirExists(t, dir, "the cache directory must survive a clear")
+
+	entries, err = os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+
+	// The module it analysed is untouched: clearing a cache is not allowed to delete anything else.
+	_, err = os.Stat(filepath.Join(moduleDir, "main.tf"))
+	assert.NoError(t, err)
+}
+
+// TestExecute_ClearCacheRefusesForeignDirectory is the destructive-case regression: pointing the
+// cache at a directory of real files must refuse rather than delete them.
+func TestExecute_ClearCacheRefusesForeignDirectory(t *testing.T) {
+	dir := t.TempDir()
+	keep := filepath.Join(dir, "main.tf")
+	require.NoError(t, os.WriteFile(keep, []byte(`variable "p" { type = string }`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--cache-dir", dir, "--clear-cache"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error clearing cache")
+	assert.FileExists(t, keep, "a file this cache never wrote must not be deleted")
+}
+
+// TestExecute_ClearCacheRequiresCacheDir confirms the flag cannot be used without a target, since
+// there would be no way to know what to clear.
+func TestExecute_ClearCacheRequiresCacheDir(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--clear-cache"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--clear-cache requires --cache-dir")
+	assert.Empty(t, stdout.String())
+}
