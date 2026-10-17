@@ -1,0 +1,103 @@
+name: SLSA Level 3 Release, Cosign & Syft DevSecOps
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  security-events: write
+
+jobs:
+  build:
+    name: Build & Generate SBOM
+    runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+
+      - name: Verify Dependencies
+        run: go mod verify
+
+      - name: Run Tests & Verification Gate
+        run: ./scripts/verify.sh 5
+
+      - name: Compile Hardened Binaries
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o dist/tfastdiff-linux-amd64 ./cmd/tfastdiff
+          CGO_ENABLED=0 GOARCH=arm64 go build -trimpath -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o dist/tfastdiff-linux-arm64 ./cmd/tfastdiff
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o dist/tfastdiff-darwin-arm64 ./cmd/tfastdiff
+
+      - name: Generate Syft SBOM (CycloneDX & SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          path: ./dist
+          format: 'cyclonedx-json'
+          output-file: 'dist/tfastdiff.cdx.json'
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: ./dist
+          format: 'spdx-json'
+          output-file: 'dist/tfastdiff.spdx.json'
+
+      - name: Security Vulnerability Scan (Trivy)
+        uses: aquasecurity/trivy-action@0.29.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Generate Binary SHA256 Hashes
+        id: hash
+        run: |
+          cd dist
+          sha256sum tfastdiff-* > SHA256SUMS
+          echo "hashes=$(sha256sum SHA256SUMS | base64 -w0)" >> "$GITHUB_OUTPUT"
+
+      - name: Sign Artifacts with Sigstore Cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Keyless Attestation & Signing
+        run: |
+          cosign sign-blob --yes --bundle dist/SHA256SUMS.bundle dist/SHA256SUMS
+
+      - name: Upload Release Artifacts
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            dist/*
+            dist/SHA256SUMS
+            dist/SHA256SUMS.bundle
+            dist/tfastdiff.cdx.json
+            dist/tfastdiff.spdx.json
+
+  provenance:
+    needs: [build]
+    name: Generate SLSA Build Level 3 Provenance
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.build.outputs.hashes }}"
+      upload-assets: true

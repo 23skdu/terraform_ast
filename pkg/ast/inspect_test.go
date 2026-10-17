@@ -522,6 +522,69 @@ variable "dynamic_nullable" {
 	assert.Nil(t, info.Variables["dynamic_nullable"].Nullable)
 }
 
+func TestInspect_ModernBlocks(t *testing.T) {
+	isolateModuleCache(t)
+	dir := t.TempDir()
+	source := `
+removed {
+  from = google_container_cluster.legacy
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = aws_s3_bucket.old
+}
+
+check "health_check" {
+  assert {
+    condition = true
+  }
+}
+
+import {
+  to = aws_s3_bucket.primary
+  id = "prod-bucket-123"
+}
+
+function "format_name" {
+  summary = "Formats a resource name"
+  return  = "string"
+}
+
+encryption {
+  key_provider "pbkdf2" "passphrase" {
+    passphrase = "test"
+  }
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "modern.tf"), []byte(source), 0644))
+
+	info, err := Inspect(dir)
+	require.NoError(t, err)
+
+	require.Len(t, info.RemovedBlocks, 2)
+	assert.Equal(t, "google_container_cluster.legacy", info.RemovedBlocks[0].From)
+	assert.False(t, info.RemovedBlocks[0].Destroy)
+	assert.Equal(t, "aws_s3_bucket.old", info.RemovedBlocks[1].From)
+	assert.True(t, info.RemovedBlocks[1].Destroy)
+
+	require.Contains(t, info.CheckBlocks, "health_check")
+	assert.Equal(t, []string{"true"}, info.CheckBlocks["health_check"].AssertRules)
+
+	require.Len(t, info.ImportBlocks, 1)
+	assert.Equal(t, "aws_s3_bucket.primary", info.ImportBlocks[0].To)
+	assert.Equal(t, "prod-bucket-123", info.ImportBlocks[0].ID)
+
+	require.Contains(t, info.Functions, "format_name")
+	assert.Equal(t, "Formats a resource name", info.Functions["format_name"].Summary)
+	assert.Equal(t, "string", info.Functions["format_name"].ReturnType)
+
+	require.Len(t, info.EncryptionBlocks, 1)
+	assert.Equal(t, "pbkdf2", info.EncryptionBlocks[0].KeyProvider)
+}
+
 func itoa(i int) string {
 	return strconv.Itoa(i)
 }

@@ -406,4 +406,38 @@ tfastdiff \
 **Outcome**:
 - Reuses pre-parsed AST binary definitions for unchanged files keyed by SHA-256 fingerprint.
 - Reduces full-repository scans from tens of seconds to sub-second runtimes.
+
+---
+
+### Use Case 7: IDE Language Server Protocol (LSP) Real-Time Feedback
+Launch the background Language Server Protocol (LSP) daemon to provide sub-50ms inline diagnostics and quick-fix code actions directly inside VS Code, Neovim, or JetBrains IDEs:
+
+```bash
+# Launch LSP daemon over standard I/O (stdio)
+tfastdiff daemon
+
+# Alternatively, invoke via flag
+tfastdiff --lsp
 ```
+**Outcome**:
+- Listens for JSON-RPC 2.0 messages from LSP client plugins.
+- On `textDocument/didSave` of any `.tf` file, computes AST diffs and surfaces inline breaking change warnings.
+- Offers automated quick-fix code actions (`textDocument/codeAction`) to safely strip removed arguments or synthesize `moved {}` blocks.
+
+---
+
+### Use Case 8: Enterprise Policy Governance with Open Policy Agent (OPA / Rego)
+Enforce fine-grained compliance and organizational upgrade policies:
+
+```bash
+tfastdiff \
+  --wrapper ./modules/gke-wrapper \
+  --upstream terraform-google-modules/kubernetes-engine/google \
+  --new-version 30.0.0 \
+  --rego-policy ./policies/upgrade_governance.rego \
+  --format markdown
+```
+**Outcome**:
+- Ingests structured diff and blast radius reports into OPA evaluation engine.
+- Enforces user-defined `deny[msg]` and `violation[msg]` rules for multi-cloud platform governance.
+

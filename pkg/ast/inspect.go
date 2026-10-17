@@ -53,6 +53,8 @@ func Inspect(dir string) (info *ModuleInfo, err error) {
 		ModuleCalls:             make(map[string]ModuleCallDef),
 		RequiredProviders:       make(map[string]ProviderRequirement),
 		WrapperOutputReferences: make(map[string]OutputReference),
+		CheckBlocks:             make(map[string]CheckBlockDef),
+		Functions:               make(map[string]FunctionDef),
 	}
 
 	if tfMod != nil {
@@ -149,6 +151,11 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 			{Type: "variable", LabelNames: []string{"name"}},
 			{Type: "module", LabelNames: []string{"name"}},
 			{Type: "output", LabelNames: []string{"name"}},
+			{Type: "removed"},
+			{Type: "check", LabelNames: []string{"name"}},
+			{Type: "import"},
+			{Type: "function", LabelNames: []string{"name"}},
+			{Type: "encryption"},
 		},
 	}
 
@@ -276,6 +283,98 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 						}
 					}
 				}
+
+			case "removed":
+				from := ""
+				if fromAttr, ok := attrs["from"]; ok {
+					from = strings.TrimSpace(string(src[fromAttr.Expr.Range().Start.Byte:fromAttr.Expr.Range().End.Byte]))
+				}
+				destroy := true
+				lifecycleContent, _, _ := block.Body.PartialContent(&hcl.BodySchema{
+					Blocks: []hcl.BlockHeaderSchema{{Type: "lifecycle"}},
+				})
+				if lifecycleContent != nil {
+					for _, lc := range lifecycleContent.Blocks {
+						lcAttrs, _ := lc.Body.JustAttributes()
+						if dAttr, ok := lcAttrs["destroy"]; ok {
+							val := strings.TrimSpace(string(src[dAttr.Expr.Range().Start.Byte:dAttr.Expr.Range().End.Byte]))
+							if val == "false" {
+								destroy = false
+							}
+						}
+					}
+				}
+				info.RemovedBlocks = append(info.RemovedBlocks, RemovedBlockDef{
+					From:    from,
+					Destroy: destroy,
+					Pos:     tfconfig.SourcePos{Filename: filePath, Line: block.DefRange.Start.Line},
+				})
+
+			case "check":
+				checkName := block.Labels[0]
+				var asserts []string
+				assertContent, _, _ := block.Body.PartialContent(&hcl.BodySchema{
+					Blocks: []hcl.BlockHeaderSchema{{Type: "assert"}},
+				})
+				if assertContent != nil {
+					for _, ass := range assertContent.Blocks {
+						assAttrs, _ := ass.Body.JustAttributes()
+						if cond, ok := assAttrs["condition"]; ok {
+							condStr := strings.TrimSpace(string(src[cond.Expr.Range().Start.Byte:cond.Expr.Range().End.Byte]))
+							asserts = append(asserts, condStr)
+						}
+					}
+				}
+				info.CheckBlocks[checkName] = CheckBlockDef{
+					Name:        checkName,
+					AssertRules: asserts,
+					Pos:         tfconfig.SourcePos{Filename: filePath, Line: block.DefRange.Start.Line},
+				}
+
+			case "import":
+				to := ""
+				if toAttr, ok := attrs["to"]; ok {
+					to = strings.TrimSpace(string(src[toAttr.Expr.Range().Start.Byte:toAttr.Expr.Range().End.Byte]))
+				}
+				id := ""
+				if idAttr, ok := attrs["id"]; ok {
+					id = strings.Trim(strings.TrimSpace(string(src[idAttr.Expr.Range().Start.Byte:idAttr.Expr.Range().End.Byte])), `"'`)
+				}
+				info.ImportBlocks = append(info.ImportBlocks, ImportBlockDef{
+					To:  to,
+					ID:  id,
+					Pos: tfconfig.SourcePos{Filename: filePath, Line: block.DefRange.Start.Line},
+				})
+
+			case "function":
+				fnName := block.Labels[0]
+				summary := ""
+				if sAttr, ok := attrs["summary"]; ok {
+					summary = strings.Trim(strings.TrimSpace(string(src[sAttr.Expr.Range().Start.Byte:sAttr.Expr.Range().End.Byte])), `"'`)
+				}
+				retType := ""
+				if rAttr, ok := attrs["return"]; ok {
+					retType = strings.Trim(strings.TrimSpace(string(src[rAttr.Expr.Range().Start.Byte:rAttr.Expr.Range().End.Byte])), `"'`)
+				}
+				info.Functions[fnName] = FunctionDef{
+					Name:       fnName,
+					Summary:    summary,
+					ReturnType: retType,
+					Pos:        tfconfig.SourcePos{Filename: filePath, Line: block.DefRange.Start.Line},
+				}
+
+			case "encryption":
+				provider := ""
+				kpContent, _, _ := block.Body.PartialContent(&hcl.BodySchema{
+					Blocks: []hcl.BlockHeaderSchema{{Type: "key_provider", LabelNames: []string{"type", "name"}}},
+				})
+				if kpContent != nil && len(kpContent.Blocks) > 0 {
+					provider = kpContent.Blocks[0].Labels[0]
+				}
+				info.EncryptionBlocks = append(info.EncryptionBlocks, EncryptionBlockDef{
+					KeyProvider: provider,
+					Pos:         tfconfig.SourcePos{Filename: filePath, Line: block.DefRange.Start.Line},
+				})
 			}
 		}
 	}

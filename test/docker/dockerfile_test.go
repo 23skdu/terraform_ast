@@ -97,6 +97,16 @@ func TestDeveloperWorkflowManifests(t *testing.T) {
 	// The workflow must upload SARIF and require the permissions to do so.
 	assert.Contains(t, workflowContent, "sarif_file:")
 	assert.Contains(t, workflowContent, "security-events: write")
+
+	// SLSA Level 3, Cosign, and Syft DevSecOps release workflow verification
+	slsaWorkflow, err := os.ReadFile("../../.github/workflows/slsa-release.yml")
+	require.NoError(t, err)
+	slsaContent := string(slsaWorkflow)
+	assert.Contains(t, slsaContent, "generator_generic_slsa3.yml")
+	assert.Contains(t, slsaContent, "cosign sign-blob")
+	assert.Contains(t, slsaContent, "format: 'cyclonedx-json'")
+	assert.Contains(t, slsaContent, "format: 'spdx-json'")
+	assert.Contains(t, slsaContent, "trivy-action")
 }
 
 // TestDockerfile_BuildAndRuntimeSecurity builds the container and validates runtime security constraints.

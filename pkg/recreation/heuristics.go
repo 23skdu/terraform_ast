@@ -93,6 +93,29 @@ var knownModuleHazards = map[string]map[string]HazardDescriptor{
 			Remediation: "Do not alter cluster_ip_family on an existing cluster.",
 		},
 	},
+	// Azure AKS module hazards
+	"aks": {
+		"cluster_name": {
+			Resource:    "azurerm_kubernetes_cluster",
+			Impact:      "AKS cluster name is immutable; modifying it triggers complete cluster destruction.",
+			Remediation: "Ensure cluster_name remains constant.",
+		},
+		"resource_group_name": {
+			Resource:    "azurerm_kubernetes_cluster",
+			Impact:      "Resource group cannot be migrated in-place; triggers ForceNew cluster destruction.",
+			Remediation: "Keep resource_group_name unchanged.",
+		},
+		"location": {
+			Resource:    "azurerm_kubernetes_cluster",
+			Impact:      "Azure region location is immutable; triggers ForceNew cluster recreation.",
+			Remediation: "Do not alter location for an active cluster.",
+		},
+		"dns_prefix": {
+			Resource:    "azurerm_kubernetes_cluster",
+			Impact:      "DNS prefix is immutable; altering it triggers AKS cluster re-creation.",
+			Remediation: "Maintain constant dns_prefix across upgrades.",
+		},
+	},
 }
 
 func matchModuleCategory(moduleName string) string {
@@ -103,7 +126,10 @@ func matchModuleCategory(moduleName string) string {
 	if strings.Contains(lower, "eks") {
 		return "eks"
 	}
-	// Default check across both if unclassified
+	if strings.Contains(lower, "aks") || strings.Contains(lower, "azurerm") {
+		return "aks"
+	}
+	// Default check across all if unclassified
 	return "generic"
 }
 

@@ -19,6 +19,11 @@ func TestLookupHazard(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, "aws_eks_cluster", desc.Resource)
 
+	// AKS matches
+	desc, ok = LookupHazard("Azure/aks/azurerm", "dns_prefix")
+	assert.True(t, ok)
+	assert.Equal(t, "azurerm_kubernetes_cluster", desc.Resource)
+
 	// Generic fallback
 	desc, ok = LookupHazard("custom-module", "cluster_name")
 	assert.True(t, ok)

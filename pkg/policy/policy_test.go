@@ -73,3 +73,95 @@ func TestDecodeRejectsTrailingGarbage(t *testing.T) {
 	_, err := Decode(strings.NewReader(`{"block_breaking":true} trailing`))
 	assert.ErrorContains(t, err, "trailing data")
 }
+
+func TestRegoPolicy(t *testing.T) {
+	regoSrc := `
+package terraform_ast.enterprise
+
+# Disallow breaking changes
+deny[msg] {
+    input.breaking_changes > 0
+    msg := "breaking changes disallowed"
+}
+
+# Disallow downgrades
+deny[msg] {
+    input.is_downgrade == true
+    msg := "downgrades forbidden"
+}
+
+# Require review for major bumps
+violation[msg] {
+    input.bump_type == "MAJOR"
+    msg := "major upgrade requires architectural review"
+}
+
+# Rule without custom msg
+deny[msg] {
+    input.warnings >= 5
+}
+
+# Inequality condition checks
+deny[msg] {
+    input.breaking_changes != 0
+    input.breaking_changes <= 10
+    input.breaking_changes < 5
+    input.is_downgrade != false
+    input.bump_type != "PATCH"
+}
+`
+	policy, err := ParseRego(regoSrc)
+	require.NoError(t, err)
+	assert.Equal(t, "terraform_ast.enterprise", policy.Package)
+	assert.Len(t, policy.Rules, 5)
+
+	// Test evaluation with violations
+	input := Input{
+		BreakingChanges: 2,
+		Warnings:        6,
+		IsDowngrade:     true,
+		BumpType:        "MAJOR",
+	}
+	violations := EvaluateRego(policy, input)
+	require.NotEmpty(t, violations)
+	assert.Equal(t, "deny", violations[0].Rule)
+	assert.Equal(t, "breaking changes disallowed", violations[0].Message)
+
+	// Clean input
+	cleanInput := Input{
+		BreakingChanges: 0,
+		Warnings:        0,
+		IsDowngrade:     false,
+		BumpType:        "PATCH",
+	}
+	assert.Empty(t, EvaluateRego(policy, cleanInput))
+	assert.Nil(t, EvaluateRego(nil, cleanInput))
+
+	// Invalid condition syntax
+	_, errInvalidCond := ParseRego("deny[msg] {\n input.invalid\n}")
+	assert.Error(t, errInvalidCond)
+
+	// Condition type conversion failure
+	badIntCond := RegoCondition{Field: "breaking_changes", Operator: ">", Value: "not-an-int"}
+	assert.False(t, matchesCondition(badIntCond, input))
+
+	badWarningCond := RegoCondition{Field: "warnings", Operator: ">", Value: "not-an-int"}
+	assert.False(t, matchesCondition(badWarningCond, input))
+
+	badDowngradeCond := RegoCondition{Field: "is_downgrade", Operator: ">", Value: "true"}
+	assert.False(t, matchesCondition(badDowngradeCond, input))
+
+	badBumpCond := RegoCondition{Field: "bump_type", Operator: ">", Value: "MAJOR"}
+	assert.False(t, matchesCondition(badBumpCond, input))
+
+	badFieldCond := RegoCondition{Field: "unknown_field", Operator: "=="}
+	assert.False(t, matchesCondition(badFieldCond, input))
+
+	assert.True(t, compareInt(5, "==", 5))
+	assert.False(t, compareInt(1, "invalid-op", 1))
+
+	// Unclosed rule
+	unclosed, err := ParseRego("deny[msg] {\n input.breaking_changes > 0")
+	require.NoError(t, err)
+	assert.Len(t, unclosed.Rules, 1)
+}

@@ -47,6 +47,9 @@ func Compare(oldMod, newMod *ast.ModuleInfo, oldVer, newVer string) *DiffReport 
 	// 3. Compare Providers and Core Requirements
 	compareRequirements(oldMod, newMod, report)
 
+	// 4. Compare Modern HCL & OpenTofu Blocks
+	compareModernBlocks(oldMod, newMod, report)
+
 	scoreConfidence(report)
 
 	// Sort slices deterministically for stable reporting and golden testing
@@ -145,6 +148,25 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 	for name, oldVar := range oldMod.Variables {
 		newVar, exists := newMod.Variables[name]
 		if !exists {
+			isSoftRemoved := false
+			for _, rb := range newMod.RemovedBlocks {
+				if (rb.From == name || rb.From == "var."+name) && !rb.Destroy {
+					isSoftRemoved = true
+					break
+				}
+			}
+			if isSoftRemoved {
+				report.Warnings = append(report.Warnings, DifferenceItem{
+					Category:    "Variable",
+					Name:        name,
+					Severity:    SeverityWarning,
+					Description: fmt.Sprintf("Input variable '%s' was soft-removed via removed block (lifecycle.destroy = false)", name),
+					OldValue:    fmt.Sprintf("type=%s, required=%t", oldVar.Type, oldVar.Required),
+					Remediation: fmt.Sprintf("Variable '%s' is gracefully retired without destroying infrastructure", name),
+				})
+				continue
+			}
+
 			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
 				Category:    "Variable",
 				Name:        name,
@@ -482,4 +504,67 @@ func sortDifferences(items []DifferenceItem) {
 		}
 		return items[i].Name < items[j].Name
 	})
+}
+
+func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
+	// 1. Removed blocks (Terraform 1.7+ / OpenTofu 1.6+)
+	for _, rb := range newMod.RemovedBlocks {
+		if !rb.Destroy {
+			report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+				Category:        "SoftRemovedBlock",
+				Name:            rb.From,
+				Severity:        SeverityNewFeature,
+				ConfidenceScore: 9,
+				Description:     fmt.Sprintf("Resource or block '%s' declared in removed block with lifecycle.destroy = false (soft migration)", rb.From),
+			})
+		}
+	}
+
+	// 2. Check blocks (Terraform 1.5+)
+	for name, cb := range newMod.CheckBlocks {
+		if _, existed := oldMod.CheckBlocks[name]; !existed {
+			report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+				Category:        "CheckBlockAdded",
+				Name:            name,
+				Severity:        SeverityNewFeature,
+				ConfidenceScore: 9,
+				Description:     fmt.Sprintf("Check assertion block '%s' declared with %d rules", name, len(cb.AssertRules)),
+			})
+		}
+	}
+
+	// 3. Import blocks (Terraform 1.5+)
+	for _, ib := range newMod.ImportBlocks {
+		report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+			Category:        "ImportBlockAdded",
+			Name:            ib.To,
+			Severity:        SeverityNewFeature,
+			ConfidenceScore: 9,
+			Description:     fmt.Sprintf("Programmatic import declared for '%s' (id=%s)", ib.To, ib.ID),
+		})
+	}
+
+	// 4. Custom Functions (Terraform 1.8+)
+	for name, fn := range newMod.Functions {
+		if _, existed := oldMod.Functions[name]; !existed {
+			report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+				Category:        "FunctionAdded",
+				Name:            name,
+				Severity:        SeverityNewFeature,
+				ConfidenceScore: 9,
+				Description:     fmt.Sprintf("Custom function '%s' declared (returns %s)", name, fn.ReturnType),
+			})
+		}
+	}
+
+	// 5. Encryption blocks (OpenTofu 1.7+)
+	for _, eb := range newMod.EncryptionBlocks {
+		report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+			Category:        "EncryptionConfigured",
+			Name:            eb.KeyProvider,
+			Severity:        SeverityNewFeature,
+			ConfidenceScore: 9,
+			Description:     fmt.Sprintf("State encryption configured with key provider '%s'", eb.KeyProvider),
+		})
+	}
 }

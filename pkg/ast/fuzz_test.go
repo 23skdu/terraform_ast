@@ -123,3 +123,64 @@ func FuzzParseObjectSchema(f *testing.F) {
 		}
 	})
 }
+
+// FuzzParseModernHCLBlocks exercises the parser against modern HCL / OpenTofu blocks
+// (removed, check, import, function, encryption).
+func FuzzParseModernHCLBlocks(f *testing.F) {
+	seeds := []string{
+		`removed {
+  from = aws_instance.example
+  lifecycle {
+    destroy = false
+  }
+}`,
+		`removed {
+  from = google_container_cluster.primary
+  lifecycle {
+    destroy = true
+  }
+}`,
+		`check "health" {
+  data "http" "endpoint" {
+    url = "https://example.com"
+  }
+  assert {
+    condition     = data.http.endpoint.status_code == 200
+    error_message = "Status code failed"
+  }
+}`,
+		`import {
+  to = aws_s3_bucket.bucket
+  id = "my-bucket-name"
+}`,
+		`function "slugify" {
+  params = [string]
+  result = string
+}`,
+		`encryption "aes_gcm" "key" {
+  key_provider = "gcp_kms"
+}`,
+		"removed { from = }",
+		"check { assert { } }",
+		"import { }",
+	}
+
+	for _, s := range seeds {
+		f.Add(s)
+	}
+
+	f.Fuzz(func(t *testing.T, input string) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "modern.tf"), []byte(input), 0o600); err != nil {
+			return
+		}
+
+		info, err := Inspect(dir)
+		if err != nil {
+			return
+		}
+		if info == nil {
+			t.Fatalf("Inspect returned nil module without error for input: %s", input)
+		}
+	})
+}

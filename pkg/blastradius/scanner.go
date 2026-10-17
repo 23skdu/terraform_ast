@@ -10,6 +10,7 @@ import (
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/23skdu/terraform_ast/pkg/diff"
+	"github.com/23skdu/terraform_ast/pkg/eval"
 	"github.com/23skdu/terraform_ast/pkg/recreation"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
 	"github.com/hashicorp/hcl/v2"
@@ -293,7 +294,15 @@ func parseTerragruntCallSite(src []byte, path, targetIdentifier string) (CallSit
 				}
 			}
 		} else {
-			inputAnalysisIncomplete = true
+			rawExpr := string(src[inputsAttr.Expr.Range().Start.Byte:inputsAttr.Expr.Range().End.Byte])
+			ctx := eval.BuildEvalContext(nil, nil)
+			if resolved, err := eval.ResolveTerragruntInputs(rawExpr, ctx); err == nil {
+				for k, v := range resolved {
+					passedInputs[k] = v
+				}
+			} else {
+				inputAnalysisIncomplete = true
+			}
 		}
 	}
 

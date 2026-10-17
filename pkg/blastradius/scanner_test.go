@@ -498,6 +498,20 @@ inputs = local.inputs
 	assert.Empty(t, site.PassedInputs)
 }
 
+func TestParseTerragruntCallSiteResolvesDynamicEvaluatedInputs(t *testing.T) {
+	src := `
+terraform {
+  source = "./wrapper"
+}
+inputs = merge({ region = "us-west1" }, { cluster_name = "prod-eks" })
+`
+	site, ok := parseTerragruntCallSite([]byte(src), "envs/dev/terragrunt.hcl", "wrapper")
+	require.True(t, ok)
+	assert.False(t, site.InputAnalysisIncomplete)
+	assert.Equal(t, `"us-west1"`, site.PassedInputs["region"])
+	assert.Equal(t, `"prod-eks"`, site.PassedInputs["cluster_name"])
+}
+
 func TestTerragruntInputKey(t *testing.T) {
 	cases := []struct {
 		name string

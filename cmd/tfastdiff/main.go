@@ -14,6 +14,7 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/codemod"
 	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/gitops"
+	"github.com/23skdu/terraform_ast/pkg/lsp"
 	"github.com/23skdu/terraform_ast/pkg/planner"
 	"github.com/23skdu/terraform_ast/pkg/policy"
 	"github.com/23skdu/terraform_ast/pkg/recreation"
@@ -43,6 +44,12 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	// when the run finishes so temporary directories never outlive the process.
 	defer gitops.GlobalCache.Clear()
 
+	if len(args) > 0 && (args[0] == "lsp" || args[0] == "daemon") {
+		server := lsp.NewServer(stdout)
+		_ = server.Serve(os.Stdin)
+		return 0
+	}
+
 	fs := flag.NewFlagSet("tfastdiff", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
@@ -64,6 +71,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		upgradePath        bool
 		providerSchemaPath string
 		cacheDir           string
+		lspDaemon          bool
 	)
 
 	fs.StringVar(&wrapperPath, "wrapper", "", "Path to the Terraform module wrapper directory")
@@ -83,9 +91,16 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&upgradePath, "upgrade-path", false, "Analyze each intermediate semantic version between --old-version and --new-version")
 	fs.StringVar(&providerSchemaPath, "provider-schema", "", "Optional path to terraform providers schema -json file for dynamic ForceNew recreation detection")
 	fs.StringVar(&cacheDir, "cache-dir", "", "Optional path to directory for persistent L2 AST caching")
+	fs.BoolVar(&lspDaemon, "lsp", false, "Start Language Server Protocol (LSP) daemon for IDE integration")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+
+	if lspDaemon {
+		server := lsp.NewServer(stdout)
+		_ = server.Serve(os.Stdin)
+		return 0
 	}
 
 	if fixMode && fixPreview {

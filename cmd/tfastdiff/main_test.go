@@ -1645,3 +1645,14 @@ func TestExecute_CacheDir(t *testing.T) {
 	assert.Equal(t, cacheDir, ast.GetPersistentCacheDir())
 	ast.SetPersistentCacheDir("")
 }
+
+func TestExecute_LSPDaemon(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"lsp"}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+
+	stdout.Reset()
+	stderr.Reset()
+	codeFlag := Execute([]string{"--lsp"}, &stdout, &stderr)
+	assert.Equal(t, 0, codeFlag)
+}

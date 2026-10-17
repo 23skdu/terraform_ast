@@ -58,6 +58,41 @@ type ProviderRequirement struct {
 	ConfigurationAliases []string `json:"configuration_aliases,omitempty"`
 }
 
+// RemovedBlockDef captures Terraform 1.7+ / OpenTofu 1.6+ removed {} blocks.
+type RemovedBlockDef struct {
+	From    string             `json:"from"`
+	Destroy bool               `json:"destroy"`
+	Pos     tfconfig.SourcePos `json:"pos"`
+}
+
+// CheckBlockDef captures Terraform 1.5+ check {} blocks and assertions.
+type CheckBlockDef struct {
+	Name        string             `json:"name"`
+	AssertRules []string           `json:"assert_rules,omitempty"`
+	Pos         tfconfig.SourcePos `json:"pos"`
+}
+
+// ImportBlockDef captures Terraform 1.5+ programmatic import {} blocks.
+type ImportBlockDef struct {
+	To  string             `json:"to"`
+	ID  string             `json:"id"`
+	Pos tfconfig.SourcePos `json:"pos"`
+}
+
+// FunctionDef captures Terraform 1.8+ custom function blocks.
+type FunctionDef struct {
+	Name       string             `json:"name"`
+	Summary    string             `json:"summary,omitempty"`
+	ReturnType string             `json:"return_type,omitempty"`
+	Pos        tfconfig.SourcePos `json:"pos"`
+}
+
+// EncryptionBlockDef captures OpenTofu 1.7+ state encryption blocks.
+type EncryptionBlockDef struct {
+	KeyProvider string             `json:"key_provider"`
+	Pos         tfconfig.SourcePos `json:"pos"`
+}
+
 // ModuleInfo is the normalized AST representation of a Terraform module.
 type ModuleInfo struct {
 	Path                    string                         `json:"path"`
@@ -67,6 +102,11 @@ type ModuleInfo struct {
 	RequiredCore            []string                       `json:"required_core,omitempty"`
 	RequiredProviders       map[string]ProviderRequirement `json:"required_providers,omitempty"`
 	WrapperOutputReferences map[string]OutputReference     `json:"wrapper_output_references,omitempty"`
+	RemovedBlocks           []RemovedBlockDef              `json:"removed_blocks,omitempty"`
+	CheckBlocks             map[string]CheckBlockDef       `json:"check_blocks,omitempty"`
+	ImportBlocks            []ImportBlockDef               `json:"import_blocks,omitempty"`
+	Functions               map[string]FunctionDef         `json:"functions,omitempty"`
+	EncryptionBlocks        []EncryptionBlockDef           `json:"encryption_blocks,omitempty"`
 }
 
 // TypeCompatibilityResult describes the compatibility between two type constraints.

@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
@@ -428,4 +429,68 @@ func TestSameStrings(t *testing.T) {
 	assert.False(t, sameStrings([]string{"a"}, []string{"a", "b"}), "different lengths")
 	assert.False(t, sameStrings([]string{"a", "a"}, []string{"a", "b"}), "duplicates collapse to a smaller set")
 	assert.False(t, sameStrings([]string{"a", "b"}, []string{"a", "c"}), "different members")
+}
+
+func TestCompare_ModernBlocksAndSoftRemovals(t *testing.T) {
+	oldMod := &ast.ModuleInfo{
+		Variables: map[string]ast.VariableDef{
+			"legacy_var": {Name: "legacy_var", Type: "string"},
+			"dead_var":   {Name: "dead_var", Type: "string"},
+		},
+		CheckBlocks: map[string]ast.CheckBlockDef{
+			"existing_check": {Name: "existing_check"},
+		},
+		Functions: map[string]ast.FunctionDef{
+			"existing_fn": {Name: "existing_fn"},
+		},
+	}
+
+	newMod := &ast.ModuleInfo{
+		Variables: map[string]ast.VariableDef{},
+		RemovedBlocks: []ast.RemovedBlockDef{
+			{From: "var.legacy_var", Destroy: false},
+			{From: "google_compute_instance.vm", Destroy: true},
+		},
+		CheckBlocks: map[string]ast.CheckBlockDef{
+			"existing_check": {Name: "existing_check"},
+			"new_check":      {Name: "new_check", AssertRules: []string{"true"}},
+		},
+		ImportBlocks: []ast.ImportBlockDef{
+			{To: "aws_s3_bucket.b", ID: "bucket-1"},
+		},
+		Functions: map[string]ast.FunctionDef{
+			"existing_fn": {Name: "existing_fn"},
+			"new_fn":      {Name: "new_fn", ReturnType: "string"},
+		},
+		EncryptionBlocks: []ast.EncryptionBlockDef{
+			{KeyProvider: "pbkdf2"},
+		},
+	}
+
+	report := Compare(oldMod, newMod, "v1.0.0", "v1.1.0")
+
+	// legacy_var was soft-removed with destroy=false, so it's a WARNING rather than BREAKING
+	// dead_var was hard-removed without removed block, so it's BREAKING
+	assert.Equal(t, 1, report.TotalBreaking)
+	assert.Equal(t, "dead_var", report.BreakingChanges[0].Name)
+
+	var hasSoftRemovedWarning bool
+	for _, w := range report.Warnings {
+		if w.Name == "legacy_var" && strings.Contains(w.Description, "soft-removed") {
+			hasSoftRemovedWarning = true
+			break
+		}
+	}
+	assert.True(t, hasSoftRemovedWarning)
+
+	// Verify NewFeatures from modern blocks
+	categories := make(map[string]bool)
+	for _, nf := range report.NewFeatures {
+		categories[nf.Category] = true
+	}
+	assert.True(t, categories["SoftRemovedBlock"])
+	assert.True(t, categories["CheckBlockAdded"])
+	assert.True(t, categories["ImportBlockAdded"])
+	assert.True(t, categories["FunctionAdded"])
+	assert.True(t, categories["EncryptionConfigured"])
 }
