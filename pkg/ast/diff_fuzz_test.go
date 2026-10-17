@@ -106,9 +106,9 @@ output "app_id" {
 				var valOut tfValidationOutput
 				if jErr := json.Unmarshal(out, &valOut); jErr == nil && valOut.Valid {
 					// Compiler confirmed valid Terraform syntax.
-					// tfastdiff AST inspect must not have crashed and must have extracted the module.
-					if info == nil {
-						t.Fatalf("Compiler accepted module but AST inspect was nil:\n%s", snippet)
+					// Verify AST inspect preserved the module path.
+					if info.Path != dir {
+						t.Fatalf("Compiler accepted module but AST inspect path mismatch:\n%s", snippet)
 					}
 				}
 			}
