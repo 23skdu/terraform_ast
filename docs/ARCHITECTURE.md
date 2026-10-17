@@ -7,32 +7,32 @@
 The tool provides automated compatibility verification, identifying breaking changes, type constraint shifts, removed outputs, and safe version pinning boundaries before code is merged or deployed.
 
 ```mermaid
-graph TD
-    A[Wrapper Module Source] -->|Inspect AST| B[pkg/ast]
-    C[Upstream Git Repository / Target Dir] -->|Clone / Checkout Tag| D[pkg/gitops]
-    R[Terraform Registry API] -->|Query & Download Tarball| REG[pkg/registry]
-    D -->|Inspect AST| B
-    REG -->|Inspect AST| B
-    E[Semver Engine] -->|Sort & Classify Bump| F[pkg/semverutil]
-    
-    B --> G[pkg/diff - Upstream Diff Engine]
-    B --> H[pkg/wrapper - Wrapper Audit Engine]
-    G --> REC[pkg/recreation - ForceNew Destruction Hazards]
+flowchart TD
+    A["Wrapper Module Source"] -->|"Inspect AST"| B["pkg/ast"]
+    C["Upstream Git Repository or Target Dir"] -->|"Clone or Checkout Tag"| D["pkg/gitops"]
+    R["Terraform Registry API"] -->|"Query and Download Tarball"| REG["pkg/registry"]
+    D -->|"Inspect AST"| B
+    REG -->|"Inspect AST"| B
+    E["Semver Engine"] -->|"Sort and Classify Bump"| F["pkg/semverutil"]
+
+    B --> G["pkg/diff - Upstream Diff Engine"]
+    B --> H["pkg/wrapper - Wrapper Audit Engine"]
+    G --> REC["pkg/recreation - ForceNew Destruction Hazards"]
     F --> G
     F --> H
-    
-    CONSUMERS[Downstream Root Modules] -->|Scan Invocations| BR[pkg/blastradius]
+
+    CONSUMERS["Downstream Root Modules"] -->|"Scan Invocations"| BR["pkg/blastradius"]
     G --> BR
-    
-    G --> I[pkg/report]
+
+    G --> I["pkg/report"]
     H --> I
     REC --> I
     BR --> I
-    
-    I --> J[Terminal Formatted Output]
-    I --> K[GitHub-Flavored Markdown PR Report]
-    I --> L[Machine-Readable JSON Artifact]
-    I --> SARIF[OASIS SARIF v2.1.0 Export]
+
+    I --> J["Terminal Formatted Output"]
+    I --> K["GitHub-Flavored Markdown PR Report"]
+    I --> L["Machine-Readable JSON Artifact"]
+    I --> SARIF["OASIS SARIF v2.1.0 Export"]
 ```
 
 ---
@@ -105,7 +105,8 @@ graph TD
 
 ### 9. `pkg/report` (Multi-Format Reporting & Golden Matcher)
 - **Capabilities**:
-  - Formats results into interactive terminal text with status indicators (`🚨`, `✨`, `⚠️`, `💡`).
+  - Formats results into interactive terminal text with leading status indicators that mark
+    breaking changes, new features, warnings, and policy violations.
   - Generates GitHub-flavored Markdown with alert callouts (`> [!CAUTION]`, `> [!WARNING]`, `> [!NOTE]`) and tables.
   - Serializes machine-readable JSON for CI/CD pipeline automation.
   - Generates **OASIS SARIF v2.1.0** reports for direct ingestion into GitHub Code Scanning and security dashboards, advertising only the rules that back an emitted result.

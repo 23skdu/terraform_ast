@@ -4,19 +4,19 @@ This document outlines the strategic development history and completed milestone
 
 ---
 
-## 🗺️ Roadmap Architecture & Delivery Status
+## Roadmap Architecture & Delivery Status
 
 ```mermaid
 flowchart TD
-    A[Delivered: v0.1.0 - v0.6.0\nAST Engine, Codemod --fix, moved Blocks, Dynamic Provider Schema, L2 Cache, Terratest] --> B[Delivered: v0.7.0\nStep 13: Full EvalContext & Taint Analysis\nStep 15: Modern HCL / OpenTofu 1.6-1.9 Blocks]
-    B --> C[Delivered: v0.8.0\nStep 16: Hermetic SLSA L3, Cosign & Syft SBOM\nStep 20: Rego/OPA Engine & IDE LSP Daemon]
-    C --> D[Delivered: v0.9.0\nStep 17: Multi-Cloud Golden Matrix & Drift\nStep 18: Differential Fuzzing vs Native TF Core\nStep 19: Terratest Emulated Plan State Validation]
-    D --> E[Open: Gap Analysis Backlog\nPass 1: P0-P3 Findings (#1-#36)\nPass 2: Reproduced Defects (#37-#70)]
+    A["v0.1.0 - v0.2.0 Core analysis and trust<br/>v0.3.0 - v0.4.0 Remediation and automation<br/>v0.5.0 - v0.6.0 Codemods and scaling"] --> B["v0.7.0 Deep semantic taint and language evolution"]
+    B --> C["v0.8.0 Enterprise DevSecOps and governance"]
+    C --> D["v0.9.0 Continuous quality and cloud emulation"]
+    D --> E["Gap analysis backlog<br/>Pass 1: findings 1 to 36<br/>Pass 2: findings 37 to 70<br/>Batches 1 to 3 closed"]
 ```
 
 ---
 
-## 📦 Delivered Capabilities & Release History
+## Delivered Capabilities & Release History
 
 All strategic roadmap milestones have been fully implemented, verified, and delivered with 100.0% statement test coverage:
 
@@ -33,7 +33,7 @@ All strategic roadmap milestones have been fully implemented, verified, and deli
 
 ---
 
-## 📊 Roadmap Delivery Summary Matrix
+## Roadmap Delivery Summary Matrix
 
 | Milestone | Status | Feature Area | Primary Value | Key Technology |
 | :--- | :--- | :--- | :--- | :--- |
@@ -43,7 +43,7 @@ All strategic roadmap milestones have been fully implemented, verified, and deli
 
 ---
 
-# 🧭 Gap Analysis & Engineering Backlog
+# Gap Analysis & Engineering Backlog
 
 > **Status:** Open. **Scope:** Deep code analysis of the CLI (`cmd/tfastdiff`), all `pkg/*` engines,
 > `internal/goldentest`, the GitHub Actions workflows, `action.yml`, and every document under `docs/`.
@@ -56,7 +56,7 @@ All strategic roadmap milestones have been fully implemented, verified, and deli
 > on every package**, 18 packages. Coverage is real but is measuring code that several entry points
 > never reach — which is why dead code and unreachable features pass the gate.
 
-## 🔴 P0 — Shipping Blockers (fix before next release)
+## P0 — Shipping Blockers (fix before next release)
 
 | # | Issue | Evidence | Required change |
 | :--- | :--- | :--- | :--- |
@@ -66,7 +66,7 @@ All strategic roadmap milestones have been fully implemented, verified, and deli
 | 4 | **LSP advertises full document sync but rejects `didChange`.** `initialize` returns `textDocumentSync: 1` (Full), obliging the client to send `textDocument/didChange` on every keystroke — which falls into the `default` branch and returns `-32601`. | Reproduced: `{"jsonrpc":"2.0","method":"textDocument/didChange",...}` → `{"jsonrpc":"2.0","error":{"code":-32601,"message":"method 'textDocument/didChange' not found"}}`. A live editor session spews errors while typing and only refreshes on save. | Implement `textDocument/didChange` (recompute diagnostics, republish). Until then, advertise `textDocumentSync: 2` (None) and accept save-only. Also implement `exit` (currently the daemon only terminates on stdin EOF, so `shutdown` + `exit` never stops it) and `$/cancelRequest`. |
 | 5 | **`ast.ClearPersistentCache` deletes the whole directory tree the operator passed to `--cache-dir`.** | `pkg/ast/cache.go:81` — `os.RemoveAll(dir)`. `--cache-dir .` removes the repository. | Remove only cache artefacts (`<sha256>.json`), refuse to clear a directory that does not look like a cache dir, and expose the operation as an explicit `--clear-cache` flag rather than an unreachable library function. |
 
-## 🟠 P1 — Dead Code: Wire It or Delete It
+## P1 — Dead Code: Wire It or Delete It
 
 Every item below is fully implemented, covered at 100%, and **unreachable from `cmd/tfastdiff`**. Each
 one is advertised in `README.md`, `docs/FEATURES.md`, `docs/CLI_USAGE.md`, or `docs/ROADMAP.md`. The
@@ -75,14 +75,14 @@ one is advertised in `README.md`, `docs/FEATURES.md`, `docs/CLI_USAGE.md`, or `d
 | # | Item | Location | Documented claim | Decision needed |
 | :--- | :--- | :--- | :--- | :--- |
 | 6 | **`--rego-policy` flag does not exist.** `ParseRego` / `EvaluateRego` / `RegoPolicy` are only called from `pkg/policy/policy_test.go`. | `pkg/policy/rego.go` (203 lines) | `docs/CLI_USAGE.md:437` Use Case 8 shows `tfastdiff --rego-policy ./policies/x.rego`. Copying it yields `flag provided but not defined`, exit `2`. | Either add the flag (accept `.rego`, evaluate with `policy.Input`, merge into `PolicyViolations`), or delete `rego.go` and Use Case 8. Note the engine is a hand-rolled `deny[msg]` substring parser, **not** OPA — if it ships, stop calling it "Open Policy Agent integration" or vendor `github.com/open-policy-agent/opa`. |
-| 7 | **`--fix` does not do what the roadmap says it does.** `docs/ROADMAP.md` v0.5.0 and `docs/FEATURES.md` §5 claim `--fix` synthesises `moved {}` blocks and injects missing required inputs. `main.go:293-322` only collects `PassedRemovedInput` and calls `codemod.ApplyRemovedInputs`. `AddMissingInputs`, `FormatMovedBlocks`, and `WriteMovedBlocks` are unreachable. | `pkg/codemod/apply.go:84,148,173` | "automatic `moved {}` block synthesis, missing required input injection" | Wire `--fix` / `--fix-preview` to them, **or** correct the docs. ⚠️ If wired: `AddMissingInputs` writes `cty.StringVal("")` for every missing input regardless of declared type, which produces invalid Terraform for `bool`, `list`, and `object` inputs. Make it type-aware or emit a TODO comment instead of a value. |
+| 7 | **`--fix` does not do what the roadmap says it does.** `docs/ROADMAP.md` v0.5.0 and `docs/FEATURES.md` §5 claim `--fix` synthesises `moved {}` blocks and injects missing required inputs. `main.go:293-322` only collects `PassedRemovedInput` and calls `codemod.ApplyRemovedInputs`. `AddMissingInputs`, `FormatMovedBlocks`, and `WriteMovedBlocks` are unreachable. | `pkg/codemod/apply.go:84,148,173` | "automatic `moved {}` block synthesis, missing required input injection" | Wire `--fix` / `--fix-preview` to them, **or** correct the docs. If wired: `AddMissingInputs` writes `cty.StringVal("")` for every missing input regardless of declared type, which produces invalid Terraform for `bool`, `list`, and `object` inputs. Make it type-aware or emit a TODO comment instead of a value. |
 | 8 | **`eval.AnalyzeVariableTaint` is dead.** 213 lines of variable→local→module/resource/output reachability tracing, called only from its own test. | `pkg/eval/taint.go` | `docs/FEATURES.md` §2 "Dependency Taint Analysis"; ROADMAP v0.7.0 "input taint dependency reachability analysis" | Surface it as `--taint <var>` in wrapper mode (it is the natural answer to "is this removed input actually used?"), or delete it. |
 | 9 | **`ast.InspectModulesParallel` is dead.** `runCompareMode` hand-rolls a 2-goroutine `errgroup` instead of using the bounded worker pool. | `pkg/ast/parallel.go` | ROADMAP v0.6.0 "parallel AST worker pools (`InspectModulesParallel`)" | Use it for intermediate upgrade-path inspection (`analyzeUpgradePathVersions` inspects each snapshot serially) and for `--blast-radius` consumer discovery, or delete it. |
 | 10 | **Drift detection is a no-op.** `.github/workflows/drift-detection.yml` grants `issues: write`, then its only "check" step is `echo "Multi-cloud golden test matrix verified..."`. `MultiCloudCatalog()` and `GenerateDriftIssuePayload()` are called only from `internal/goldentest/drift_test.go`. | `internal/goldentest/drift.go:32,218` | ROADMAP v0.9.0 "automated scheduled upstream drift detection"; FEATURES.md use case 7 "Daily automated matrix scans across GCP, AWS, and Azure" | Make the workflow real: for each catalog entry, download both versions from the registry, run `diff.Compare`, call `DetectDrift`, and open/upsert a GitHub issue with `GenerateDriftIssuePayload` when drift is found. |
 | 11 | **8 of 11 catalog golden baselines do not exist.** `MultiCloudCatalog()` names `fabric_*`, `gcp_vpc_*`, `gcp_sql_*`, `aws_vpc_*`, `aws_rds_*`, `aws_iam_*`, `azure_vnet_*`, `azure_postgresql_*`. `test/golden/` contains only gke/eks/aks diffs plus wrapper audits, SARIF and blast radius. | `internal/goldentest/drift.go:42-135` vs `test/golden/` | "Multi-Cloud Golden Image Test Matrix (GCP, AWS, Azure)" | Generate the missing baselines (`UPDATE_GOLDEN=true`) before wiring #10, or trim the catalog to what is actually maintained. |
 | 12 | **`lsp.RunDaemon` is dead**, as are the `recreation.AnalyzeHazards` / `AnalyzeWrapperHazards` no-registry wrappers (the CLI always passes the `WithRegistry` variants). | `pkg/lsp/server.go:280`, `pkg/recreation/heuristics.go:154,209` | — | Delete the duplicates, or make `RunDaemon` the single LSP entry point used by both `lsp`/`daemon` subcommand and `--lsp`. |
 
-## 🟡 P2 — Analysis Correctness & Verification Credibility
+## P2 — Analysis Correctness & Verification Credibility
 
 | # | Issue | Detail |
 | :--- | :--- | :--- |
@@ -97,7 +97,7 @@ one is advertised in `README.md`, `docs/FEATURES.md`, `docs/CLI_USAGE.md`, or `d
 | ~~21~~ | **CLOSED** The CI unit suite spends 6+ minutes in real backoff sleeps.** `TestExecute_RegistryDownloadErrors` = 299s, `TestExecute_CompareMode_NewDownloadFailure` = 94s, because `registry.DefaultRetryMaxElapsedTime` is 2 minutes and only `Client.RetryMaxElapsedTime` can shorten it. | Add an injectable sleeper/clock seam to `pkg/registry` (the repo already uses the `mkdirTemp`/`osExit` injection pattern in `main.go`), or set `RetryMaxElapsedTime` to a few milliseconds in the failing-path tests. Also expose it as `--registry-timeout` — today a user has no way to bound a hung registry call. |
 | 22 | **No CLI progress or logging at all.** Clone/download/registry work is completely silent; a slow upstream costs minutes of nothing. | Add `--verbose`/`-v` writing to stderr, keeping stdout reserved for the report (SARIF/JSON must stay a single clean document). |
 
-## 🔵 P3 — Build, Release & Repo Hygiene
+## P3 — Build, Release & Repo Hygiene
 
 | # | Issue | Fix |
 | :--- | :--- | :--- |
@@ -118,7 +118,7 @@ one is advertised in `README.md`, `docs/FEATURES.md`, `docs/CLI_USAGE.md`, or `d
 
 ---
 
-# 🧪 Pass 2 — Reproduced Defects & Additional Gaps (#37 – #70)
+# Pass 2 — Reproduced Defects & Additional Gaps (#37 – #70)
 
 > **Status:** Partially delivered. Batches 1–3 are closed and verified; items #44 and onwards are
 > still open. Every item tagged **[verified]** was reproduced against this tree with a throwaway
@@ -127,7 +127,7 @@ one is advertised in `README.md`, `docs/FEATURES.md`, `docs/CLI_USAGE.md`, or `d
 > the source and are not independently executed.
 >
 > Pass 1 audited *reachability* (what can never run). Pass 2 audited *behaviour* (what runs and is
-> wrong). The three findings marked 🔴 **[verified]** in P0 below are **false negatives**: the tool
+> wrong). The three findings marked **[verified]** in P0 below are **false negatives**: the tool
 > reports "safe" for configurations that contain real breaking changes. They are the most damaging
 > class of bug in this codebase, because every downstream consumer — the CI gate, the GitHub Action,
 > the SARIF upload, the PR comment — inherits the wrong answer.
@@ -160,7 +160,7 @@ Two latent problems were uncovered while landing these and fixed in the same cha
   graceful degradation *was* the #41 defect, so the expectation was inverted and replaced with
   `TestExecute_PinnedVersionMustResolve`.
 
-## 🔴 P0 — False Negatives & Silent Data Loss (fix first)
+## P0 — False Negatives & Silent Data Loss (fix first)
 
 | # | Issue | Evidence | Required change |
 | :--- | :--- | :--- | :--- |
@@ -171,7 +171,7 @@ Two latent problems were uncovered while landing these and fixed in the same cha
 | ~~41~~ | **CLOSED** `cmd/tfastdiff/main.go` discards errors that disable whole analyses.** Four sites drop information the user needs: `:391` and `:418` `ver, _ = client.GetLatestVersion(...)` — a failed lookup proceeds with an empty version string; `:233-246` `if err == nil` around the pinned (`--old-version`) download; `:247` `pinnedInfo, _ = ast.Inspect(pinnedDir)`. | When the pinned version cannot be fetched, `pinnedInfo` is `nil`, `AnalyzeWrapper` skips step 6, and **downgrade detection plus safe-pin recommendation are silently disabled** while the report still claims `SAFE_TO_PIN`. Contrast wrapper mode `:203`, which does check the same error. | Propagate each error to stderr and exit `1`, or degrade explicitly with a warning line naming the analysis that was skipped. |
 | ~~42~~ | **CLOSED** `--format` is never validated.** `renderWrapperOutput` / `renderDiffOutput` (`main.go:537,558`) use a `switch` with a `default:` that renders text. | `--format yaml`, `--format json5`, or a typo silently produces text output while the user believes they requested a machine-readable document. The flag help string (`main.go:83`) is the only documentation. | Validate against `text\|markdown\|json\|sarif` after `main.go:125` and exit `2` with the valid set otherwise, matching the existing `sarif` + `--upgrade-path` rejection. |
 
-## 🟠 P1 — Analysis Correctness, Wiring & Robustness
+## P1 — Analysis Correctness, Wiring & Robustness
 
 | # | Issue | Detail |
 | :--- | :--- | :--- |
@@ -197,7 +197,7 @@ Two latent problems were uncovered while landing these and fixed in the same cha
 | 62 | **[read] `discoverCallSites` aborts the entire blast-radius scan on any `WalkDir` error** (`scanner.go:112-114` returns `err`), and `isMatchingSource` matches on basename and `strings.HasSuffix` (`:342-354`). | One unreadable directory in a monorepo aborts the scan; and `source = "./other/gke"` matches a wrapper target of `/repo/modules/gke` purely on basename. Log and skip unreadable entries; tighten matching to resolved-path equality. |
 | ~~63~~ | **CLOSED** No cancellation or deadlines anywhere in the CLI.** Every registry call uses `context.Background()` (`main.go:203,209,391,418,587,616`); there is no `os/signal` handling. | A hung registry stalls the run for up to 2 minutes per request (≈4 minutes for `--old` + `--new`) with no way to interrupt, and `Ctrl-C` leaves temp directories behind. This is the production twin of #21. |
 
-## 🔵 P2 — CI, Supply Chain & Repo Hygiene
+## P2 — CI, Supply Chain & Repo Hygiene
 
 | # | Issue | Detail |
 | :--- | :--- | :--- |
@@ -211,7 +211,7 @@ Two latent problems were uncovered while landing these and fixed in the same cha
 
 ---
 
-## ✅ Proposed Execution Order
+## Proposed Execution Order
 
 **Batches 1–3 are complete** (#1 partly, #2, #3, #13 partly, #21, #37–#42, #56, #63). Verified with
 `go vet`, `gofmt`, `go test -race ./...` and a 100.0% statement-coverage gate across all 17
@@ -239,7 +239,27 @@ packages. The remaining order is unchanged:
 10. **#23 – #36, #65, #70** — release, consumer-surface, and docs hygiene, folded into whichever PR
     touches each file.
 
-## 📌 Standing Rule
+## Documentation Conventions
+
+Emoji have been removed from `README.md` and every file under `docs/`. Two consequences worth
+recording, so a future change does not reintroduce the problem by accident:
+
+- **The CLI still prints status markers.** `pkg/report` and `pkg/recreation` emit leading symbols
+  for breaking changes, new features, warnings, recreation hazards, and policy violations. That is
+  product output, not documentation, so it was left alone. The two sample-output blocks in
+  `README.md` were previously verbatim copies of real output and are now not. Stripping the markers
+  from the product as well would be a breaking change for anyone grepping the output, and would
+  require regenerating the golden files under `test/golden/`.
+- **Typographic arrows are not emoji.** U+2190..U+21FF was deliberately excluded from the removal.
+  `variable → local → module` and `hashicorp/google → hashicorp/google-beta` carry meaning that a
+  bare removal would destroy.
+
+Mermaid diagrams are validated rather than eyeballed: each block is parsed with `mermaid.parse()`
+and rendered to SVG to confirm the labels lay out. A diagram can parse and still be wrong — the
+previous `\n` line breaks rendered literally — so both checks matter. All three diagrams in this
+repository pass.
+
+## Standing Rule
 
 100% statement coverage is necessary but **not sufficient** evidence of delivery. Any exported
 symbol that no production entry point can reach must either be wired up or removed in the same

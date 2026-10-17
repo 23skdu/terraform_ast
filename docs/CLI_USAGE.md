@@ -286,7 +286,7 @@ jobs:
 
 ---
 
-## 🎯 Production Real-World Use Cases
+## Production Real-World Use Cases
 
 ### Use Case 1: Pre-Upgrade Breaking Change Audit for Enterprise Wrappers
 Platform engineering teams maintain standardized Terraform wrapper modules (such as an internal GKE or EKS wrapper). Before bumping the upstream version pin, run `tfastdiff` to verify compatibility:

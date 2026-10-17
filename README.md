@@ -148,7 +148,7 @@ repos:
 > [!CAUTION]
 > **CANNOT SAFELY PIN: Wrapper has 5 breaking issue(s) with upstream v30.0.0. Resolve remediation steps before pinning.**
 
-### 🚨 Compatibility Issues (6)
+### Compatibility Issues (6)
 
 | Category | Target | Description | Confidence | Remediation |
 | :--- | :--- | :--- | :--- | :--- |
@@ -159,7 +159,7 @@ repos:
 | `TypeMismatch` | `ip_range_pods` | Wrapper variable 'ip_range_pods' type 'string' is incompatible with upstream expected type 'list(string)' | 8/10 | Update variable "ip_range_pods" in wrapper to type = list(string) |
 | `TypeMismatch` | `zones` | Wrapper variable 'zones' type 'list(string)' differs from upstream 'set(string)': Type converted from list to set (Terraform automatically coerces list to set, but ordering is not preserved) | 8/10 | Align variable "zones" with upstream type |
 
-### 💡 Available Upstream Features (1)
+### Available Upstream Features (1)
 
 | Category | Target | Description | Confidence |
 | :--- | :--- | :--- | :--- |

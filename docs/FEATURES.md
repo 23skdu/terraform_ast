@@ -4,7 +4,7 @@
 
 ---
 
-## 🎯 Executive Overview
+## Executive Overview
 
 Modern cloud platforms rely on shared Terraform and OpenTofu modules to provision critical infrastructure across Google Cloud (GCP), Amazon Web Services (AWS), and Microsoft Azure. However, upgrading upstream modules often introduces subtle breaking changes—such as removed variables, tightened type constraints, altered outputs, or attribute modifications that trigger catastrophic resource recreation (`ForceNew`).
 
@@ -12,18 +12,18 @@ Modern cloud platforms rely on shared Terraform and OpenTofu modules to provisio
 
 ```mermaid
 flowchart LR
-    A[Upstream Module\nv1.0.0 → v2.0.0] --> B[tfastdiff Engine\nAST Parser & EvalContext]
-    C[Local Wrappers &\nTerragrunt Inputs] --> B
-    D[Provider Schema JSON\nrequires_replace] --> B
-    B --> E[Semantic Diff & Verdict\nSAFE / BREAKING]
-    B --> F[Recreation Hazards\nForceNew Alerts]
-    B --> G[Automated Codemods\n--fix / moved {} Blocks]
-    B --> H[IDE LSP & CI Gates\nSARIF / OPA Rego Policies]
+    A["Upstream Module<br/>v1.0.0 to v2.0.0"] --> B["tfastdiff Engine<br/>AST Parser and EvalContext"]
+    C["Local Wrappers and<br/>Terragrunt Inputs"] --> B
+    D["Provider Schema JSON<br/>requires_replace"] --> B
+    B --> E["Semantic Diff and Verdict<br/>SAFE or BREAKING"]
+    B --> F["Recreation Hazards<br/>ForceNew Alerts"]
+    B --> G["Automated Codemods<br/>--fix and moved blocks"]
+    B --> H["IDE LSP and CI Gates<br/>SARIF and OPA Rego Policies"]
 ```
 
 ---
 
-## 🚀 Key Platform Features
+## Key Platform Features
 
 ### 1. Semantic AST Inspection & Deep Diff Engine (`pkg/ast`, `pkg/diff`)
 - **Direct AST Parsing**: Parses `.tf` and `.tf.json` files without requiring an initialized `.terraform` directory or live cloud credentials.
@@ -71,7 +71,7 @@ flowchart LR
 
 ---
 
-## 💼 Enterprise Use Cases
+## Enterprise Use Cases
 
 | # | Use Case | Target Audience | Problem Solved | Primary Value |
 | :-: | :--- | :--- | :--- | :--- |
@@ -85,7 +85,7 @@ flowchart LR
 
 ---
 
-## 📊 Technical Specifications & Verification Guarantees
+## Technical Specifications & Verification Guarantees
 
 - **Language & Runtime**: Pure Go (statically linked, zero external CGO dependencies).
 - **Test Coverage**: **100.0% statement coverage** across all packages enforced in CI.
