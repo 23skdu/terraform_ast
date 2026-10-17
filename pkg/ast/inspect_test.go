@@ -602,3 +602,324 @@ func isolateModuleCache(t *testing.T) {
 	resetModuleCache()
 	t.Cleanup(resetModuleCache)
 }
+
+// writeModule is a helper that lays out a small multi-block Terraform module on disk.
+func writeModule(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, content := range files {
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0600))
+	}
+	return dir
+}
+
+// TestInspectSource_UsesBufferOverDisk is the contract the language server depends on: the
+// in-memory text wins over the file on disk, because an editor holds unsaved changes.
+func TestInspectSource_UsesBufferOverDisk(t *testing.T) {
+	dir := writeModule(t, map[string]string{
+		"main.tf": "variable \"on_disk\" {\n  type = string\n}\n",
+	})
+	isolateModuleCache(t)
+
+	file := filepath.Join(dir, "main.tf")
+	info, err := InspectSource(dir, file, "variable \"in_buffer\" {\n  type = string\n}\n")
+	require.NoError(t, err)
+
+	require.Contains(t, info.Variables, "in_buffer", "the buffer content must be analysed")
+	assert.NotContains(t, info.Variables, "on_disk", "the disk content must be superseded")
+}
+
+// TestInspectSource_ReportsRealPaths covers the path rebasing: positions come from a temporary
+// staging copy, so they must be rewritten to the caller's real files or an editor cannot map a
+// diagnostic back to a line.
+func TestInspectSource_ReportsRealPaths(t *testing.T) {
+	dir := writeModule(t, map[string]string{
+		// A subdirectory proves subtrees are never staged: only top-level .tf files are
+		// module sources, so this file must not reach the analysis.
+		"modules/deep/main.tf": "variable \"nested\" {\n  type = string\n}\n",
+		"main.tf":              "variable \"disk_only\" {\n  type = string\n}\n",
+		// A sibling block type the rebase loop has to cover.
+		"checks.tf": "check \"health\" {\n  assert {\n    condition     = true\n    error_message = \"x\"\n  }\n}\n",
+		// The remaining position-bearing block kinds, so every rebase branch is exercised.
+		"imports.tf": "import {\n  to = aws_s3_bucket.primary\n  id = \"prod-bucket\"\n}\n",
+		"sealed.tf":  "encryption {\n  key_provider \"pbkdf2\" \"passphrase\" {\n    passphrase = \"test\"\n  }\n}\n",
+		"removed.tf": "removed {\n  from = a.b\n  lifecycle {\n    destroy = false\n  }\n}\n",
+		// A custom function block, matching the shape the parser already accepts.
+		"fn.tf": "function \"slug\" {\n  summary = \"Formats a name\"\n  return  = \"string\"\n}\n",
+	})
+	isolateModuleCache(t)
+
+	file := filepath.Join(dir, "main.tf")
+	info, err := InspectSource(dir, file, "variable \"buffered\" {\n  type = string\n}\n")
+	require.NoError(t, err)
+
+	assert.Equal(t, dir, info.Path, "Path must describe the real module, not the staging copy")
+
+	// Every recorded position must live inside the real directory and never in a temp dir.
+	assertFilename := func(what, filename string) {
+		t.Helper()
+		assert.True(t, filepath.IsAbs(filename) || filepath.Dir(filename) == dir,
+			"%s filename %q must be under %q", what, filename, dir)
+		assert.NotContains(t, filename, "tfastdiff_overlay",
+			"%s filename %q leaked the staging directory", what, filename)
+	}
+
+	for name, v := range info.Variables {
+		assertFilename("variable "+name, v.Pos.Filename)
+		assert.Equal(t, dir, filepath.Dir(v.Pos.Filename))
+	}
+	for name, cb := range info.CheckBlocks {
+		assertFilename("check "+name, cb.Pos.Filename)
+		assert.Equal(t, dir, filepath.Dir(cb.Pos.Filename))
+	}
+	for name, fn := range info.Functions {
+		assertFilename("function "+name, fn.Pos.Filename)
+		assert.Equal(t, dir, filepath.Dir(fn.Pos.Filename))
+	}
+	for _, rb := range info.RemovedBlocks {
+		assertFilename("removed", rb.Pos.Filename)
+		assert.Equal(t, dir, filepath.Dir(rb.Pos.Filename))
+	}
+	for _, ib := range info.ImportBlocks {
+		assertFilename("import", ib.Pos.Filename)
+		assert.Equal(t, dir, filepath.Dir(ib.Pos.Filename))
+	}
+	for _, eb := range info.EncryptionBlocks {
+		assertFilename("encryption", eb.Pos.Filename)
+		assert.Equal(t, dir, filepath.Dir(eb.Pos.Filename))
+	}
+}
+
+// TestInspectSource_KeepsSiblingFiles confirms a buffer replaces only its own file: the module
+// still has to be understood as a whole.
+func TestInspectSource_KeepsSiblingFiles(t *testing.T) {
+	dir := writeModule(t, map[string]string{
+		"main.tf":    "variable \"on_disk\" {\n  type = string\n}\n",
+		"outputs.tf": "output \"kept\" {\n  value = \"x\"\n}\n",
+		"calls.tf":   "module \"up\" {\n  source = \"./upstream\"\n}\n",
+	})
+	isolateModuleCache(t)
+
+	file := filepath.Join(dir, "main.tf")
+	info, err := InspectSource(dir, file, "variable \"added\" {\n  type = string\n}\n")
+	require.NoError(t, err)
+
+	assert.Contains(t, info.Variables, "added")
+	assert.Contains(t, info.Outputs, "kept", "a sibling file must still be inspected")
+	assert.Contains(t, info.ModuleCalls, "up", "a sibling file must still be inspected")
+}
+
+// TestInspectSource_HandlesJSONAndNonTerraformFiles covers the staging copy's file selection.
+func TestInspectSource_HandlesJSONAndNonTerraformFiles(t *testing.T) {
+	dir := writeModule(t, map[string]string{
+		"module.tf.json": `{"variable": {"from_json": {"type": "string"}}}`,
+		"README.md":      "not terraform",
+		"notes.txt":      "ignore me",
+	})
+	isolateModuleCache(t)
+
+	file := filepath.Join(dir, "module.tf.json")
+	info, err := InspectSource(dir, file, `{"variable": {"edited": {"type": "string"}}}`)
+	require.NoError(t, err)
+	assert.Contains(t, info.Variables, "edited")
+	assert.NotContains(t, info.Variables, "from_json")
+}
+
+// TestInspectSource_MissingDirectoryAndUnreadableSiblings covers the error and skip paths in the
+// staging copy.
+func TestInspectSource_MissingDirectoryAndUnreadableSiblings(t *testing.T) {
+	isolateModuleCache(t)
+
+	// A missing directory is reported, not silently ignored.
+	_, err := InspectSource("/non/existent/overlay/dir", "/non/existent/overlay/dir/main.tf", "x")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to access module path")
+
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+
+	// A module that can be stat'ed but not read must fail the whole inspection. Falling back to
+	// an empty staging copy would report every variable as removed.
+	unreadable := t.TempDir()
+	require.NoError(t, os.Chmod(unreadable, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o700) })
+
+	_, err = InspectSource(unreadable, filepath.Join(unreadable, "main.tf"), "variable \"a\" {\n  type = string\n}\n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to read module directory")
+}
+
+// TestInspectSource_SkipsUnreadableSibling covers an unreadable file that the overlay does not
+// replace: it is skipped so one unreadable file cannot break diagnostics for the whole module,
+// while the files that are readable are still analysed.
+func TestInspectSource_SkipsUnreadableSibling(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+	dir := writeModule(t, map[string]string{
+		"main.tf":   "variable \"a\" {\n  type = string\n}\n",
+		"secret.tf": "variable \"secret\" {\n  type = string\n}\n",
+		"module.tf": "variable \"b\" {\n  type = string\n}\n",
+	})
+	isolateModuleCache(t)
+
+	require.NoError(t, os.Chmod(filepath.Join(dir, "secret.tf"), 0o000))
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "secret.tf"), 0o600) })
+
+	file := filepath.Join(dir, "module.tf")
+	info, err := InspectSource(dir, file, "variable \"edited\" {\n  type = string\n}\n")
+	require.NoError(t, err)
+	assert.Contains(t, info.Variables, "edited")
+	assert.Contains(t, info.Variables, "a", "readable siblings are still analysed")
+	assert.NotContains(t, info.Variables, "secret")
+}
+
+// TestInspectSource_StagesUnreadableOverlaidFile covers the path where a file cannot be read from
+// disk but the overlay supplies its content: the caller's text is authoritative.
+func TestInspectSource_StagesUnreadableOverlaidFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+	dir := writeModule(t, map[string]string{"main.tf": "variable \"a\" {\n  type = string\n}\n"})
+	isolateModuleCache(t)
+
+	blocked := filepath.Join(dir, "blocked.tf")
+	require.NoError(t, os.WriteFile(blocked, []byte("variable \"old\" {\n  type = string\n}\n"), 0600))
+	require.NoError(t, os.Chmod(blocked, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o600) })
+
+	info, err := InspectSource(dir, blocked, "variable \"from_overlay\" {\n  type = string\n}\n")
+	require.NoError(t, err)
+	assert.Contains(t, info.Variables, "from_overlay")
+	assert.NotContains(t, info.Variables, "old")
+}
+
+// TestInspectSource_RejectsUnparsableBuffer confirms a broken buffer is an error, which is what
+// lets the language server fall back to the last good state instead of showing an error.
+func TestInspectSource_RejectsUnparsableBuffer(t *testing.T) {
+	dir := writeModule(t, map[string]string{"main.tf": "variable \"a\" {\n  type = string\n}\n"})
+	isolateModuleCache(t)
+
+	file := filepath.Join(dir, "main.tf")
+	_, err := InspectSource(dir, file, "variable \"a\" {\n  type = \n")
+	assert.Error(t, err)
+}
+
+// TestInspectSource_StagingFailureIsReported covers an unwritable staging destination.
+func TestInspectSource_StagingFailureIsReported(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+	dir := writeModule(t, map[string]string{"main.tf": "variable \"a\" {\n  type = string\n}\n"})
+	isolateModuleCache(t)
+
+	// Point TMPDIR at a read-only directory so MkdirTemp fails.
+	blocked := t.TempDir()
+	require.NoError(t, os.Chmod(blocked, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
+	t.Setenv("TMPDIR", blocked)
+
+	_, err := InspectSource(dir, filepath.Join(dir, "main.tf"), "variable \"b\" {\n  type = string\n}\n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to stage module overlay")
+}
+
+// TestInspectSource_StagingWriteFailureIsReported covers a staging directory that disappears
+// between creation and use, which makes the per-file write fail.
+func TestInspectSource_StagingWriteFailureIsReported(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+	isolateModuleCache(t)
+
+	dir := writeModule(t, map[string]string{
+		"main.tf":   "variable \"a\" {\n  type = string\n}\n",
+		"second.tf": "variable \"b\" {\n  type = string\n}\n",
+	})
+
+	// A staging root that is read-only after creation: MkdirTemp under it succeeds only if the
+	// parent allows it, so instead make the staged copy unwritable by removing write permission
+	// on the directory the temp file lands in.
+	root := t.TempDir()
+	t.Setenv("TMPDIR", root)
+	require.NoError(t, os.Chmod(root, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
+
+	_, err := InspectSource(dir, filepath.Join(dir, "main.tf"), "variable \"c\" {\n  type = string\n}\n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to stage module overlay")
+}
+
+// TestRebasePath covers the path rewrite directly, including the cases that must be left alone.
+func TestRebasePath(t *testing.T) {
+	from, to := "/tmp/staging", "/real/module"
+
+	assert.Equal(t, "/real/module/main.tf", rebasePath("/tmp/staging/main.tf", from, to))
+	assert.Equal(t, "/real/module/nested/main.tf", rebasePath("/tmp/staging/nested/main.tf", from, to))
+
+	// An empty filename has nothing to rebase.
+	assert.Equal(t, "", rebasePath("", from, to))
+
+	// A path outside the staging directory is left untouched rather than being forced in.
+	assert.Equal(t, "/elsewhere/main.tf", rebasePath("/elsewhere/main.tf", from, to))
+
+	// A relative "up and out" path is also left alone.
+	assert.Equal(t, "../sibling/main.tf", rebasePath("../sibling/main.tf", from, to))
+}
+
+// TestInspectSource_IgnoresNestedSubtree confirms the staging copy only takes top-level module
+// files. A nested module directory must not leak into the analysis of its parent.
+func TestInspectSource_IgnoresNestedSubtree(t *testing.T) {
+	dir := writeModule(t, map[string]string{
+		"main.tf":                 "variable \"top\" {\n  type = string\n}\n",
+		"modules/child/main.tf":   "variable \"child\" {\n  type = string\n}\n",
+		"modules/child/child2.tf": "variable \"child2\" {\n  type = string\n}\n",
+	})
+	isolateModuleCache(t)
+
+	file := filepath.Join(dir, "main.tf")
+	info, err := InspectSource(dir, file, "variable \"buffered\" {\n  type = string\n}\n")
+	require.NoError(t, err)
+
+	assert.Contains(t, info.Variables, "buffered")
+	assert.NotContains(t, info.Variables, "child", "a nested module is not part of its parent")
+	assert.NotContains(t, info.Variables, "child2")
+}
+
+// TestStageModuleFiles_ReadFailureIsReported covers the staging copy failing to enumerate the
+// module directory. Reported rather than ignored, since an unreadable module cannot be analysed.
+func TestStageModuleFiles_ReadFailureIsReported(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	err := stageModuleFiles(dir, t.TempDir(), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to read module directory")
+}
+
+// TestStageModuleFiles_WriteFailureIsReported covers a staging destination that rejects writes.
+// The file must not be skipped silently: a missing declaration would be analysed as if the module
+// never declared it.
+func TestStageModuleFiles_WriteFailureIsReported(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+	source := writeModule(t, map[string]string{
+		"main.tf": "variable \"a\" {\n  type = string\n}\n",
+	})
+
+	staging := t.TempDir()
+	require.NoError(t, os.Chmod(staging, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(staging, 0o700) })
+
+	err := stageModuleFiles(source, staging, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to stage main.tf")
+}

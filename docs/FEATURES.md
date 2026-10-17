@@ -58,10 +58,10 @@ flowchart LR
 - **Open Policy Agent (OPA) Integration**: Evaluates customizable Rego policies (`deny[msg]`, `violation[msg]`) against diff and blast radius reports.
 - **Architectural Rules**: Enforce policies such as blocking major version jumps in production environments, requiring review if blast radius exceeds 5 root modules, or disallowing breaking changes in PCI-DSS compliant repositories.
 
-### 7. Real-Time IDE Language Server Protocol Daemon (`pkg/lsp`)
-- **Sub-50ms Inline Diagnostics**: Runs in the background (`tfastdiff daemon` / `--lsp`) implementing the JSON-RPC 2.0 LSP protocol for VS Code, Neovim, and JetBrains.
-- **Instant Developer Feedback**: Triggers on `textDocument/didSave` to display inline squiggles for breaking changes.
-- **Quick-Fix Code Actions**: Allows developers to apply codemod fixes directly from their editor.
+### 7. IDE Language Server Protocol Daemon (`pkg/lsp`)
+- **Editor Diagnostics**: Runs over stdio (`tfastdiff daemon` / `--lsp`) implementing JSON-RPC 2.0 for VS Code, Neovim, and JetBrains. Diagnostics are published on open, change, and save, and are computed from the in-editor buffer so they reflect unsaved edits.
+- **Quick-Fix Code Actions**: `textDocument/codeAction` and `workspace/executeCommand` write `moved {}` blocks and inject missing required module inputs. Both commands are registered in `executeCommandProvider`, so a client can actually run them.
+- **Protocol Correctness**: Notifications are never answered, the `initialize`/`shutdown`/`exit` lifecycle is honoured, and message framing rejects an out-of-range `Content-Length` instead of allocating from it. Currently reports deprecated variables; editor-side breaking-change analysis is roadmap item #43.
 
 ### 8. Enterprise Supply Chain Security & SLSA Level 3 (`.github/workflows`)
 - **Hermetic SLSA Level 3 Provenance**: Automated cryptographic build attestations via GitHub Actions builders.
@@ -80,7 +80,7 @@ flowchart LR
 | **3** | **Automated Refactoring & Migration PRs** | Infrastructure Engineers | Manually updating hundreds of module call sites across repositories. | In-place automated fix (`--fix`) and `moved {}` block generation. |
 | **4** | **Infrastructure Recreation Prevention** | Cloud Security & Operations | Accidental cluster or database drops caused by modifying immutable attributes. | Early detection of `ForceNew` hazards before running `terraform apply`. |
 | **5** | **Multi-Version Strategic Upgrade Planning** | Engineering Leadership | Migrating long-unmaintained infrastructure forward across multiple major versions. | Identifies optimal safe intermediate versions and upgrade paths. |
-| **6** | **Real-Time IDE Feedback Loop** | Terraform Developers | Discovering module compatibility errors late in the CI cycle. | Sub-50ms inline diagnostics and quick-fix actions inside the editor. |
+| **6** | **IDE Feedback Loop** | Terraform Developers | Discovering module compatibility errors late in the CI cycle. | Editor diagnostics from the in-editor buffer, plus quick-fix actions that write `moved {}` blocks and inject missing inputs. |
 | **7** | **Multi-Cloud Upstream Drift Monitoring** | Enterprise Architecture | Public registry modules silently releasing breaking changes or deprecations. | Daily automated matrix scans across GCP, AWS, and Azure. |
 
 ---

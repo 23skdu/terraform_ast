@@ -409,8 +409,8 @@ tfastdiff \
 
 ---
 
-### Use Case 7: IDE Language Server Protocol (LSP) Real-Time Feedback
-Launch the background Language Server Protocol (LSP) daemon to provide sub-50ms inline diagnostics and quick-fix code actions directly inside VS Code, Neovim, or JetBrains IDEs:
+### Use Case 7: IDE Language Server Protocol (LSP) Feedback
+Launch the Language Server Protocol (LSP) daemon to get inline diagnostics and runnable quick-fix code actions directly inside VS Code, Neovim, or JetBrains IDEs:
 
 ```bash
 # Launch LSP daemon over standard I/O (stdio)
@@ -420,9 +420,15 @@ tfastdiff daemon
 tfastdiff --lsp
 ```
 **Outcome**:
-- Listens for JSON-RPC 2.0 messages from LSP client plugins.
-- On `textDocument/didSave` of any `.tf` file, computes AST diffs and surfaces inline breaking change warnings.
-- Offers automated quick-fix code actions (`textDocument/codeAction`) to safely strip removed arguments or synthesize `moved {}` blocks.
+- Speaks JSON-RPC 2.0 over stdio, honouring `initialize`, `shutdown`, and `exit`.
+- Publishes diagnostics on `textDocument/didOpen`, `didChange`, and `didSave`. Under full document
+  sync the analysis uses the in-editor buffer, so a finding reflects what you are looking at rather
+  than the last saved file.
+- Offers quick fixes through `textDocument/codeAction` and `workspace/executeCommand`: write
+  `moved {}` blocks, and inject missing required module inputs. Both take a single JSON object
+  argument and mutate the workspace only when explicitly invoked.
+- Reports diagnostics for deprecated module variables. Breaking-change and recreation analysis in
+  the editor is roadmap item #43, not yet implemented.
 
 ---
 

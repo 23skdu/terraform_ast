@@ -12,8 +12,144 @@ import (
 	"github.com/hashicorp/terraform-config-inspect/tfconfig"
 )
 
+// InspectSource behaves like Inspect but parses an in-memory copy of one file instead of
+// reading it from disk.
+//
+// An editor holds unsaved changes, so analysing the on-disk file describes a document the user is
+// no longer looking at. Every sibling .tf file still comes from disk, because the language server
+// is only handed the text of the document that changed.
+//
+// fileName must be the same path the file has on disk, so reported positions line up with the
+// editor. The returned ModuleInfo reports the real directory in Path, and every source position
+// is rewritten to point back at the real files rather than the temporary copies.
+func InspectSource(dir, fileName, content string) (*ModuleInfo, error) {
+	return inspectDir(dir, map[string][]byte{filepath.Clean(fileName): []byte(content)})
+}
+
+// inspectOverlay copies a module into a temporary directory with the overlay applied, inspects the
+// copy, and rewrites the result so it refers to the real paths.
+//
+// tfconfig.LoadModule only accepts a directory, and the module cache is keyed by directory and
+// content fingerprint, so an unsaved buffer cannot be represented by either. Copying is the only
+// faithful option; it runs per keystroke, so only the .tf and .tf.json files are copied.
+func inspectOverlay(dir string, overlay map[string][]byte) (*ModuleInfo, error) {
+	staging, err := os.MkdirTemp("", "tfastdiff_overlay_*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to stage module overlay: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(staging) }()
+
+	if err := stageModuleFiles(dir, staging, overlay); err != nil {
+		return nil, err
+	}
+
+	info, err := Inspect(staging)
+	if err != nil {
+		return nil, err
+	}
+	rebaseModulePaths(info, staging, dir)
+	return info, nil
+}
+
+// stageModuleFiles copies the top-level .tf and .tf.json files of dir into staging, replacing the
+// content of any file named in the overlay.
+//
+// Only top-level files are copied: a nested directory is a child module, not part of this one.
+// A file that cannot be read is skipped unless the overlay supplies its content, and a file that
+// cannot be written is an error: silently skipping it would analyse a module that is missing
+// declarations, which is the same class of partial result this overlay exists to avoid.
+func stageModuleFiles(dir, staging string, overlay map[string][]byte) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("failed to read module directory %s: %w", dir, err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".tf") && !strings.HasSuffix(name, ".tf.json") {
+			continue
+		}
+		source := filepath.Clean(filepath.Join(dir, name))
+		// #nosec G304 -- source is a directory entry read via os.ReadDir
+		data, readErr := os.ReadFile(source)
+		replacement, replaced := overlay[source]
+		if readErr != nil {
+			if !replaced {
+				continue
+			}
+			// The caller's content is authoritative for a file that cannot be read.
+			data = replacement
+		} else if replaced {
+			data = replacement
+		}
+		// #nosec G306 -- staging directory is private to this process
+		if writeErr := os.WriteFile(filepath.Join(staging, name), data, 0o600); writeErr != nil {
+			return fmt.Errorf("failed to stage %s: %w", name, writeErr)
+		}
+	}
+	return nil
+}
+
+// rebaseModulePaths rewrites every recorded source position from the staging directory back to the
+// real module directory, so diagnostics point at the user's files.
+//
+// The map and slice forms below assign by key and index respectively. Ranging over values and
+// mutating the copy would silently discard every position held in a slice.
+func rebaseModulePaths(info *ModuleInfo, from, to string) {
+	for name, v := range info.Variables {
+		v.Pos.Filename = rebasePath(v.Pos.Filename, from, to)
+		info.Variables[name] = v
+	}
+	for name, o := range info.Outputs {
+		o.Pos.Filename = rebasePath(o.Pos.Filename, from, to)
+		info.Outputs[name] = o
+	}
+	for name, m := range info.ModuleCalls {
+		m.Pos.Filename = rebasePath(m.Pos.Filename, from, to)
+		info.ModuleCalls[name] = m
+	}
+	for i := range info.RemovedBlocks {
+		info.RemovedBlocks[i].Pos.Filename = rebasePath(info.RemovedBlocks[i].Pos.Filename, from, to)
+	}
+	for name, cb := range info.CheckBlocks {
+		cb.Pos.Filename = rebasePath(cb.Pos.Filename, from, to)
+		info.CheckBlocks[name] = cb
+	}
+	for i := range info.ImportBlocks {
+		info.ImportBlocks[i].Pos.Filename = rebasePath(info.ImportBlocks[i].Pos.Filename, from, to)
+	}
+	for name, fn := range info.Functions {
+		fn.Pos.Filename = rebasePath(fn.Pos.Filename, from, to)
+		info.Functions[name] = fn
+	}
+	for i := range info.EncryptionBlocks {
+		info.EncryptionBlocks[i].Pos.Filename = rebasePath(info.EncryptionBlocks[i].Pos.Filename, from, to)
+	}
+	info.Path = to
+}
+
+func rebasePath(filename, from, to string) string {
+	if filename == "" {
+		return filename
+	}
+	rel, err := filepath.Rel(from, filename)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return filename
+	}
+	return filepath.Join(to, rel)
+}
+
 // Inspect parses and extracts the normalized AST for a Terraform module at the given directory.
 func Inspect(dir string) (info *ModuleInfo, err error) {
+	return inspectDir(dir, nil)
+}
+
+// inspectDir is the shared body of Inspect and InspectSource. overlay, when non-nil, replaces the
+// on-disk content of the files it names.
+func inspectDir(dir string, overlay map[string][]byte) (info *ModuleInfo, err error) {
 	defer recoverParseError(dir, &err)
 
 	fi, err := os.Stat(dir)
@@ -22,6 +158,10 @@ func Inspect(dir string) (info *ModuleInfo, err error) {
 	}
 	if !fi.IsDir() {
 		return nil, fmt.Errorf("module path %s is not a directory", dir)
+	}
+
+	if len(overlay) > 0 {
+		return inspectOverlay(dir, overlay)
 	}
 
 	// The directory has already been stat'ed successfully, so cleaning the path is enough to key
