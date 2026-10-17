@@ -494,3 +494,76 @@ func TestCompare_ModernBlocksAndSoftRemovals(t *testing.T) {
 	assert.True(t, categories["FunctionAdded"])
 	assert.True(t, categories["EncryptionConfigured"])
 }
+
+// TestCompareModernBlocks_UnchangedBlocksAreNotNewFeatures is the regression test for the
+// false positive where every import {} and encryption {} block in the new module was reported
+// as a new feature without ever being compared against the old module.
+func TestCompareModernBlocks_UnchangedBlocksAreNotNewFeatures(t *testing.T) {
+	build := func() *ast.ModuleInfo {
+		return &ast.ModuleInfo{
+			Path:             "module",
+			ImportBlocks:     []ast.ImportBlockDef{{To: "google_compute_network.vpc", ID: "net-1"}},
+			EncryptionBlocks: []ast.EncryptionBlockDef{{KeyProvider: "pbkdf2"}},
+			CheckBlocks:      map[string]ast.CheckBlockDef{"health": {Name: "health"}},
+			Functions:        map[string]ast.FunctionDef{"slug": {Name: "slug"}},
+			Variables:        map[string]ast.VariableDef{},
+			Outputs:          map[string]ast.OutputDef{},
+		}
+	}
+
+	report := Compare(build(), build(), "v1.0.0", "v1.1.0")
+	assert.Empty(t, report.NewFeatures,
+		"identical import/encryption/check/function blocks must not be reported as new features")
+
+	// A changed import id on an already-imported address is still not a new capability.
+	oldMod := build()
+	newMod := build()
+	newMod.ImportBlocks[0].ID = "net-2"
+	assert.Empty(t, Compare(oldMod, newMod, "v1.0.0", "v1.1.0").NewFeatures,
+		"re-identifying an already-imported address must not be reported as a new feature")
+}
+
+// TestCompareModernBlocks_NewBlocksAreDetected confirms the fix above did not disable detection.
+func TestCompareModernBlocks_NewBlocksAreDetected(t *testing.T) {
+	empty := &ast.ModuleInfo{
+		Path:        "module",
+		Variables:   map[string]ast.VariableDef{},
+		Outputs:     map[string]ast.OutputDef{},
+		CheckBlocks: map[string]ast.CheckBlockDef{},
+		Functions:   map[string]ast.FunctionDef{},
+	}
+	newMod := &ast.ModuleInfo{
+		Path:             "module",
+		Variables:        map[string]ast.VariableDef{},
+		Outputs:          map[string]ast.OutputDef{},
+		ImportBlocks:     []ast.ImportBlockDef{{To: "aws_instance.web", ID: "i-1"}},
+		EncryptionBlocks: []ast.EncryptionBlockDef{{KeyProvider: "aes_gcm"}},
+		CheckBlocks:      map[string]ast.CheckBlockDef{"healthy": {Name: "healthy"}},
+		Functions:        map[string]ast.FunctionDef{"slugify": {Name: "slugify"}},
+	}
+
+	categories := map[string]bool{}
+	for _, nf := range Compare(empty, newMod, "v1.0.0", "v1.1.0").NewFeatures {
+		categories[nf.Category] = true
+	}
+	for _, want := range []string{"ImportBlockAdded", "EncryptionConfigured", "CheckBlockAdded", "FunctionAdded"} {
+		assert.True(t, categories[want], "expected a newly declared %s to be reported", want)
+	}
+}
+
+// TestCompareModernBlocks_EncryptionBackendSwap covers swapping the encryption backend, which
+// is an operator-visible configuration change even though a block was already present.
+func TestCompareModernBlocks_EncryptionBackendSwap(t *testing.T) {
+	oldMod := &ast.ModuleInfo{
+		Path: "module", Variables: map[string]ast.VariableDef{}, Outputs: map[string]ast.OutputDef{},
+		EncryptionBlocks: []ast.EncryptionBlockDef{{KeyProvider: "pbkdf2"}},
+	}
+	newMod := &ast.ModuleInfo{
+		Path: "module", Variables: map[string]ast.VariableDef{}, Outputs: map[string]ast.OutputDef{},
+		EncryptionBlocks: []ast.EncryptionBlockDef{{KeyProvider: "aes_gcm"}},
+	}
+	report := Compare(oldMod, newMod, "v1.0.0", "v1.1.0")
+	require.Len(t, report.NewFeatures, 1)
+	assert.Equal(t, "EncryptionConfigured", report.NewFeatures[0].Category)
+	assert.Equal(t, "aes_gcm", report.NewFeatures[0].Name)
+}

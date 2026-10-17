@@ -193,3 +193,122 @@ func TestAnalyzeWrapper_EmptyVersionKeepsRawPin(t *testing.T) {
 	report := AnalyzeWrapper(&ast.ModuleInfo{}, &ast.ModuleInfo{}, nil, "latest", "")
 	assert.Equal(t, `version = "latest"`, report.RecommendedPin)
 }
+
+// TestAnalyzeWrapper_UpstreamBreakingChangesBlockThePin is the regression test for the false
+// negative where the wrapper verdict ignored diff.UpstreamDiff entirely: a provider source
+// change is SeverityBreaking, yet the wrapper reported SAFE_TO_PIN and --exit-code returned 0.
+func TestAnalyzeWrapper_UpstreamBreakingChangesBlockThePin(t *testing.T) {
+	wrapperMod := &ast.ModuleInfo{
+		Path: "/path/to/wrapper",
+		ModuleCalls: map[string]ast.ModuleCallDef{
+			"gke": {Name: "gke", Source: "./upstream", PassedInputs: []string{"project_id"}},
+		},
+		Variables: map[string]ast.VariableDef{},
+		Outputs:   map[string]ast.OutputDef{},
+	}
+	// The wrapper is perfectly consistent: it forwards project_id, which is still required.
+	target := &ast.ModuleInfo{
+		Variables: map[string]ast.VariableDef{
+			"project_id": {Name: "project_id", Type: "string", Required: true},
+		},
+		Outputs: map[string]ast.OutputDef{},
+		RequiredProviders: map[string]ast.ProviderRequirement{
+			"google": {Name: "google", Source: "hashicorp/google-beta"},
+		},
+	}
+	pinned := &ast.ModuleInfo{
+		Variables: map[string]ast.VariableDef{
+			"project_id": {Name: "project_id", Type: "string", Required: true},
+		},
+		Outputs: map[string]ast.OutputDef{},
+		RequiredProviders: map[string]ast.ProviderRequirement{
+			"google": {Name: "google", Source: "hashicorp/google"},
+		},
+	}
+
+	report := AnalyzeWrapper(wrapperMod, target, pinned, "v2.0.0", "v1.0.0")
+
+	// The wrapper side is clean...
+	require.Zero(t, report.TotalBreaking, "precondition: the wrapper itself has no breaking issues")
+	require.NotNil(t, report.UpstreamDiff)
+	assert.Equal(t, 1, report.UpstreamDiff.TotalBreaking)
+
+	// ...but the upstream transition is not, so the pin must be refused.
+	assert.False(t, report.CanSafelyUpdate, "an upstream breaking change must block the pin")
+	assert.Equal(t, "UPSTREAM_BREAKING_CHANGES_DETECTED", report.Verdict)
+	assert.Contains(t, report.Summary, "1 upstream breaking change(s)")
+	assert.Equal(t, "v1.0.0", report.SafePinVersion,
+		"the currently pinned version is the only verified safe target")
+	assert.NotEmpty(t, report.RemediationSteps,
+		"a wrapper-clean upstream failure still owes the operator actionable remediation")
+}
+
+// TestAnalyzeWrapper_UpstreamWarningsOnlyStillPins confirms the new branch only fires on
+// breaking upstream findings, not on a mere upstream warning.
+func TestAnalyzeWrapper_UpstreamWarningsOnlyStillPins(t *testing.T) {
+	wrapperMod := &ast.ModuleInfo{
+		Path: "/path/to/wrapper",
+		ModuleCalls: map[string]ast.ModuleCallDef{
+			"gke": {Name: "gke", Source: "./upstream", PassedInputs: []string{"project_id"}},
+		},
+		Variables: map[string]ast.VariableDef{},
+		Outputs:   map[string]ast.OutputDef{},
+	}
+	target := &ast.ModuleInfo{
+		Variables: map[string]ast.VariableDef{
+			"project_id": {Name: "project_id", Type: "string", Required: true},
+		},
+		Outputs:           map[string]ast.OutputDef{},
+		RequiredCore:      []string{">= 1.9.0"},
+		RequiredProviders: map[string]ast.ProviderRequirement{},
+	}
+	pinned := &ast.ModuleInfo{
+		Variables: map[string]ast.VariableDef{
+			"project_id": {Name: "project_id", Type: "string", Required: true},
+		},
+		Outputs:           map[string]ast.OutputDef{},
+		RequiredCore:      []string{">= 1.5.0"},
+		RequiredProviders: map[string]ast.ProviderRequirement{},
+	}
+
+	report := AnalyzeWrapper(wrapperMod, target, pinned, "v2.0.0", "v1.0.0")
+	require.NotNil(t, report.UpstreamDiff)
+	assert.True(t, report.UpstreamDiff.CanSafelyUpdate, "precondition: only warnings upstream")
+	assert.True(t, report.CanSafelyUpdate)
+	assert.Equal(t, "SAFE_TO_PIN", report.Verdict)
+}
+
+// TestAnalyzeWrapper_UpstreamBreakWithoutPinnedVersionNeedsNoSafePin covers the upstream-driven
+// branch when no --old-version was supplied, so no verified safe pin exists.
+func TestAnalyzeWrapper_UpstreamBreakWithoutPinnedVersionNeedsNoSafePin(t *testing.T) {
+	wrapperMod := &ast.ModuleInfo{
+		Path:        "/path/to/wrapper",
+		ModuleCalls: map[string]ast.ModuleCallDef{"gke": {Name: "gke", PassedInputs: []string{"project_id"}}},
+		Variables:   map[string]ast.VariableDef{},
+		Outputs:     map[string]ast.OutputDef{},
+	}
+	target := &ast.ModuleInfo{
+		Variables: map[string]ast.VariableDef{
+			"project_id": {Name: "project_id", Type: "string", Required: true},
+		},
+		Outputs: map[string]ast.OutputDef{},
+		RequiredProviders: map[string]ast.ProviderRequirement{
+			"google": {Name: "google", Source: "hashicorp/google-beta"},
+		},
+	}
+	pinned := &ast.ModuleInfo{
+		Variables: map[string]ast.VariableDef{
+			"project_id": {Name: "project_id", Type: "string", Required: true},
+		},
+		Outputs: map[string]ast.OutputDef{},
+		RequiredProviders: map[string]ast.ProviderRequirement{
+			"google": {Name: "google", Source: "hashicorp/google"},
+		},
+	}
+
+	report := AnalyzeWrapper(wrapperMod, target, pinned, "v2.0.0", "")
+	assert.False(t, report.CanSafelyUpdate)
+	assert.Equal(t, "UPSTREAM_BREAKING_CHANGES_DETECTED", report.Verdict)
+	assert.Empty(t, report.SafePinVersion)
+	assert.Contains(t, report.SafePinRationale, "No current pin was supplied")
+}

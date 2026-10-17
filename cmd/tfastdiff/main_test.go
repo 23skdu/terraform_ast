@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -55,6 +56,31 @@ func createTestTFRepo(t *testing.T, tag string, tfContent string) string {
 		require.NoError(t, err)
 	}
 
+	return dir
+}
+
+// createTestTFRepoWithTags builds one repository carrying several tagged releases, which is the
+// realistic shape of an --old-version/--new-version pair. Asking a repository for a tag it does
+// not have used to be swallowed by the CLI, so a vacuous pinned diff passed as a real one.
+func createTestTFRepoWithTags(t *testing.T, releases []struct{ tag, content string }) string {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+	w, err := repo.Worktree()
+	require.NoError(t, err)
+
+	mainTF := filepath.Join(dir, "main.tf")
+	sig := &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()}
+
+	for _, release := range releases {
+		require.NoError(t, os.WriteFile(mainTF, []byte(release.content), 0644))
+		_, err = w.Add("main.tf")
+		require.NoError(t, err)
+		commit, err := w.Commit("release "+release.tag, &git.CommitOptions{Author: sig, Committer: sig})
+		require.NoError(t, err)
+		_, err = repo.CreateTag(release.tag, commit, nil)
+		require.NoError(t, err)
+	}
 	return dir
 }
 
@@ -386,14 +412,19 @@ func TestExecute_GitErrorBranches(t *testing.T) {
 	assert.Equal(t, 1, code)
 	assert.Contains(t, stderr.String(), "Error writing output")
 
-	// 6. Invalid oldVersion in wrapper mode (failed ExtractVersionToDir)
+	// 6. Invalid oldVersion in wrapper mode now fails loudly: silently continuing would drop
+	// the upstream-to-upstream diff and therefore downgrade detection and the safe-pin
+	// recommendation, while still reporting the target as safe to pin.
 	stderr.Reset()
+	stdout.Reset()
 	code = Execute([]string{
 		"--wrapper", wrapperDir,
 		"--upstream", repo,
 		"--old-version", "invalid-old-ref",
 	}, &stdout, &stderr)
-	assert.Equal(t, 0, code)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error checking out pinned upstream version invalid-old-ref")
+	assert.Empty(t, stdout.String())
 
 	// 7. Test mkdirTemp failure in wrapper and compare modes
 	origMkdir := mkdirTemp
@@ -428,18 +459,6 @@ func TestExecute_GitErrorBranches(t *testing.T) {
 	}, &stdout, &stderr)
 	assert.Equal(t, 1, code)
 	assert.Contains(t, stderr.String(), "Error checking out new version")
-
-	// A failing pinned-version lookup degrades gracefully instead of aborting the audit.
-	stderr.Reset()
-	stdout.Reset()
-	code = Execute([]string{
-		"--wrapper", wrapperDir,
-		"--upstream", repo,
-		"--old-version", "v1.0.0",
-	}, &stdout, &stderr)
-	assert.Equal(t, 0, code)
-	assert.Empty(t, stderr.String())
-	assert.Contains(t, stdout.String(), "TERRAFORM WRAPPER COMPATIBILITY & PIN AUDIT")
 }
 
 func TestHelpers(t *testing.T) {
@@ -597,6 +616,10 @@ func setupMockRegistryServer(t *testing.T) (*httptest.Server, func()) {
 	newRegistryClient = func() *registry.Client {
 		c := registry.NewClient(server.Client())
 		c.BaseURL = server.URL
+		// These servers answer 500, which is retryable. Without an explicit budget the client
+		// retries against the production 2 minute default, which made these tests take 303s and
+		// 92s respectively and pushed the package close to Go's 600s timeout in CI.
+		c.RetryMaxElapsedTime = 20 * time.Millisecond
 		return c
 	}
 
@@ -676,6 +699,10 @@ func TestExecute_RegistryDownloadErrors(t *testing.T) {
 	newRegistryClient = func() *registry.Client {
 		c := registry.NewClient(server.Client())
 		c.BaseURL = server.URL
+		// These servers answer 500, which is retryable. Without an explicit budget the client
+		// retries against the production 2 minute default, which made these tests take 303s and
+		// 92s respectively and pushed the package close to Go's 600s timeout in CI.
+		c.RetryMaxElapsedTime = 20 * time.Millisecond
 		return c
 	}
 	defer func() { newRegistryClient = origClient }()
@@ -687,13 +714,14 @@ module "m" { source = "hashicorp/consul/aws" }
 
 	var stdout, stderr bytes.Buffer
 
-	// Get latest version fails in wrapper mode
+	// Get latest version fails in wrapper mode. The lookup error is now reported in its own
+	// right: it used to be discarded, so the CLI went on to download an unspecified version.
 	code := Execute([]string{
 		"--wrapper", wrapperDir,
 		"--upstream", "hashicorp/consul/aws",
 	}, &stdout, &stderr)
 	assert.Equal(t, 1, code)
-	assert.Contains(t, stderr.String(), "Error checking out target upstream version")
+	assert.Contains(t, stderr.String(), "Error resolving the latest version of hashicorp/consul/aws")
 
 	// Download fails with explicit version in wrapper mode
 	stdout.Reset()
@@ -754,15 +782,19 @@ func TestExecute_CompareMode_HazardsMarkdown(t *testing.T) {
 	oldDir := t.TempDir()
 	newDir := t.TempDir()
 
+	// A provider-agnostic attribute, because comparing two local directories gives the analyzer no
+	// way to tell which cloud the module manages. `ip_range_services` is a GKE-only secondary
+	// CIDR attribute and is deliberately not asserted without a provider signal; supply
+	// --provider-schema when that attribution is needed.
 	require.NoError(t, os.WriteFile(filepath.Join(oldDir, "main.tf"), []byte(`
-variable "ip_range_services" {
+variable "location" {
   type    = string
-  default = "10.0.0.0/20"
+  default = "us-central1"
 }
 `), 0600))
 
 	require.NoError(t, os.WriteFile(filepath.Join(newDir, "main.tf"), []byte(`
-variable "ip_range_services" {
+variable "location" {
   type = list(string)
 }
 `), 0600))
@@ -776,6 +808,8 @@ variable "ip_range_services" {
 	}, &stdout, &stderr)
 	assert.Equal(t, 0, code)
 	assert.Contains(t, stdout.String(), "State Destruction & Recreation Hazards")
+	assert.Contains(t, stdout.String(), "provider-agnostic resource",
+		"an unattributed hazard must say so rather than name an invented resource type")
 }
 
 func TestExecute_UpgradePathAndPolicy(t *testing.T) {
@@ -864,6 +898,10 @@ func TestExecute_CompareMode_NewDownloadFailure(t *testing.T) {
 	newRegistryClient = func() *registry.Client {
 		c := registry.NewClient(server.Client())
 		c.BaseURL = server.URL
+		// These servers answer 500, which is retryable. Without an explicit budget the client
+		// retries against the production 2 minute default, which made these tests take 303s and
+		// 92s respectively and pushed the package close to Go's 600s timeout in CI.
+		c.RetryMaxElapsedTime = 20 * time.Millisecond
 		return c
 	}
 	defer func() { newRegistryClient = origClient }()
@@ -1112,13 +1150,19 @@ func TestExecute_ModeValidationErrors(t *testing.T) {
 }
 
 func TestExecute_WrapperPolicyCombinesUpstreamDiff(t *testing.T) {
-	pinned := createTestTFRepo(t, "v1.0.0", `
+	// One repository carrying both releases, so --old-version resolves to a real module.
+	// Previously this built two repositories and asked the v2.0.0 repo for a v1.0.0 tag; the
+	// resulting "reference not found" was swallowed, the pinned diff was vacuously identical to
+	// the target, and the assertion below passed without ever exercising a real transition.
+	target := createTestTFRepoWithTags(t, []struct{ tag, content string }{
+		{"v1.0.0", `
 variable "cluster_name" { type = string }
-`)
-	target := createTestTFRepo(t, "v2.0.0", `
+`},
+		{"v2.0.0", `
 variable "cluster_name" { type = list(string) }
 variable "region"         { type = string }
-`)
+`},
+	})
 
 	wrapperDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
@@ -1163,7 +1207,29 @@ module "gke" {
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &noDiff))
 	assert.NotContains(t, noDiff, "upstream_diff")
 	assert.NotContains(t, noDiff, "policy_violations")
-	_ = pinned
+}
+
+// TestExecute_PinnedVersionMustResolve covers the pinned lookup failing loudly. It previously
+// degraded silently, which left the upstream-to-upstream diff unset and so disabled downgrade
+// detection and the safe-pin recommendation while still reporting the target as safe to pin.
+func TestExecute_PinnedVersionMustResolve(t *testing.T) {
+	target := createTestTFRepo(t, "v2.0.0", `variable "name" { type = string }`)
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"),
+		[]byte(`module "gke" { source = "`+target+`" }`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", target,
+		"--old-version", "v9.9.9-does-not-exist",
+		"--new-version", "v2.0.0",
+	}, &stdout, &stderr)
+
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error checking out pinned upstream version v9.9.9-does-not-exist")
+	assert.Empty(t, stdout.String(), "no report may be emitted when an analysis was skipped")
 }
 
 func TestExecute_FixPreviewOutcomes(t *testing.T) {
@@ -1367,7 +1433,7 @@ func TestInspectModuleVersion(t *testing.T) {
 	// Registry sources download into a temporary directory.
 	_, cleanup := setupMockRegistryServer(t)
 	defer cleanup()
-	info, err := inspectModuleVersion("hashicorp/consul/aws", "1.0.0")
+	info, err := inspectModuleVersion(context.Background(), 2*time.Minute, "hashicorp/consul/aws", "1.0.0")
 	require.NoError(t, err)
 	require.Contains(t, info.Variables, "cluster_name")
 
@@ -1377,27 +1443,27 @@ func TestInspectModuleVersion(t *testing.T) {
 	mkdirTemp = func(dir, pattern string) (string, error) {
 		return "", assert.AnError
 	}
-	_, err = inspectModuleVersion("hashicorp/consul/aws", "1.0.0")
+	_, err = inspectModuleVersion(context.Background(), 2*time.Minute, "hashicorp/consul/aws", "1.0.0")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "create temporary module directory")
 	mkdirTemp = origMkdir
 
 	// Git URLs and repositories are extracted through the shared cache.
-	info, err = inspectModuleVersion(repoDir, "v1.0.0")
+	info, err = inspectModuleVersion(context.Background(), 2*time.Minute, repoDir, "v1.0.0")
 	require.NoError(t, err)
 	require.Contains(t, info.Variables, "name")
 
-	info, err = inspectModuleVersion("file://"+repoDir, "v1.0.0")
+	info, err = inspectModuleVersion(context.Background(), 2*time.Minute, "file://"+repoDir, "v1.0.0")
 	require.NoError(t, err)
 	require.Contains(t, info.Variables, "name")
 
 	// An unknown ref fails.
-	_, err = inspectModuleVersion(repoDir, "v9.9.9")
+	_, err = inspectModuleVersion(context.Background(), 2*time.Minute, repoDir, "v9.9.9")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "checkout repository version")
 
 	// Non-versioned local directories cannot provide intermediate releases.
-	_, err = inspectModuleVersion(t.TempDir(), "v1.0.0")
+	_, err = inspectModuleVersion(context.Background(), 2*time.Minute, t.TempDir(), "v1.0.0")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "non-versioned local directory")
 }
@@ -1491,7 +1557,7 @@ func TestInspectModuleVersion_RegistryDownloadFailure(t *testing.T) {
 	}
 	defer func() { newRegistryClient = origClient }()
 
-	_, err := inspectModuleVersion("hashicorp/consul/aws", "1.0.0")
+	_, err := inspectModuleVersion(context.Background(), 2*time.Minute, "hashicorp/consul/aws", "1.0.0")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "download registry module hashicorp/consul/aws@1.0.0")
 }
@@ -1655,4 +1721,301 @@ func TestExecute_LSPDaemon(t *testing.T) {
 	stderr.Reset()
 	codeFlag := Execute([]string{"--lsp"}, &stdout, &stderr)
 	assert.Equal(t, 0, codeFlag)
+}
+
+// TestExecute_InvalidFormatIsRejected covers roadmap #42. An unrecognised --format previously
+// fell through the renderer's default branch and silently produced text, so a caller asking for
+// a machine-readable document received prose.
+func TestExecute_InvalidFormatIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+
+	for _, format := range []string{"yaml", "json5", "TEXT5", "sarif2"} {
+		var stdout, stderr bytes.Buffer
+		code := Execute([]string{"--old", dir, "--new", dir, "--format", format}, &stdout, &stderr)
+		assert.Equal(t, 2, code, "--format %s must be rejected", format)
+		assert.Contains(t, stderr.String(), "invalid --format")
+		assert.Contains(t, stderr.String(), "text, markdown, json, sarif")
+		assert.Empty(t, stdout.String())
+	}
+
+	// Case and surrounding whitespace are still accepted, as before.
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir, "--new", dir, "--format", " JSON "}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.True(t, strings.HasPrefix(strings.TrimSpace(stdout.String()), "{"), "expected a JSON document")
+}
+
+// TestExecute_BlastRadiusFlagGuards covers roadmap #2 and #1. --blast-radius used to be
+// accepted and silently discarded in comparison mode, and an empty or flag-shaped value was
+// treated as a directory path.
+func TestExecute_BlastRadiusFlagGuards(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+
+	// Rejected in comparison mode rather than silently ignored.
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir, "--new", dir, "--blast-radius", dir}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--blast-radius is only available in wrapper audit mode")
+
+	// An empty value, as action.yml passes when the input is unset, means "not requested".
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", dir, "--new", dir, "--blast-radius", ""}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "TERRAFORM AST COMPATIBILITY DIFF REPORT")
+
+	// A flag-shaped value is a caller error, not a directory named "--exit-code=true".
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", dir, "--new", dir, "--blast-radius", "--exit-code=true"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--blast-radius requires a directory path")
+}
+
+// TestExecute_FixModeRejectsDroppedAnalysisFlags covers roadmap #56. The codemod paths return
+// before the findings block, so every analysis flag paired with --fix was silently discarded.
+func TestExecute_FixModeRejectsDroppedAnalysisFlags(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "kept" { type = string }`), 0600))
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(
+		"module \"m\" {\n  source = \""+upstreamDir+"\"\n  obsolete = \"x\"\n}\n"), 0600))
+
+	schemaFile := filepath.Join(t.TempDir(), "schema.json")
+	require.NoError(t, os.WriteFile(schemaFile, []byte(`{"format_version":"1.0"}`), 0600))
+
+	for _, flag := range []string{"--fix", "--fix-preview"} {
+		for _, tc := range []struct {
+			name string
+			args []string
+			want string
+		}{
+			{"blast-radius", []string{"--blast-radius", wrapperDir}, "--blast-radius is not supported"},
+			{"provider-schema", []string{"--provider-schema", schemaFile}, "--provider-schema is not supported"},
+			{"check-recreation", []string{"--check-recreation=false"}, "--check-recreation is not supported"},
+			{"format", []string{"--format", "json"}, "--format json is not supported"},
+		} {
+			var stdout, stderr bytes.Buffer
+			args := append([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, flag}, tc.args...)
+			code := Execute(args, &stdout, &stderr)
+			assert.Equal(t, 2, code, "%s with %s must be rejected", flag, tc.name)
+			assert.Contains(t, stderr.String(), tc.want)
+			assert.Empty(t, stdout.String())
+		}
+	}
+
+	// The default configuration is untouched: no analysis flag, text format.
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--fix-preview"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "obsolete")
+}
+
+// TestExecute_RegistryTimeoutValidation covers the roadmap #63 flag guard.
+func TestExecute_RegistryTimeoutValidation(t *testing.T) {
+	for _, value := range []string{"0", "-1s", "0s"} {
+		var stdout, stderr bytes.Buffer
+		code := Execute([]string{"--old", t.TempDir(), "--new", t.TempDir(), "--registry-timeout", value}, &stdout, &stderr)
+		assert.Equal(t, 2, code, "--registry-timeout %s must be rejected", value)
+		assert.Contains(t, stderr.String(), "--registry-timeout must be positive")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--old", t.TempDir(), "--new", t.TempDir(), "--registry-timeout", "5s",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+}
+
+// TestExecute_RegistryLatestVersionFailureIsReported covers roadmap #41 in comparison mode. The
+// GetLatestVersion error used to be discarded, so the run continued with an empty version string.
+func TestExecute_RegistryLatestVersionFailureIsReported(t *testing.T) {
+	versionsFails := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/download") {
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer versionsFails.Close()
+
+	origClient := newRegistryClient
+	newRegistryClient = func() *registry.Client {
+		c := registry.NewClient(versionsFails.Client())
+		c.BaseURL = versionsFails.URL
+		c.RetryMaxElapsedTime = 20 * time.Millisecond
+		return c
+	}
+	defer func() { newRegistryClient = origClient }()
+
+	// --old with no version triggers a latest-version lookup that now fails loudly.
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", "hashicorp/consul/aws", "--new", t.TempDir()}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error resolving the latest version of hashicorp/consul/aws")
+
+	// --new with no version triggers the same lookup on the new side.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", t.TempDir(), "--new", "hashicorp/consul/aws"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error resolving the latest version of hashicorp/consul/aws")
+	assert.Empty(t, stdout.String())
+}
+
+// TestExecute_PinnedResolutionFailureIsReported covers roadmap #41 for the pinned lookup. The
+// git path used to discard the error, leaving a nil pinned report and silently disabling
+// downgrade detection and the safe-pin recommendation.
+func TestExecute_PinnedResolutionFailureIsReported(t *testing.T) {
+	repo := createTestTFRepo(t, "v1.0.0", `variable "a" { type = string }`)
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(
+		"module \"m\" { source = \""+repo+"\" }"), 0600))
+
+	origMkdir := mkdirTemp
+	mkdirTemp = func(string, string) (string, error) { return "", assert.AnError }
+	defer func() { mkdirTemp = origMkdir }()
+
+	// A git source resolves the pinned ref through the shared cache, whose temp directory
+	// factory is mkdirTemp.
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", repo,
+		"--old-version", "v1.0.0",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error checking out pinned upstream version v1.0.0")
+	assert.Empty(t, stdout.String())
+
+	// A registry source allocates the pinned extraction directory first, so the same failure is
+	// reported as a temp directory error.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", "hashicorp/consul/aws",
+		"--old-version", "1.0.0",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error creating temp dir")
+	assert.Empty(t, stdout.String())
+}
+
+// TestExecute_RegistryPinnedResolutionFailures covers the registry-backed pinned lookup in
+// wrapper mode. Every one of these previously continued silently: mkdirTemp failures vanished
+// into `if err == nil`, a failed pinned download left pinnedInfo nil, and a failed inspection of
+// the extracted module was discarded. All three disabled downgrade detection and the safe-pin
+// recommendation while the report still claimed the target was safe to pin.
+func TestExecute_RegistryPinnedResolutionFailures(t *testing.T) {
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"),
+		[]byte(`module "m" { source = "hashicorp/consul/aws" }`), 0600))
+
+	archive := createTestModuleArchive(t)
+
+	// 1. The target extraction directory cannot be created.
+	origMkdir := mkdirTemp
+	mkdirTemp = func(string, string) (string, error) { return "", assert.AnError }
+	defer func() { mkdirTemp = origMkdir }()
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", "hashicorp/consul/aws", "--new-version", "1.0.0"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error creating temp dir")
+
+	// 2. The target resolves but the pinned extraction directory cannot be created.
+	calls := 0
+	mkdirTemp = func(pattern, prefix string) (string, error) {
+		calls++
+		if calls == 2 {
+			return "", assert.AnError
+		}
+		return origMkdir(pattern, prefix)
+	}
+
+	registryOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/download") {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(archive)
+		}
+	}))
+	defer registryOK.Close()
+
+	origClient := newRegistryClient
+	newRegistryClient = func() *registry.Client {
+		c := registry.NewClient(registryOK.Client())
+		c.BaseURL = registryOK.URL
+		c.RetryMaxElapsedTime = 20 * time.Millisecond
+		return c
+	}
+	defer func() { newRegistryClient = origClient }()
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir, "--upstream", "hashicorp/consul/aws",
+		"--new-version", "1.0.0", "--old-version", "0.9.0",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error creating temp dir")
+
+	// 3. The pinned download itself fails.
+	mkdirTemp = origMkdir
+	registryPinnedFails := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The target version downloads successfully; the pinned one does not.
+		if strings.HasSuffix(r.URL.Path, "/0.9.0/download") {
+			http.Error(w, "gone", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(archive)
+	}))
+	defer registryPinnedFails.Close()
+
+	newRegistryClient = func() *registry.Client {
+		c := registry.NewClient(registryPinnedFails.Client())
+		c.BaseURL = registryPinnedFails.URL
+		c.RetryMaxElapsedTime = 20 * time.Millisecond
+		return c
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir, "--upstream", "hashicorp/consul/aws",
+		"--new-version", "1.0.0", "--old-version", "0.9.0",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error checking out pinned upstream version 0.9.0")
+	assert.Empty(t, stdout.String())
+}
+
+// TestExecute_PinnedInspectionFailureIsReported covers the discarded ast.Inspect error on the
+// pinned module. A git upstream pinned at a ref whose content cannot be parsed must fail loudly
+// rather than silently producing a nil pinned report.
+func TestExecute_PinnedInspectionFailureIsReported(t *testing.T) {
+	repo := createTestTFRepoWithTags(t, []struct{ tag, content string }{
+		{"v1.0.0", "this is not valid terraform {{{"},
+		{"v2.0.0", `variable "a" { type = string }`},
+	})
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(
+		"module \"m\" { source = \""+repo+"\" }"), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", repo,
+		"--new-version", "v2.0.0",
+		"--old-version", "v1.0.0",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error inspecting pinned upstream module")
+	assert.Empty(t, stdout.String())
 }

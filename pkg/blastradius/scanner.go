@@ -485,13 +485,12 @@ func evaluateCallSiteImpact(
 	sort.Strings(passedNames)
 
 	for _, inputName := range passedNames {
+		// The hazard lookup is authoritative on its own. Gating it on a matching wrapper issue
+		// discarded ForceNew findings for any input that happened to be compatible, which is
+		// exactly the set of inputs a consumer passes most freely.
 		if desc, ok := recreation.LookupHazard(audit.TargetModuleName, inputName); ok {
-			for _, issue := range audit.Issues {
-				if issue.Target == inputName {
-					impact.RecreationHazards = append(impact.RecreationHazards, fmt.Sprintf("%s (%s)", inputName, desc.Impact))
-					impact.CanSafelyUpdate = false
-				}
-			}
+			impact.RecreationHazards = append(impact.RecreationHazards, fmt.Sprintf("%s (%s)", inputName, desc.Impact))
+			impact.CanSafelyUpdate = false
 		}
 	}
 	sort.Strings(impact.RecreationHazards)

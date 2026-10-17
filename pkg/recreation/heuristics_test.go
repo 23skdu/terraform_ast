@@ -24,14 +24,57 @@ func TestLookupHazard(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, "azurerm_kubernetes_cluster", desc.Resource)
 
-	// Generic fallback
-	desc, ok = LookupHazard("custom-module", "cluster_name")
-	assert.True(t, ok)
-	assert.Equal(t, "aws_eks_cluster", desc.Resource)
+	// No cross-provider bleed: an unclassified module asserts no static hazard, because the
+	// tables name a specific resource type and naming the wrong one is a false positive.
+	_, ok = LookupHazard("custom-module", "cluster_name")
+	assert.False(t, ok)
+	_, ok = LookupHazard("gke", "vpc_id")
+	assert.False(t, ok, "vpc_id is an EKS attribute and must not be attributed to a GKE module")
 
 	// Unknown
 	_, ok = LookupHazard("custom-module", "some_random_var")
 	assert.False(t, ok)
+}
+
+// TestMatchModuleCategory pins the classification. A raw substring test classified "checks" as
+// AWS EKS because it contains "eks".
+func TestMatchModuleCategory(t *testing.T) {
+	for _, tc := range []struct {
+		module string
+		want   string
+	}{
+		{"terraform-google-modules/kubernetes-engine/google", "gke"},
+		{"gke", "gke"},
+		{"my_gke_wrapper", "gke"},
+		{"gkeWrapper", "gke"},
+		{"terraform-aws-modules/eks/aws", "eks"},
+		{"my-eks-wrapper", "eks"},
+		{"Azure/aks/azurerm", "aks"},
+		{"azurerm_aks_wrapper", "aks"},
+		{"custom-module", ""},
+		{"checks", ""},
+		{"weekends", ""},
+		{"index", ""},
+		{"", ""},
+	} {
+		assert.Equal(t, tc.want, matchModuleCategory(tc.module),
+			"classifying %q", tc.module)
+	}
+}
+
+// TestLookupHazard_ProviderSpecificAttribution confirms a classified module resolves only its own
+// table, and that the GKE table still reports its own hazards.
+func TestLookupHazard_ProviderSpecificAttribution(t *testing.T) {
+	desc, ok := LookupHazard("gke", "ip_range_pods")
+	assert.True(t, ok)
+	assert.Equal(t, "google_container_cluster / node_pools", desc.Resource)
+
+	desc, ok = LookupHazard("eks", "cluster_name")
+	assert.True(t, ok)
+	assert.Equal(t, "aws_eks_cluster", desc.Resource)
+
+	_, ok = LookupHazard("aks", "ip_range_pods")
+	assert.False(t, ok, "a GKE CIDR attribute must not be reported for an AKS module")
 }
 
 func TestAnalyzeHazards(t *testing.T) {
@@ -121,4 +164,22 @@ func TestFormatHazardsText(t *testing.T) {
 	assert.Contains(t, text, "Remediation: Keep location unchanged")
 	assert.Contains(t, text, "[CRITICAL_HAZARD] project_id")
 	assert.NotContains(t, text, "Remediation: \n")
+}
+
+// TestFormatHazards_RendersUnattributedResource covers a hazard that came from the
+// provider-agnostic table. It has no resource type, and the formatters must say so rather than
+// print an empty column or invent a provider.
+func TestFormatHazards_RendersUnattributedResource(t *testing.T) {
+	hazards := []RecreationHazard{
+		{Variable: "location", Severity: "CRITICAL_HAZARD", Description: "region changed", Remediation: "keep it"},
+	}
+
+	text := FormatHazardsText(hazards)
+	assert.Contains(t, text, "location (provider-agnostic resource)")
+
+	md := FormatHazardsMarkdown(hazards)
+	assert.Contains(t, md, "`provider-agnostic resource`")
+	assert.NotContains(t, md, "()")
+
+	assert.Equal(t, "google_container_cluster", displayResource(HazardDescriptor{Resource: "google_container_cluster"}))
 }

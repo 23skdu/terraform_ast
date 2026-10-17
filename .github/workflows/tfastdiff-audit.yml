@@ -23,6 +23,9 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  # Required by github.rest.issues.createComment/updateComment below. `pull-requests: write`
+  # does not cover the Issues API, so without this the PR comment step 403s on every run.
+  issues: write
   security-events: write
 
 jobs:

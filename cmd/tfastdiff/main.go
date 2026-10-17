@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/23skdu/terraform_ast/pkg/blastradius"
@@ -33,6 +36,10 @@ var (
 	}
 )
 
+// defaultRegistryTimeout bounds how long the CLI will keep retrying and waiting on the Terraform
+// Registry before giving up on a request.
+const defaultRegistryTimeout = 2 * time.Minute
+
 func main() {
 	exitCode := Execute(os.Args[1:], os.Stdout, os.Stderr)
 	osExit(exitCode)
@@ -43,6 +50,12 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	// Repositories and extracted versions are owned by the shared gitops cache; release them
 	// when the run finishes so temporary directories never outlive the process.
 	defer gitops.GlobalCache.Clear()
+
+	// Ctrl-C (or a CI cancellation signal) cancels every in-flight registry request, and the
+	// deferred cache clear then removes the temporary directories. Without this a hung registry
+	// kept the process and its temp directories alive for the full retry budget.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	if len(args) > 0 && (args[0] == "lsp" || args[0] == "daemon") {
 		server := lsp.NewServer(stdout)
@@ -72,6 +85,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		providerSchemaPath string
 		cacheDir           string
 		lspDaemon          bool
+		registryTimeout    time.Duration
 	)
 
 	fs.StringVar(&wrapperPath, "wrapper", "", "Path to the Terraform module wrapper directory")
@@ -82,7 +96,22 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&newVersion, "new-version", "", "Version or Git ref for the new upstream module")
 	fs.StringVar(&format, "format", "text", "Output format: text, markdown, json, sarif")
 	fs.StringVar(&outputFile, "output", "", "Optional file path to write the output report")
-	fs.StringVar(&blastRadiusDir, "blast-radius", "", "Optional root directory to scan for downstream module consumers")
+	// --blast-radius is optional and is frequently passed by wrapper manifests (including
+	// action.yml) with an unset value. An empty value means "not requested", and a value that
+	// looks like another flag is rejected with an actionable message instead of being treated as
+	// a directory path.
+	fs.Func("blast-radius", "Optional root directory to scan for downstream module consumers", func(value string) error {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			blastRadiusDir = ""
+			return nil
+		}
+		if strings.HasPrefix(trimmed, "-") {
+			return fmt.Errorf("--blast-radius requires a directory path, but received %q", value)
+		}
+		blastRadiusDir = trimmed
+		return nil
+	})
 	fs.BoolVar(&checkRecreation, "check-recreation", true, "Check for resource recreation & state destruction hazards")
 	fs.BoolVar(&enforceExit1, "exit-code", false, "Exit with code 1 if breaking changes are detected")
 	fs.StringVar(&policyPath, "policy", "", "Optional JSON policy file for CI enforcement")
@@ -92,10 +121,17 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&providerSchemaPath, "provider-schema", "", "Optional path to terraform providers schema -json file for dynamic ForceNew recreation detection")
 	fs.StringVar(&cacheDir, "cache-dir", "", "Optional path to directory for persistent L2 AST caching")
 	fs.BoolVar(&lspDaemon, "lsp", false, "Start Language Server Protocol (LSP) daemon for IDE integration")
+	fs.DurationVar(&registryTimeout, "registry-timeout", defaultRegistryTimeout, "Maximum time to spend retrying and waiting on a single Terraform Registry request")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+
+	// Record which flags the caller actually supplied, so a default value is never mistaken for
+	// a deliberate request. --check-recreation defaults to true, so only an explicit
+	// --check-recreation=false is a request the CLI cannot honour.
+	supplied := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { supplied[f.Name] = true })
 
 	if lspDaemon {
 		server := lsp.NewServer(stdout)
@@ -103,9 +139,36 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
+	if registryTimeout <= 0 {
+		_, _ = fmt.Fprintf(stderr, "Error: --registry-timeout must be positive, got %s\n", registryTimeout)
+		return 2
+	}
+
 	if fixMode && fixPreview {
 		_, _ = fmt.Fprintln(stderr, "Error: Cannot specify both --fix and --fix-preview")
 		return 2
+	}
+
+	if fixMode || fixPreview {
+		// The codemod paths return before the findings block, so any analysis flag passed with
+		// them would be dropped without a trace. Refuse rather than imply it was honoured.
+		if blastRadiusDir != "" {
+			_, _ = fmt.Fprintln(stderr, "Error: --blast-radius is not supported with --fix or --fix-preview; run the audit separately")
+			return 2
+		}
+		if providerSchemaPath != "" {
+			_, _ = fmt.Fprintln(stderr, "Error: --provider-schema is not supported with --fix or --fix-preview; run the audit separately")
+			return 2
+		}
+		if supplied["check-recreation"] {
+			_, _ = fmt.Fprintln(stderr, "Error: --check-recreation is not supported with --fix or --fix-preview; run the audit separately")
+			return 2
+		}
+		// The codemod emits a plain patch, so a machine-readable format could never be honoured.
+		if format != "text" {
+			_, _ = fmt.Fprintf(stderr, "Error: --format %s is not supported with --fix or --fix-preview, which always emits a plain patch\n", format)
+			return 2
+		}
 	}
 
 	if cacheDir != "" {
@@ -123,6 +186,13 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	}
 
 	format = strings.ToLower(strings.TrimSpace(format))
+	switch format {
+	case "text", "markdown", "json", "sarif":
+	default:
+		_, _ = fmt.Fprintf(stderr, "Error: invalid --format %q: expected one of text, markdown, json, sarif\n", format)
+		return 2
+	}
+
 	var policyConfig *policy.Policy
 	if policyPath != "" {
 		var err error
@@ -139,7 +209,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stderr, "Error: --upgrade-path is only available in direct comparison mode")
 			return 2
 		}
-		return runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir, checkRecreation, enforceExit1, fixPreview, fixMode, policyConfig, dynamicRegistry, stdout, stderr)
+		return runWrapperMode(ctx, registryTimeout, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir, checkRecreation, enforceExit1, fixPreview, fixMode, policyConfig, dynamicRegistry, stdout, stderr)
 	}
 
 	// Mode 2: Direct Upstream Comparison Mode
@@ -152,7 +222,13 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stderr, "Error: --fix is only available in wrapper audit mode")
 			return 2
 		}
-		return runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile, checkRecreation, enforceExit1, upgradePath, policyConfig, dynamicRegistry, stdout, stderr)
+		if blastRadiusDir != "" {
+			// Previously accepted and silently discarded: runCompareMode never received the
+			// flag, so the user believed consumer impact had been analysed.
+			_, _ = fmt.Fprintln(stderr, "Error: --blast-radius is only available in wrapper audit mode")
+			return 2
+		}
+		return runCompareMode(ctx, registryTimeout, oldPath, newPath, oldVersion, newVersion, format, outputFile, checkRecreation, enforceExit1, upgradePath, policyConfig, dynamicRegistry, stdout, stderr)
 	}
 
 	_, _ = fmt.Fprintln(stderr, "Error: Must specify either --wrapper <dir> OR --old <path> and --new <path>")
@@ -160,7 +236,21 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	return 2
 }
 
-func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir string, checkRecreation, enforceExit1, fixPreview, fixMode bool, policyConfig *policy.Policy, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
+// registryClient returns a registry client whose retry budget is the operator supplied timeout.
+func registryClient(timeout time.Duration) *registry.Client {
+	client := newRegistryClient()
+	if client.RetryMaxElapsedTime <= 0 {
+		client.RetryMaxElapsedTime = timeout
+	}
+	return client
+}
+
+// registryContext bounds a whole registry operation, retry window included.
+func registryContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, timeout)
+}
+
+func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir string, checkRecreation, enforceExit1, fixPreview, fixMode bool, policyConfig *policy.Policy, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
 	wInfo, err := ast.Inspect(wrapperPath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "Error inspecting wrapper module %s: %v\n", wrapperPath, err)
@@ -197,16 +287,23 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 			return 1
 		}
 		cleanupDirs = append(cleanupDirs, tmpTarget)
-		client := newRegistryClient()
+		client := registryClient(registryTimeout)
 		ver := newVersion
 		if ver == "" {
-			ver, err = client.GetLatestVersion(context.Background(), upstreamPath)
+			regCtx, cancel := registryContext(ctx, registryTimeout)
+			ver, err = client.GetLatestVersion(regCtx, upstreamPath)
+			cancel()
 			if err != nil {
-				_, _ = fmt.Fprintf(stderr, "Error checking out target upstream version: %v\n", err)
+				// Previously ignored, so a failed lookup silently downloaded an unspecified
+				// version and reported the result as if it were the requested one.
+				_, _ = fmt.Fprintf(stderr, "Error resolving the latest version of %s: %v\n", upstreamPath, err)
 				return 1
 			}
 		}
-		if err := client.DownloadModule(context.Background(), upstreamPath, ver, tmpTarget); err != nil {
+		regCtx, cancel := registryContext(ctx, registryTimeout)
+		err = client.DownloadModule(regCtx, upstreamPath, ver, tmpTarget)
+		cancel()
+		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error checking out target upstream version: %v\n", err)
 			return 1
 		}
@@ -231,20 +328,35 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 		pinnedDir := upstreamPath
 		if registry.IsRegistrySource(upstreamPath) {
 			tmpPinned, err := mkdirTemp("", "tf_registry_pinned_*")
-			if err == nil {
-				cleanupDirs = append(cleanupDirs, tmpPinned)
-				client := newRegistryClient()
-				if err := client.DownloadModule(context.Background(), upstreamPath, oldVersion, tmpPinned); err == nil {
-					pinnedDir = tmpPinned
-				}
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "Error creating temp dir: %v\n", err)
+				return 1
 			}
+			cleanupDirs = append(cleanupDirs, tmpPinned)
+			regCtx, cancel := registryContext(ctx, registryTimeout)
+			err = registryClient(registryTimeout).DownloadModule(regCtx, upstreamPath, oldVersion, tmpPinned)
+			cancel()
+			if err != nil {
+				// Previously swallowed, which left pinnedInfo nil: the upstream-to-upstream diff
+				// was skipped entirely, so downgrade detection and the safe-pin recommendation
+				// disappeared while the report still claimed the target was safe to pin.
+				_, _ = fmt.Fprintf(stderr, "Error checking out pinned upstream version %s of %s: %v\n", oldVersion, upstreamPath, err)
+				return 1
+			}
+			pinnedDir = tmpPinned
 		} else if isGitURL(upstreamPath) || isGitRepo(upstreamPath) {
 			tmpPinned, err := gitops.GlobalCache.GetOrExtract(upstreamPath, oldVersion, newCachedDir("tf_upstream_pinned_*"))
-			if err == nil {
-				pinnedDir = tmpPinned
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "Error checking out pinned upstream version %s of %s: %v\n", oldVersion, upstreamPath, err)
+				return 1
 			}
+			pinnedDir = tmpPinned
 		}
-		pinnedInfo, _ = ast.Inspect(pinnedDir)
+		pinnedInfo, err = ast.Inspect(pinnedDir)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error inspecting pinned upstream module %s: %v\n", pinnedDir, err)
+			return 1
+		}
 	}
 
 	res := wrapper.AnalyzeWrapper(wInfo, targetInfo, pinnedInfo, newVersion, oldVersion)
@@ -352,7 +464,7 @@ func runWrapperMode(wrapperPath, upstreamPath, oldVersion, newVersion, format, o
 	return 0
 }
 
-func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile string, checkRecreation, enforceExit1, analyzeUpgradePath bool, policyConfig *policy.Policy, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
+func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath, newPath, oldVersion, newVersion, format, outputFile string, checkRecreation, enforceExit1, analyzeUpgradePath bool, policyConfig *policy.Policy, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
 	if oldPath == "" || newPath == "" {
 		_, _ = fmt.Fprintln(stderr, "Error: Both --old and --new must be specified for module comparison")
 		return 2
@@ -385,12 +497,22 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 			return 1
 		}
 		cleanupDirs = append(cleanupDirs, tmpOld)
-		client := newRegistryClient()
+		client := registryClient(registryTimeout)
 		ver := oldVersion
 		if ver == "" {
-			ver, _ = client.GetLatestVersion(context.Background(), oldPath)
+			regCtx, cancel := registryContext(ctx, registryTimeout)
+			ver, err = client.GetLatestVersion(regCtx, oldPath)
+			cancel()
+			if err != nil {
+				// Previously ignored, which silently analysed an unspecified version.
+				_, _ = fmt.Fprintf(stderr, "Error resolving the latest version of %s: %v\n", oldPath, err)
+				return 1
+			}
 		}
-		if err := client.DownloadModule(context.Background(), oldPath, ver, tmpOld); err != nil {
+		regCtx, cancel := registryContext(ctx, registryTimeout)
+		err = client.DownloadModule(regCtx, oldPath, ver, tmpOld)
+		cancel()
+		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error checking out old version: %v\n", err)
 			return 1
 		}
@@ -412,12 +534,21 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 			return 1
 		}
 		cleanupDirs = append(cleanupDirs, tmpNew)
-		client := newRegistryClient()
+		client := registryClient(registryTimeout)
 		ver := newVersion
 		if ver == "" {
-			ver, _ = client.GetLatestVersion(context.Background(), newPath)
+			regCtx, cancel := registryContext(ctx, registryTimeout)
+			ver, err = client.GetLatestVersion(regCtx, newPath)
+			cancel()
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "Error resolving the latest version of %s: %v\n", newPath, err)
+				return 1
+			}
 		}
-		if err := client.DownloadModule(context.Background(), newPath, ver, tmpNew); err != nil {
+		regCtx, cancel := registryContext(ctx, registryTimeout)
+		err = client.DownloadModule(regCtx, newPath, ver, tmpNew)
+		cancel()
+		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error checking out new version: %v\n", err)
 			return 1
 		}
@@ -432,7 +563,7 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 	}
 
 	var oldInfo, newInfo *ast.ModuleInfo
-	g, _ := errgroup.WithContext(context.Background())
+	g, _ := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
 		var err error
@@ -465,7 +596,7 @@ func runCompareMode(oldPath, newPath, oldVersion, newVersion, format, outputFile
 		diffReport.ModuleName = comparedSource
 	}
 	if analyzeUpgradePath {
-		pathReport, err := analyzeUpgradePathVersions(oldPath, newPath, oldVersion, newVersion, oldInfo, newInfo)
+		pathReport, err := analyzeUpgradePathVersions(ctx, registryTimeout, oldPath, newPath, oldVersion, newVersion, oldInfo, newInfo)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error analyzing upgrade path: %v\n", err)
 			return 1
@@ -580,11 +711,13 @@ func comparisonSource(newPath, oldPath string) string {
 	return strings.TrimSpace(oldPath)
 }
 
-func analyzeUpgradePathVersions(source, newSource, oldVersion, newVersion string, oldInfo, newInfo *ast.ModuleInfo) (*planner.UpgradePathReport, error) {
+func analyzeUpgradePathVersions(ctx context.Context, registryTimeout time.Duration, source, newSource, oldVersion, newVersion string, oldInfo, newInfo *ast.ModuleInfo) (*planner.UpgradePathReport, error) {
 	if (registry.IsRegistrySource(source) || isGitURL(source) || isGitRepo(source)) && source != newSource {
 		return nil, fmt.Errorf("intermediate version analysis requires --old and --new to use the same source")
 	}
-	versions, err := planner.NewUpgradePlanner(newRegistryClient()).PlanUpgrade(context.Background(), source, oldVersion, newVersion)
+	regCtx, cancel := registryContext(ctx, registryTimeout)
+	defer cancel()
+	versions, err := planner.NewUpgradePlanner(registryClient(registryTimeout)).PlanUpgrade(regCtx, source, oldVersion, newVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -596,7 +729,7 @@ func analyzeUpgradePathVersions(source, newSource, oldVersion, newVersion string
 		case semverutil.Compare(version, newVersion) == 0:
 			snapshots = append(snapshots, planner.VersionSnapshot{Version: version, Module: newInfo})
 		default:
-			module, err := inspectModuleVersion(source, version)
+			module, err := inspectModuleVersion(ctx, registryTimeout, source, version)
 			if err != nil {
 				return nil, fmt.Errorf("inspect intermediate version %s: %w", version, err)
 			}
@@ -606,14 +739,16 @@ func analyzeUpgradePathVersions(source, newSource, oldVersion, newVersion string
 	return planner.AnalyzeUpgradePath(snapshots)
 }
 
-func inspectModuleVersion(source, version string) (*ast.ModuleInfo, error) {
+func inspectModuleVersion(ctx context.Context, registryTimeout time.Duration, source, version string) (*ast.ModuleInfo, error) {
 	if registry.IsRegistrySource(source) {
 		directory, err := mkdirTemp("", "tfastdiff_upgrade_step_*")
 		if err != nil {
 			return nil, fmt.Errorf("create temporary module directory: %w", err)
 		}
 		defer func() { _ = os.RemoveAll(directory) }()
-		if err := newRegistryClient().DownloadModule(context.Background(), source, version, directory); err != nil {
+		regCtx, cancel := registryContext(ctx, registryTimeout)
+		defer cancel()
+		if err := registryClient(registryTimeout).DownloadModule(regCtx, source, version, directory); err != nil {
 			return nil, fmt.Errorf("download registry module %s@%s: %w", source, version, err)
 		}
 		return ast.Inspect(directory)

@@ -46,6 +46,13 @@ func FuzzDetermineBumpType(f *testing.F) {
 		bump := DetermineBumpType(oldVer, newVer)
 		oldNorm, newNorm := Normalize(oldVer), Normalize(newVer)
 
+		// A missing version is missing information, not a malformed one.
+		if oldNorm == "" || newNorm == "" {
+			if bump != BumpUnknown {
+				t.Fatalf("a missing version must classify as BumpUnknown, got %q for %q -> %q", bump, oldVer, newVer)
+			}
+			return
+		}
 		if !semver.IsValid(oldNorm) || !semver.IsValid(newNorm) {
 			if bump != BumpInvalid {
 				t.Fatalf("invalid versions must classify as BumpInvalid, got %q for %q -> %q", bump, oldVer, newVer)

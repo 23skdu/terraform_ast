@@ -3,6 +3,7 @@ package recreation
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
@@ -118,36 +119,93 @@ var knownModuleHazards = map[string]map[string]HazardDescriptor{
 	},
 }
 
+// genericHazards are immutable on essentially every cloud resource, so they apply whatever the
+// module manages. They deliberately carry no Resource: naming one would misattribute the hazard,
+// which is exactly what the previous cross-provider fallback did. This is what keeps
+// `--old <dir> --new <dir>` useful, where the module identifier is a filesystem path and no
+// provider-specific classification is possible.
+var genericHazards = map[string]HazardDescriptor{
+	"name": {
+		Impact:      "Resource names are immutable on most cloud resources; changing or replacing one triggers ForceNew destruction.",
+		Remediation: "Keep the resource name unchanged, or plan for a replacement.",
+	},
+	"location": {
+		Impact:      "Location or region is immutable on most cloud resources; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the location unchanged, or migrate with a replacement plan.",
+	},
+	"region": {
+		Impact:      "Region is immutable on most cloud resources; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the region unchanged, or migrate with a replacement plan.",
+	},
+}
+
+// matchModuleCategory classifies a module by the cloud it manages, or returns "" when the name
+// carries no usable signal. Matching is token-aware rather than a raw substring test: "checks"
+// and "weekends" both contain "eks", and classifying those as AWS EKS silently applied the EKS
+// hazard table to unrelated modules.
 func matchModuleCategory(moduleName string) string {
-	lower := strings.ToLower(moduleName)
-	if strings.Contains(lower, "gke") || strings.Contains(lower, "kubernetes-engine") {
+	trimmed := strings.TrimSpace(moduleName)
+	if strings.Contains(strings.ToLower(trimmed), "kubernetes-engine") {
 		return "gke"
 	}
-	if strings.Contains(lower, "eks") {
-		return "eks"
+	tokens := moduleTokens(trimmed)
+	// Ordered so the more specific Azure signals win over the generic "eks" token.
+	for _, candidate := range []struct{ token, category string }{
+		{"azurerm", "aks"},
+		{"aks", "aks"},
+		{"gke", "gke"},
+		{"eks", "eks"},
+	} {
+		if _, ok := tokens[candidate.token]; ok {
+			return candidate.category
+		}
 	}
-	if strings.Contains(lower, "aks") || strings.Contains(lower, "azurerm") {
-		return "aks"
+	return ""
+}
+
+// moduleTokens splits a module identifier into lower-cased tokens on delimiters and camelCase
+// boundaries, so both "my-eks-wrapper" and "myEksWrapper" yield the token "eks". It expects the
+// original casing, because the camelCase boundaries are only visible before lower-casing.
+func moduleTokens(name string) map[string]struct{} {
+	tokens := make(map[string]struct{})
+	var current strings.Builder
+	flush := func() {
+		if current.Len() > 0 {
+			tokens[strings.ToLower(current.String())] = struct{}{}
+			current.Reset()
+		}
 	}
-	// Default check across all if unclassified
-	return "generic"
+	runes := []rune(name)
+	for i, r := range runes {
+		switch {
+		case r == '-' || r == '_' || r == '.' || r == '/' || r == ' ':
+			flush()
+		case i > 0 && unicode.IsUpper(r):
+			flush()
+			current.WriteRune(r)
+		default:
+			current.WriteRune(r)
+		}
+	}
+	flush()
+	return tokens
 }
 
 // LookupHazard checks if a given variable name represents a known recreation hazard for the module.
+//
+// A module whose name identifies its cloud resolves against that provider's table alone, so a
+// GKE module is never told its `vpc_id` is an EKS cluster hazard. An unclassified module (a bare
+// directory comparison, say) falls back to the provider-agnostic table, which reports the hazard
+// without inventing a resource type. The previous behaviour searched every provider's table for
+// any unclassified module and reported whichever matched last.
 func LookupHazard(moduleName, varName string) (HazardDescriptor, bool) {
-	cat := matchModuleCategory(moduleName)
-	if cat != "generic" {
-		if desc, ok := knownModuleHazards[cat][varName]; ok {
+	if category := matchModuleCategory(moduleName); category != "" {
+		if desc, ok := knownModuleHazards[category][varName]; ok {
 			return desc, true
 		}
 	}
-	// Check all known rules if not found
-	for _, mapping := range knownModuleHazards {
-		if desc, ok := mapping[varName]; ok {
-			return desc, true
-		}
-	}
-	return HazardDescriptor{}, false
+	desc, ok := genericHazards[varName]
+	return desc, ok
 }
 
 // AnalyzeHazards inspects a DiffReport and identifies any breaking changes or warnings that present recreation hazards.
@@ -242,6 +300,21 @@ func AnalyzeWrapperHazardsWithRegistry(res *wrapper.WrapperCompatibilityReport, 
 	return hazards
 }
 
+// displayResource names the resource a hazard applies to, or says so plainly when the hazard
+// came from the provider-agnostic table and no resource type can honestly be named.
+func displayResource(desc HazardDescriptor) string {
+	if desc.Resource == "" {
+		return "provider-agnostic resource"
+	}
+	return desc.Resource
+}
+
+// hazardDescriptorFor reconstructs the descriptor behind a reported hazard so the formatters can
+// tell a named resource from a provider-agnostic one.
+func hazardDescriptorFor(h RecreationHazard) HazardDescriptor {
+	return HazardDescriptor{Resource: h.Resource}
+}
+
 // FormatHazardsText converts hazards into a terminal-friendly alert block.
 func FormatHazardsText(hazards []RecreationHazard) string {
 	if len(hazards) == 0 {
@@ -252,7 +325,7 @@ func FormatHazardsText(hazards []RecreationHazard) string {
 	sb.WriteString("⚠️  STATE DESTRUCTION & RECREATION HAZARDS (ForceNew):\n")
 	sb.WriteString("  Upgrading with the changes below may cause Terraform to destroy and re-create core cloud resources in state!\n")
 	for _, h := range hazards {
-		fmt.Fprintf(&sb, "  • [%s] %s (%s): %s\n", h.Severity, h.Variable, h.Resource, h.Description)
+		fmt.Fprintf(&sb, "  • [%s] %s (%s): %s\n", h.Severity, h.Variable, displayResource(hazardDescriptorFor(h)), h.Description)
 		if h.Remediation != "" {
 			fmt.Fprintf(&sb, "    Remediation: %s\n", h.Remediation)
 		}
@@ -274,7 +347,7 @@ func FormatHazardsMarkdown(hazards []RecreationHazard) string {
 	sb.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")
 	for _, h := range hazards {
 		fmt.Fprintf(&sb, "| `%s` | `%s` | `%s` | %s | %s |\n",
-			h.Variable, h.Resource, h.Severity, h.Description, h.Remediation)
+			h.Variable, displayResource(hazardDescriptorFor(h)), h.Severity, h.Description, h.Remediation)
 	}
 	sb.WriteString("\n")
 	return sb.String()

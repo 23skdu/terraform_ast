@@ -231,7 +231,16 @@ func AnalyzeWrapper(
 		report.RecommendedPin = fmt.Sprintf("version = \"%s\"", targetVersion)
 	}
 
-	if report.TotalBreaking > 0 {
+	// A wrapper can be perfectly consistent with its child module and still be un-pinnable
+	// because the upstream release it is moving to broke its own API (a provider source change,
+	// a newly required configuration alias, a removed upstream variable). That verdict lives in
+	// UpstreamDiff, so it has to participate in CanSafelyUpdate -- otherwise the CLI gate in
+	// main.go reads a verdict that upstream findings never reached, and a broken upgrade is
+	// reported as SAFE_TO_PIN.
+	upstreamUnsafe := report.UpstreamDiff != nil && !report.UpstreamDiff.CanSafelyUpdate
+
+	switch {
+	case report.TotalBreaking > 0:
 		report.CanSafelyUpdate = false
 		report.Verdict = "BREAKING_CHANGES_DETECTED"
 		report.Summary = fmt.Sprintf("CANNOT SAFELY PIN: Wrapper has %d breaking issue(s) with upstream %s. Resolve remediation steps before pinning.", report.TotalBreaking, targetVersion)
@@ -241,13 +250,30 @@ func AnalyzeWrapper(
 		} else {
 			report.SafePinRationale = "No current pin was supplied, so there is no verified safe version to recommend."
 		}
-	} else if report.TotalWarnings > 0 {
+	case upstreamUnsafe:
+		report.CanSafelyUpdate = false
+		report.Verdict = "UPSTREAM_BREAKING_CHANGES_DETECTED"
+		report.Summary = fmt.Sprintf("CANNOT SAFELY PIN: The wrapper itself is compatible with upstream %s, but the upgrade %s -> %s introduces %d upstream breaking change(s).", targetVersion, pinnedVersion, targetVersion, report.UpstreamDiff.TotalBreaking)
+		// The wrapper contributes no remediation steps here, so the upstream ones are the only
+		// actionable guidance the report can give.
+		for _, item := range report.UpstreamDiff.BreakingChanges {
+			if item.Remediation != "" {
+				report.RemediationSteps = append(report.RemediationSteps, item.Remediation)
+			}
+		}
+		if pinnedVersion != "" {
+			report.SafePinVersion = pinnedVersion
+			report.SafePinRationale = "Keep the currently pinned upstream version until the upstream breaking changes are resolved."
+		} else {
+			report.SafePinRationale = "No current pin was supplied, so there is no verified safe version to recommend."
+		}
+	case report.TotalWarnings > 0:
 		report.CanSafelyUpdate = true
 		report.Verdict = "SAFE_WITH_WARNINGS"
 		report.Summary = fmt.Sprintf("CAN SAFELY PIN WITH WARNINGS: No syntax or type errors preventing upgrade to %s, but %d warning(s) detected.", targetVersion, report.TotalWarnings)
 		report.SafePinVersion = targetVersion
 		report.SafePinRationale = "No breaking compatibility issues were detected; review warnings before pinning."
-	} else {
+	default:
 		report.CanSafelyUpdate = true
 		report.Verdict = "SAFE_TO_PIN"
 		report.Summary = fmt.Sprintf("SAFE TO PIN: Wrapper is fully compatible with upstream version %s. Pin to %s.", targetVersion, report.RecommendedPin)

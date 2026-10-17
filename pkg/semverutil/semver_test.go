@@ -50,6 +50,10 @@ func TestDetermineBumpType(t *testing.T) {
 	}{
 		{"invalid", "1.0.0", BumpInvalid},
 		{"1.0.0", "invalid", BumpInvalid},
+		{"", "", BumpUnknown},
+		{"", "1.0.0", BumpUnknown},
+		{"1.0.0", "", BumpUnknown},
+		{"  ", "1.0.0", BumpUnknown},
 		{"1.0.0", "1.0.0", BumpIdentical},
 		{"2.0.0", "1.9.0", BumpDowngrade},
 		{"1.0.0", "2.0.0", BumpMajor},

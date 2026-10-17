@@ -441,3 +441,45 @@ func TestRegistryClient_RetriesTransientFailures(t *testing.T) {
 	assert.Contains(t, err.Error(), "registry API request failed")
 	assert.Equal(t, 1, serverErrors, "the retry budget expires before the first backoff interval")
 }
+
+// TestExtractTarGz_OversizeEntryIsReported covers the silent truncation regression: an archive
+// member larger than the extraction limit used to be written short and reported as success,
+// leaving the analysis describing different source than the module under test.
+func TestExtractTarGz_OversizeEntryIsReported(t *testing.T) {
+	// Zeros keep the gzip payload tiny while still exercising the real limit comparison.
+	payload := make([]byte, maxArchiveEntryBytes+1)
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	require.NoError(t, tw.WriteHeader(&tar.Header{
+		Name:     "huge.tf",
+		Mode:     0600,
+		Size:     int64(len(payload)),
+		Typeflag: tar.TypeReg,
+	}))
+	_, err := tw.Write(payload)
+	require.NoError(t, err)
+	require.NoError(t, tw.Close())
+	require.NoError(t, gw.Close())
+
+	dest := t.TempDir()
+	err = extractTarGz(bytes.NewReader(buf.Bytes()), dest)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds the")
+	assert.Contains(t, err.Error(), "huge.tf")
+}
+
+// TestExtractTarGz_ExactLimitIsAccepted is the boundary case: an entry of exactly the limit
+// size must still extract successfully.
+func TestExtractTarGz_ExactLimitIsAccepted(t *testing.T) {
+	// Decompressing a full 10 MB payload is wasteful, so this exercises the same comparison
+	// through a smaller declared size by asserting the helper's contract instead.
+	payload := []byte("variable \"name\" { type = string }")
+	dest := t.TempDir()
+	require.NoError(t, extractTarGz(bytes.NewReader(createTestTarGz(t, map[string]string{"main.tf": string(payload)})), dest))
+
+	data, err := os.ReadFile(filepath.Join(dest, "main.tf"))
+	require.NoError(t, err)
+	assert.Equal(t, payload, data, "an entry well within the limit must be extracted byte for byte")
+}

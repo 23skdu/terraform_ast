@@ -17,6 +17,10 @@ const (
 	BumpDowngrade BumpType = "DOWNGRADE" // Version decreased
 	BumpIdentical BumpType = "IDENTICAL" // Versions are the same
 	BumpInvalid   BumpType = "INVALID"   // Version string does not conform to semver
+	// BumpUnknown means at least one version was not supplied, so no transition could be
+	// classified. It is deliberately distinct from BumpInvalid: an absent version is missing
+	// information, whereas an invalid one is information the caller got wrong.
+	BumpUnknown BumpType = "UNKNOWN"
 )
 
 // Normalize ensures a version string starts with 'v' and is trimmed.
@@ -84,6 +88,12 @@ func FilterValid(versions []string) []string {
 // DetermineBumpType analyzes the transition from oldVer to newVer.
 func DetermineBumpType(oldVer, newVer string) BumpType {
 	nOld, nNew := Normalize(oldVer), Normalize(newVer)
+	// A missing version is missing information, not a malformed one. Reporting BumpInvalid here
+	// made every version-less comparison (the documented "compare two local directories" flow)
+	// look like an unrecognised transition to policy gates.
+	if nOld == "" || nNew == "" {
+		return BumpUnknown
+	}
 	if !semver.IsValid(nOld) || !semver.IsValid(nNew) {
 		return BumpInvalid
 	}

@@ -258,6 +258,10 @@ func (c *Client) buildBaseURL(host string) string {
 	return "https://" + host
 }
 
+// maxArchiveEntryBytes bounds a single extracted archive member. Exceeding it is reported as an
+// error rather than silently truncating the module under analysis.
+const maxArchiveEntryBytes = 10 * 1024 * 1024
+
 func extractTarGz(r io.Reader, destDir string) error {
 	gzReader, err := gzip.NewReader(r)
 	if err != nil {
@@ -296,10 +300,17 @@ func extractTarGz(r io.Reader, destDir string) error {
 			if err != nil {
 				return err
 			}
-			// Limit bytes read to prevent decompression bombs (G110)
-			if _, err := io.Copy(outFile, io.LimitReader(tarReader, 10*1024*1024)); err != nil {
+			// Limit bytes read to prevent decompression bombs (G110). A short read must fail
+			// loudly: silently writing a truncated module would make the analysis describe
+			// different source than the one being analysed.
+			written, err := io.Copy(outFile, io.LimitReader(tarReader, maxArchiveEntryBytes))
+			if err != nil {
 				_ = outFile.Close()
 				return err
+			}
+			if written != header.Size {
+				_ = outFile.Close()
+				return fmt.Errorf("archive entry %s is %d bytes, which exceeds the %d byte extraction limit", header.Name, header.Size, maxArchiveEntryBytes)
 			}
 			_ = outFile.Close()
 		}

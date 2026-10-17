@@ -43,11 +43,29 @@ func TestEvaluatePolicy(t *testing.T) {
 	assert.Empty(t, Evaluate(nil, Input{BreakingChanges: 1}))
 	assert.Empty(t, Evaluate(&Policy{MaxBump: "MAJOR"}, Input{BumpType: "MAJOR"}))
 	assert.Empty(t, Evaluate(&Policy{MaxBump: "PATCH"}, Input{BumpType: "IDENTICAL"}))
+}
 
-	unknownBump := Evaluate(&Policy{MaxBump: "MAJOR"}, Input{})
-	require.Len(t, unknownBump, 1)
-	assert.Equal(t, "max_bump", unknownBump[0].Rule)
-	assert.Contains(t, unknownBump[0].Message, "version information unavailable")
+func TestEvaluatePolicyMaxBumpVersionHandling(t *testing.T) {
+	// No version information means there is no bump to bound, so the gate cannot fire. This is
+	// the documented "compare two local directories" flow, which supplies no version flags.
+	for _, bump := range []string{"", "UNKNOWN"} {
+		assert.Empty(t, Evaluate(&Policy{MaxBump: "MAJOR"}, Input{BumpType: bump}),
+			"a missing version must not be reported as a bump violation")
+		assert.Empty(t, Evaluate(&Policy{MaxBump: "PATCH"}, Input{IsDowngrade: true, BumpType: bump}),
+			"other gates still work without version information")
+	}
+
+	// A malformed version is a different failure and must still be reported: the caller asked
+	// for a comparison that cannot be made.
+	invalid := Evaluate(&Policy{MaxBump: "MAJOR"}, Input{BumpType: "INVALID"})
+	require.Len(t, invalid, 1)
+	assert.Equal(t, "max_bump", invalid[0].Rule)
+	assert.Contains(t, invalid[0].Message, "unrecognised bump type")
+
+	// A real transition above the ceiling is still reported.
+	exceeded := Evaluate(&Policy{MaxBump: "PATCH"}, Input{BumpType: "MAJOR"})
+	require.Len(t, exceeded, 1)
+	assert.Contains(t, exceeded[0].Message, "got MAJOR")
 }
 
 func TestLoadPolicyFromFile(t *testing.T) {

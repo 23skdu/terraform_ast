@@ -18,7 +18,12 @@
       ],
       "recreation_hazards": [
         "ip_range_pods (Secondary pod CIDR range cannot be altered after cluster creation; triggers ForceNew recreation.)",
-        "ip_range_services (Services secondary CIDR range is immutable; removing or modifying it triggers cluster destruction.)"
+        "ip_range_services (Services secondary CIDR range is immutable; removing or modifying it triggers cluster destruction.)",
+        "name (Cluster name is immutable; changing or removing it triggers complete cluster destruction and re-creation.)",
+        "network (VPC network attachment cannot be changed in-place; triggers ForceNew cluster destruction.)",
+        "project_id (GCP Project ID cannot be changed in-place; triggers ForceNew cluster destruction.)",
+        "region (Cluster region cannot be migrated in-place; triggers cluster re-creation.)",
+        "subnetwork (Subnetwork attachment is immutable; altering it destroys and recreates the cluster.)"
       ],
       "risk_score": "CRITICAL",
       "can_safely_update": false

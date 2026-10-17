@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/23skdu/terraform_ast/pkg/semverutil"
 )
 
 // Policy configures CI enforcement independently from compatibility analysis.
@@ -93,12 +95,18 @@ func Evaluate(policy *Policy, input Input) []Violation {
 	}
 	if max := bumpRank(policy.MaxBump); max > 0 {
 		got := strings.ToUpper(strings.TrimSpace(input.BumpType))
-		bump := bumpRank(got)
-		known := bump > 0 || got == "IDENTICAL"
-		if !known || bump > max {
-			if got == "" {
-				got = "unknown (version information unavailable)"
-			}
+		// A version-less comparison leaves nothing to bound, so there is nothing to enforce.
+		// A malformed version is still a violation: the caller asked for a comparison that
+		// cannot be made, and reporting success would make the gate meaningless.
+		switch {
+		case got == "" || got == string(semverutil.BumpUnknown):
+		case got == "IDENTICAL":
+		case bumpRank(got) == 0:
+			violations = append(violations, Violation{
+				Rule:    "max_bump",
+				Message: fmt.Sprintf("policy allows at most a %s version bump, got unrecognised bump type %q", policy.MaxBump, got),
+			})
+		case bumpRank(got) > max:
 			violations = append(violations, Violation{
 				Rule:    "max_bump",
 				Message: fmt.Sprintf("policy allows at most a %s version bump, got %s", policy.MaxBump, got),

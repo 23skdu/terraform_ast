@@ -533,8 +533,13 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 		}
 	}
 
-	// 3. Import blocks (Terraform 1.5+)
+	// 3. Import blocks (Terraform 1.5+). The resource address is what makes an import new; a
+	// changed id on an address that was already imported is not a new capability.
+	oldImports := makeStringSet(importAddresses(oldMod.ImportBlocks))
 	for _, ib := range newMod.ImportBlocks {
+		if _, existed := oldImports[ib.To]; existed {
+			continue
+		}
 		report.NewFeatures = append(report.NewFeatures, DifferenceItem{
 			Category:        "ImportBlockAdded",
 			Name:            ib.To,
@@ -557,8 +562,13 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 		}
 	}
 
-	// 5. Encryption blocks (OpenTofu 1.7+)
+	// 5. Encryption blocks (OpenTofu 1.7+). Keying on the key provider also surfaces a swap of
+	// the encryption backend, which is a configuration change the operator must act on.
+	oldEncryption := makeStringSet(encryptionProviders(oldMod.EncryptionBlocks))
 	for _, eb := range newMod.EncryptionBlocks {
+		if _, existed := oldEncryption[eb.KeyProvider]; existed {
+			continue
+		}
 		report.NewFeatures = append(report.NewFeatures, DifferenceItem{
 			Category:        "EncryptionConfigured",
 			Name:            eb.KeyProvider,
@@ -567,4 +577,22 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			Description:     fmt.Sprintf("State encryption configured with key provider '%s'", eb.KeyProvider),
 		})
 	}
+}
+
+// importAddresses returns the set of resource addresses that are programmatically imported.
+func importAddresses(blocks []ast.ImportBlockDef) []string {
+	addresses := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		addresses = append(addresses, block.To)
+	}
+	return addresses
+}
+
+// encryptionProviders returns the set of declared state-encryption key providers.
+func encryptionProviders(blocks []ast.EncryptionBlockDef) []string {
+	providers := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		providers = append(providers, block.KeyProvider)
+	}
+	return providers
 }

@@ -148,9 +148,13 @@ inputs = {
 	require.NoError(t, err)
 	require.Equal(t, 1, report.TotalCallSitesScanned)
 	assert.False(t, report.CanSafelyUpdateAll)
+	// The consumer passes `cluster_name`, but this audit carries no TargetModuleName, so the
+	// provider cannot be identified and no provider-specific static hazard can be asserted. The
+	// risk therefore stays HIGH, driven by the removed input. See TestMatchModuleCategory.
 	assert.Equal(t, "HIGH", report.HighestRisk)
 	assert.Equal(t, "prod", report.ImpactedRootModules[0].ModuleName)
 	assert.Equal(t, []string{"removed_input"}, report.ImpactedRootModules[0].RemovedInputsPassed)
+	assert.Empty(t, report.ImpactedRootModules[0].RecreationHazards)
 }
 
 func TestScanDirectory_TerragruntDynamicInputsAreNotReportedSafe(t *testing.T) {
@@ -692,4 +696,50 @@ func TestDiscoverCallSites_EmptyModuleLabel(t *testing.T) {
 	assert.Empty(t, sites[0].ModuleName)
 	assert.NotEmpty(t, sites[0].File)
 	assert.NotNil(t, sites[0].PassedInputs)
+}
+
+// TestEvaluateCallSiteImpact_HazardSurvivesWithoutMatchingWrapperIssue is the regression test
+// for the false negative where a ForceNew hazard was only recorded when a wrapper audit issue
+// happened to target the same input. A consumer freely passes its most dangerous inputs, and
+// those are exactly the ones that never raise a wrapper issue.
+func TestEvaluateCallSiteImpact_HazardSurvivesWithoutMatchingWrapperIssue(t *testing.T) {
+	callSite := CallSite{
+		Dir:        "/consumers/prod",
+		File:       "/consumers/prod/main.tf",
+		ModuleName: "primary_cluster",
+		PassedInputs: map[string]string{
+			"project_id": "acme-prod",
+			"name":       "prod-us-central1",
+		},
+	}
+
+	impact := evaluateCallSiteImpact(callSite, nil, &wrapper.WrapperCompatibilityReport{
+		TargetModuleName: "gke",
+		// A clean audit: the upstream still accepts every input the consumer passes.
+		Issues:        []wrapper.WrapperIssue{},
+		TotalBreaking: 0,
+		Verdict:       "SAFE_TO_PIN",
+	})
+
+	assert.Len(t, impact.RecreationHazards, 2,
+		"project_id and name are immutable GKE attributes and must be reported")
+	assert.Contains(t, impact.RecreationHazards[0], "name")
+	assert.Contains(t, impact.RecreationHazards[1], "project_id")
+	assert.False(t, impact.CanSafelyUpdate)
+	assert.Equal(t, "CRITICAL", impact.RiskScore)
+}
+
+// TestEvaluateCallSiteImpact_HazardReportedOncePerInput confirms a single hazard entry per
+// input, which the removed issue-matching loop could duplicate.
+func TestEvaluateCallSiteImpact_HazardReportedOncePerInput(t *testing.T) {
+	impact := evaluateCallSiteImpact(CallSite{
+		PassedInputs: map[string]string{"name": "prod"},
+	}, nil, &wrapper.WrapperCompatibilityReport{
+		TargetModuleName: "gke",
+		Issues: []wrapper.WrapperIssue{
+			{Category: "MissingRequiredInput", Target: "name"},
+			{Category: "TypeMismatch", Target: "name"},
+		},
+	})
+	assert.Len(t, impact.RecreationHazards, 1)
 }
