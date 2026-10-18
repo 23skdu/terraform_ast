@@ -562,8 +562,13 @@ func (s *Server) send(payload interface{}) error {
 var defaultStdin io.Reader = os.Stdin
 var defaultStdout io.Writer = os.Stdout
 
+// RunDaemonStreams starts the LSP server reading from in and writing to out.
+func RunDaemonStreams(in io.Reader, out io.Writer) error {
+	server := NewServer(out)
+	return server.Serve(in)
+}
+
 // RunDaemon starts the LSP server reading from stdin and writing to stdout.
 func RunDaemon() error {
-	server := NewServer(defaultStdout)
-	return server.Serve(defaultStdin)
+	return RunDaemonStreams(defaultStdin, defaultStdout)
 }

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/zclconf/go-cty/cty"
@@ -45,6 +46,7 @@ func ApplyRemovedInputs(dir, moduleName string, inputNames []string) ([]string, 
 	}
 	sort.Strings(paths)
 
+	var pendingWrites = make(map[string][]byte)
 	var modified []string
 	for _, path := range paths {
 		// #nosec G304 -- path within inspected wrapper directory
@@ -69,11 +71,15 @@ func ApplyRemovedInputs(dir, moduleName string, inputNames []string) ([]string, 
 			}
 		}
 		if changed {
-			// #nosec G703 -- path within inspected wrapper directory
-			if err := os.WriteFile(path, file.Bytes(), 0o600); err != nil {
-				return nil, fmt.Errorf("write updated Terraform file %s: %w", path, err)
-			}
+			pendingWrites[path] = file.Bytes()
 			modified = append(modified, path)
+		}
+	}
+
+	for path, bytes := range pendingWrites {
+		// #nosec G703 -- path within inspected wrapper directory
+		if err := os.WriteFile(path, bytes, 0o600); err != nil {
+			return nil, fmt.Errorf("write updated Terraform file %s: %w", path, err)
 		}
 	}
 	return modified, nil
@@ -109,6 +115,7 @@ func AddMissingInputs(dir, moduleName string, missingInputs map[string]string) (
 	}
 	sort.Strings(keys)
 
+	var pendingWrites = make(map[string][]byte)
 	var modified []string
 	for _, path := range paths {
 		// #nosec G304 -- path within inspected directory
@@ -134,11 +141,15 @@ func AddMissingInputs(dir, moduleName string, missingInputs map[string]string) (
 			}
 		}
 		if changed {
-			// #nosec G703 -- path within inspected directory
-			if err := os.WriteFile(path, file.Bytes(), 0o600); err != nil {
-				return nil, fmt.Errorf("write updated Terraform file %s: %w", path, err)
-			}
+			pendingWrites[path] = file.Bytes()
 			modified = append(modified, path)
+		}
+	}
+
+	for path, bytes := range pendingWrites {
+		// #nosec G703 -- path within inspected directory
+		if err := os.WriteFile(path, bytes, 0o600); err != nil {
+			return nil, fmt.Errorf("write updated Terraform file %s: %w", path, err)
 		}
 	}
 	return modified, nil
@@ -169,13 +180,11 @@ func FormatMovedBlocks(blocks []MovedBlock) string {
 	return string(file.Bytes())
 }
 
-// WriteMovedBlocks writes or appends formatted moved blocks to targetPath.
+// WriteMovedBlocks writes or appends formatted moved blocks to targetPath idempotently.
 func WriteMovedBlocks(targetPath string, blocks []MovedBlock) error {
-	formatted := FormatMovedBlocks(blocks)
-	if strings.TrimSpace(formatted) == "" {
+	if len(blocks) == 0 {
 		return nil
 	}
-
 	cleanPath := filepath.Clean(targetPath)
 	dir := filepath.Dir(cleanPath)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -187,6 +196,26 @@ func WriteMovedBlocks(targetPath string, blocks []MovedBlock) error {
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read existing moved blocks file %s: %w", cleanPath, err)
 	}
+
+	existingStr := string(existing)
+	var newBlocks []MovedBlock
+	for _, mb := range blocks {
+		if strings.TrimSpace(mb.From) == "" || strings.TrimSpace(mb.To) == "" {
+			continue
+		}
+		fromPattern := "from = " + mb.From
+		toPattern1 := "to   = " + mb.To
+		toPattern2 := "to = " + mb.To
+		if strings.Contains(existingStr, fromPattern) && (strings.Contains(existingStr, toPattern1) || strings.Contains(existingStr, toPattern2)) {
+			continue
+		}
+		newBlocks = append(newBlocks, mb)
+	}
+	if len(newBlocks) == 0 {
+		return nil
+	}
+
+	formatted := FormatMovedBlocks(newBlocks)
 
 	var content []byte
 	if len(existing) > 0 {
@@ -200,4 +229,38 @@ func WriteMovedBlocks(targetPath string, blocks []MovedBlock) error {
 		return fmt.Errorf("write moved blocks file %s: %w", cleanPath, err)
 	}
 	return nil
+}
+
+// SynthesizeMovedBlocksForShifts translates detected AST resource address shifts into Terraform 1.1+ moved blocks.
+func SynthesizeMovedBlocksForShifts(shifts []ast.ResourceAddressShift) []MovedBlock {
+	var blocks []MovedBlock
+	seen := make(map[string]struct{})
+
+	for _, s := range shifts {
+		from := s.OldAddress.FullAddress()
+		to := s.NewAddress.FullAddress()
+		if from == "" || to == "" || from == to {
+			continue
+		}
+		key := from + "->" + to
+		if _, exists := seen[key]; !exists {
+			seen[key] = struct{}{}
+			blocks = append(blocks, MovedBlock{
+				From: from,
+				To:   to,
+			})
+		}
+	}
+
+	sort.Slice(blocks, func(i, j int) bool {
+		return blocks[i].From < blocks[j].From
+	})
+
+	return blocks
+}
+
+// SynthesizeAndWriteMovedBlocks converts address shifts into moved blocks and writes them idempotently to targetPath.
+func SynthesizeAndWriteMovedBlocks(targetPath string, shifts []ast.ResourceAddressShift) error {
+	blocks := SynthesizeMovedBlocksForShifts(shifts)
+	return WriteMovedBlocks(targetPath, blocks)
 }

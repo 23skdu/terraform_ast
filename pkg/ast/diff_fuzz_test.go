@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
+	"github.com/hashicorp/terraform-config-inspect/tfconfig"
 )
 
 type tfValidationOutput struct {
@@ -153,6 +154,127 @@ func TestDifferentialValidation_DirectCompilerValidation(t *testing.T) {
 					if len(info.Variables) == 0 {
 						t.Fatalf("Compiler found valid configuration but AST found 0 variables for %s", relPath)
 					}
+				}
+			}
+		})
+	}
+}
+
+// TestDifferentialStructuralEquivalence validates deep structural property invariants
+// between ast.Inspect and the reference terraform-config-inspect compiler.
+func TestDifferentialStructuralEquivalence(t *testing.T) {
+	fixtures := []string{
+		"../../test/fixtures/upstream_gke_v1",
+		"../../test/fixtures/upstream_eks_v19",
+		"../../test/fixtures/upstream_aks_v1",
+	}
+
+	for _, relPath := range fixtures {
+		absPath, err := filepath.Abs(relPath)
+		requireNoError(t, err)
+
+		t.Run(filepath.Base(relPath), func(t *testing.T) {
+			info, err := ast.Inspect(absPath)
+			requireNoError(t, err)
+			if info == nil {
+				t.Fatalf("ast.Inspect returned nil for %s", relPath)
+			}
+
+			tfMod, diags := tfconfig.LoadModule(absPath)
+			if diags.HasErrors() {
+				t.Fatalf("tfconfig.LoadModule returned diagnostics for %s: %s", relPath, diags.Error())
+			}
+
+			// Invariant 1: Variables equivalence
+			if len(info.Variables) != len(tfMod.Variables) {
+				t.Errorf("variable count mismatch: ast=%d, tfconfig=%d", len(info.Variables), len(tfMod.Variables))
+			}
+			for name, refVar := range tfMod.Variables {
+				astVar, exists := info.Variables[name]
+				if !exists {
+					t.Errorf("variable %q missing in ast.Inspect", name)
+					continue
+				}
+				if astVar.Required != refVar.Required {
+					t.Errorf("variable %q Required mismatch: ast=%v, tfconfig=%v", name, astVar.Required, refVar.Required)
+				}
+				if astVar.Sensitive != refVar.Sensitive {
+					t.Errorf("variable %q Sensitive mismatch: ast=%v, tfconfig=%v", name, astVar.Sensitive, refVar.Sensitive)
+				}
+			}
+
+			// Invariant 2: Outputs equivalence
+			if len(info.Outputs) != len(tfMod.Outputs) {
+				t.Errorf("output count mismatch: ast=%d, tfconfig=%d", len(info.Outputs), len(tfMod.Outputs))
+			}
+			for name, refOut := range tfMod.Outputs {
+				astOut, exists := info.Outputs[name]
+				if !exists {
+					t.Errorf("output %q missing in ast.Inspect", name)
+					continue
+				}
+				if astOut.Sensitive != refOut.Sensitive {
+					t.Errorf("output %q Sensitive mismatch: ast=%v, tfconfig=%v", name, astOut.Sensitive, refOut.Sensitive)
+				}
+			}
+
+			// Invariant 3: Required Providers equivalence
+			if len(info.RequiredProviders) != len(tfMod.RequiredProviders) {
+				t.Errorf("provider count mismatch: ast=%d, tfconfig=%d", len(info.RequiredProviders), len(tfMod.RequiredProviders))
+			}
+			for name, refProv := range tfMod.RequiredProviders {
+				astProv, exists := info.RequiredProviders[name]
+				if !exists {
+					t.Errorf("provider %q missing in ast.Inspect", name)
+					continue
+				}
+				if astProv.Source != refProv.Source {
+					t.Errorf("provider %q Source mismatch: ast=%q, tfconfig=%q", name, astProv.Source, refProv.Source)
+				}
+			}
+
+			// Invariant 4: Module Calls equivalence
+			if len(info.ModuleCalls) != len(tfMod.ModuleCalls) {
+				t.Errorf("module call count mismatch: ast=%d, tfconfig=%d", len(info.ModuleCalls), len(tfMod.ModuleCalls))
+			}
+			for name, refMC := range tfMod.ModuleCalls {
+				astMC, exists := info.ModuleCalls[name]
+				if !exists {
+					t.Errorf("module call %q missing in ast.Inspect", name)
+					continue
+				}
+				if astMC.Source != refMC.Source {
+					t.Errorf("module call %q Source mismatch: ast=%q, tfconfig=%q", name, astMC.Source, refMC.Source)
+				}
+			}
+
+			// Invariant 5: Managed Resources equivalence
+			if len(info.ManagedResources) != len(tfMod.ManagedResources) {
+				t.Errorf("managed resource count mismatch: ast=%d, tfconfig=%d", len(info.ManagedResources), len(tfMod.ManagedResources))
+			}
+			for key, refRes := range tfMod.ManagedResources {
+				astRes, exists := info.ManagedResources[key]
+				if !exists {
+					t.Errorf("managed resource %q missing in ast.Inspect", key)
+					continue
+				}
+				if astRes.Type != refRes.Type || astRes.Name != refRes.Name {
+					t.Errorf("managed resource %q identity mismatch", key)
+				}
+			}
+
+			// Invariant 6: Data Resources equivalence
+			if len(info.DataResources) != len(tfMod.DataResources) {
+				t.Errorf("data resource count mismatch: ast=%d, tfconfig=%d", len(info.DataResources), len(tfMod.DataResources))
+			}
+			for key, refRes := range tfMod.DataResources {
+				astRes, exists := info.DataResources[key]
+				if !exists {
+					t.Errorf("data resource %q missing in ast.Inspect", key)
+					continue
+				}
+				if astRes.Type != refRes.Type || astRes.Name != refRes.Name {
+					t.Errorf("data resource %q identity mismatch", key)
 				}
 			}
 		})

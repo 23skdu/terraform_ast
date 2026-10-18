@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -72,15 +73,29 @@ func LoadProviderSchema(path string) (*ProviderSchemas, error) {
 }
 
 // ExtractForceNewDescriptors extracts immutable attributes (requires_replace) from the schema,
-// mapping attribute names to HazardDescriptors for each resource.
+// mapping attribute names to HazardDescriptors for each resource in deterministic order.
 func (ps *ProviderSchemas) ExtractForceNewDescriptors() map[string]HazardDescriptor {
 	descriptors := make(map[string]HazardDescriptor)
 	if ps == nil {
 		return descriptors
 	}
 
-	for _, provider := range ps.ProviderSchemas {
-		for resName, resSchema := range provider.ResourceSchemas {
+	provKeys := make([]string, 0, len(ps.ProviderSchemas))
+	for k := range ps.ProviderSchemas {
+		provKeys = append(provKeys, k)
+	}
+	sort.Strings(provKeys)
+
+	for _, provKey := range provKeys {
+		provider := ps.ProviderSchemas[provKey]
+		resKeys := make([]string, 0, len(provider.ResourceSchemas))
+		for k := range provider.ResourceSchemas {
+			resKeys = append(resKeys, k)
+		}
+		sort.Strings(resKeys)
+
+		for _, resName := range resKeys {
+			resSchema := provider.ResourceSchemas[resName]
 			extractFromBlock(resName, "", resSchema.Block, descriptors)
 		}
 	}
@@ -88,7 +103,14 @@ func (ps *ProviderSchemas) ExtractForceNewDescriptors() map[string]HazardDescrip
 }
 
 func extractFromBlock(resName, prefix string, block BlockSchema, descriptors map[string]HazardDescriptor) {
-	for attrName, attr := range block.Attributes {
+	attrKeys := make([]string, 0, len(block.Attributes))
+	for k := range block.Attributes {
+		attrKeys = append(attrKeys, k)
+	}
+	sort.Strings(attrKeys)
+
+	for _, attrName := range attrKeys {
+		attr := block.Attributes[attrName]
 		if attr.RequiresReplace {
 			fullPath := attrName
 			if prefix != "" {
@@ -98,16 +120,27 @@ func extractFromBlock(resName, prefix string, block BlockSchema, descriptors map
 			if strings.TrimSpace(desc) == "" {
 				desc = fmt.Sprintf("Attribute '%s' requires replacement of %s", fullPath, resName)
 			}
-			descriptors[fullPath] = HazardDescriptor{
+			hd := HazardDescriptor{
 				Resource:    resName,
 				Impact:      fmt.Sprintf("%s; modifying it triggers ForceNew destruction of %s.", desc, resName),
 				Remediation: fmt.Sprintf("Keep %s unchanged to avoid resource destruction.", fullPath),
 			}
-			descriptors[attrName] = descriptors[fullPath]
+			descriptors[resName+"."+fullPath] = hd
+			descriptors[fullPath] = hd
+			if _, exists := descriptors[attrName]; !exists {
+				descriptors[attrName] = hd
+			}
 		}
 	}
 
-	for blockName, nested := range block.BlockTypes {
+	btKeys := make([]string, 0, len(block.BlockTypes))
+	for k := range block.BlockTypes {
+		btKeys = append(btKeys, k)
+	}
+	sort.Strings(btKeys)
+
+	for _, blockName := range btKeys {
+		nested := block.BlockTypes[blockName]
 		nextPrefix := blockName
 		if prefix != "" {
 			nextPrefix = prefix + "." + blockName
@@ -137,4 +170,25 @@ func (r *DynamicHazardRegistry) Lookup(name string) (HazardDescriptor, bool) {
 	}
 	desc, ok := r.hazards[name]
 	return desc, ok
+}
+
+// Register adds a descriptor for a key into the registry.
+func (r *DynamicHazardRegistry) Register(key string, desc HazardDescriptor) {
+	if r == nil {
+		return
+	}
+	if r.hazards == nil {
+		r.hazards = make(map[string]HazardDescriptor)
+	}
+	r.hazards[key] = desc
+}
+
+// MergeDescriptors merges multiple descriptors into the registry.
+func (r *DynamicHazardRegistry) MergeDescriptors(descriptors map[string]HazardDescriptor) {
+	if r == nil {
+		return
+	}
+	for k, v := range descriptors {
+		r.Register(k, v)
+	}
 }

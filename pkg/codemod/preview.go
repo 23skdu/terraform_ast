@@ -31,7 +31,7 @@ func PreviewRemovedInputs(dir, moduleName string, inputNames []string) (string, 
 	}
 	var paths []string
 	for _, entry := range entries {
-		if !entry.IsDir() && (strings.HasSuffix(entry.Name(), ".tf") || strings.HasSuffix(entry.Name(), ".tf.json")) {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".tf") && !strings.HasSuffix(entry.Name(), ".tf.json") {
 			paths = append(paths, filepath.Join(dir, entry.Name()))
 		}
 	}
@@ -43,9 +43,6 @@ func PreviewRemovedInputs(dir, moduleName string, inputNames []string) (string, 
 		original, err := os.ReadFile(path)
 		if err != nil {
 			return "", fmt.Errorf("read Terraform file %s: %w", path, err)
-		}
-		if strings.HasSuffix(path, ".tf.json") {
-			continue
 		}
 		file, diags := hclwrite.ParseConfig(original, path, hcl.Pos{Line: 1, Column: 1})
 		if diags.HasErrors() || file == nil {

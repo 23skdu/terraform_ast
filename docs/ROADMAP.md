@@ -87,7 +87,7 @@ one is advertised in `README.md`, `docs/FEATURES.md`, `docs/CLI_USAGE.md`, or `d
 | # | Issue | Detail |
 | :--- | :--- | :--- |
 | ~~13~~ | **PARTLY CLOSED** ForceNew heuristics over-match.** `extractFromBlock` registers every `requires_replace` attribute under its **bare name** across every resource in every provider (`descriptors[attrName] = descriptors[fullPath]`, `pkg/recreation/schema.go:106`), and `LookupHazard` then falls back to "check all known rules" (`heuristics.go:145-149`). Net effect: on an unclassified module, any wrapper issue named `name`, `location` or `region` is reported as a `CRITICAL_HAZARD` ForceNew event regardless of resource type. | Scope descriptors by resource/address (`resource.attribute`), drop the cross-module fallback, and gate the bare-name fallback behind an explicit `--lenient-hazards`. `AnalyzeHazardsWithRegistry` also raises `WARNING_HAZARD` for *every* warning on a hazardous name, including pure deprecations — filter by category. |
-| 14 | **Terragrunt dynamic-input analysis fails on real configurations.** `parseTerragruntCallSite` calls `eval.BuildEvalContext(nil, nil)` (`pkg/blastradius/scanner.go:298`), so `local` is an empty object and the canonical Terragrunt idiom `inputs = merge(local.defaults, {...})` always fails to evaluate. `eval.StandardFunctions()` implements zero Terragrunt builtins. | Consequence: every realistic Terragrunt consumer is flagged `InputAnalysisIncomplete` → `CanSafelyUpdate=false` → `MEDIUM` risk, which makes `--blast-radius` nearly useless on the ecosystem it targets. Fix: parse the file's own `locals {}` block (and `include`-chain parents), and add `read_terragrunt_config`, `find_in_parent_folders`, `path_relative_to_include`, `get_terragrunt_dir`, `get_env`, `get_parent_terragrunt_dir` (and `try`/`run_cmd` as conservative stubs). Also add a `terragrunt.hcl` fixture — `test/fixtures/` currently contains none. |
+| ~~14~~ | **CLOSED** Terragrunt dynamic-input analysis fails on real configurations.** `parseTerragruntCallSite` calls `eval.BuildEvalContext(nil, nil)` (`pkg/blastradius/scanner.go:298`), so `local` is an empty object and the canonical Terragrunt idiom `inputs = merge(local.defaults, {...})` always fails to evaluate. `eval.StandardFunctions()` implements zero Terragrunt builtins. | Consequence: every realistic Terragrunt consumer is flagged `InputAnalysisIncomplete` → `CanSafelyUpdate=false` → `MEDIUM` risk, which makes `--blast-radius` nearly useless on the ecosystem it targets. Fix: parse the file's own `locals {}` block (and `include`-chain parents), and add `read_terragrunt_config`, `find_in_parent_folders`, `path_relative_to_include`, `get_terragrunt_dir`, `get_env`, `get_parent_terragrunt_dir` (and `try`/`run_cmd` as conservative stubs). Also add a `terragrunt.hcl` fixture — `test/fixtures/` currently contains none. |
 | ~~15~~ | **CLOSED** Wrapper target selection is arbitrary and silent.** `wrapper.AnalyzeWrapper` step 1 (`pkg/wrapper/analyzer.go:77-89`) sorts module-call names and takes the **alphabetically first** as the audit target; every other child module is ignored with no warning. | A wrapper calling `gke` and `gke_private_registry` is audited against exactly one of them. Select the call whose `source` matches `--upstream`, and emit a warning (or an error) when the wrapper has multiple candidate calls. |
 | 16 | **`NewFeatureAdoptions` is not "new features".** Step 7 (`wrapper/analyzer.go:194-206`) lists *every* optional upstream variable the wrapper neither passes nor declares — hundreds on a mature wrapper — while `pinnedUpstream`, already a parameter, is ignored. | Use `pinnedUpstream` to restrict the list to genuinely new variables (matching the `1` shown in the README example), and cap/paginate the rest. |
 | 17 | **SARIF locations are fabricated and one consumer class is invisible.** `sarifLocation` hardcodes `StartLine: 1` and `artifactOrDefault` falls back to `"main.tf"`, even though `VariableDef.Pos` / `OutputDef.Pos` carry filename and line. Separately, `appendBlastResults` (`pkg/report/sarif.go:275-280`) skips any consumer with no listed issue — so a consumer that is unsafe **solely** because analysis was incomplete produces zero SARIF results and never appears in code scanning. | Emit real `physicalLocation` regions from `Pos`, and emit a `note`/`warning` result for `AnalysisIncomplete` consumers. |
@@ -242,6 +242,31 @@ packages. The remaining order is unchanged:
 10. **#23 – #36, #65, #70** — release, consumer-surface, and docs hygiene, folded into whichever PR
     touches each file.
 
+### Resolution log — Terragrunt batch (closed)
+
+| Item | Status | What changed |
+| :--- | :--- | :--- |
+| #14 | **Fixed** | Dynamic Terragrunt inputs now evaluate. Added `pkg/eval/terragrunt.go` with a Terragrunt function set (`get_env`, `get_terragrunt_dir`, `get_parent_terragrunt_dir`, `path_relative_to_include`, `find_in_parent_folders`, `read_terragrunt_config`, `try`), locals resolution that iterates so a local may reference one declared later, and include-chain following with Terragrunt's child-over-parent precedence. A committed `test/fixtures/terragrunt_env/` fixture now exercises it; the package had none. |
+
+Before this, `parseTerragruntCallSite` called `eval.BuildEvalContext(nil, nil)`, which left `local`
+empty and implemented none of the Terragrunt built-ins, so `merge(local.defaults, {...})` always
+failed. Every realistic Terragrunt consumer was flagged `InputAnalysisIncomplete` →
+`CanSafelyUpdate=false` → `MEDIUM` risk, which made `--blast-radius` close to useless on the
+ecosystem it exists to serve.
+
+Three limits are deliberate and documented rather than papered over:
+
+- **Only functions determinable from the configuration and filesystem are implemented.** A call to
+  anything cloud- or shell-dependent is absent, so evaluation fails and the consumer is reported as
+  unanalysed. Returning a plausible value would claim full understanding that does not exist.
+- **`try()` cannot catch a failing function.** cty evaluates every argument before the
+  implementation runs, so `try(read_terragrunt_config("x"), {})` propagates the error rather than
+  falling back. `TestTerragruntTryCannotCatchFunctionErrors` pins that. `read_terragrunt_config`'s
+  own default argument does work, and is covered separately.
+- **A literal `inputs = { ... }` object is still recorded verbatim, not evaluated.** Blast radius
+  only compares input *names* against the wrapper, so the source text is sufficient and more
+  faithful to what the file says. `TestTerragruntStaticInputsKeepSourceText` documents this.
+
 ### Resolution log — wrapper audit and cache batch (closed)
 
 | Item | Status | What changed |
@@ -258,6 +283,33 @@ packages. The remaining order is unchanged:
 | #52 | **Fixed** | Diagnostics follow the editor buffer. Added `ast.InspectSource`, which analyses in-memory text and rewrites every recorded position back to the real files; the server prefers the buffer and falls back to disk, so a save-only client still works and a half-typed file does not raise an error on every keystroke. Line numbers are clamped, so a missing position can no longer produce a negative LSP line. |
 | #4 | **Fixed** | `textDocument/didChange` is handled, and `exit` terminates the daemon. The server previously only stopped on stdin EOF, so a client following the LSP lifecycle waited for the editor to close the pipe. |
 | #24 (partial) | **Fixed** | `serverInfo.version` is no longer quoted with a `v` prefix (the LSP client displays it verbatim) and no longer claims `v0.8.0`. |
+
+### Resolution log — Engineering backlog closure (closed)
+
+| Item | Status | What changed |
+| :--- | :--- | :--- |
+| #6, #46 | **Fixed** | `--rego-policy` flag wired across wrapper mode, direct compare mode, and upgrade path mode via `policy.LoadRego` and `policy.EvaluateRego`. Rego parser fails closed on unrecognized fields or zero rules, and supports modern Rego syntax (`contains`, `if`). |
+| #8 | **Fixed** | `eval.AnalyzeVariableTaint` wired via `--taint <var>` in wrapper mode, and attached to `report.Findings` with markdown and text formatting. |
+| #9, #49 | **Fixed** | Intermediate upgrade-path versions inspected concurrently via `ast.InspectModulesParallel`, replacing serial downloads and inspections. `runCompareMode` parallelized via worker pool. |
+| #12 | **Fixed** | Unified LSP daemon execution via `lsp.RunDaemonStreams(in, out)` for both `tfastdiff daemon` and `--lsp`. |
+| #16 | **Fixed** | `NewFeatureAdoptions` filtered against `pinnedUpstream` variables to omit existing variables from new feature recommendations. |
+| #17, #18 | **Fixed** | SARIF reports emit real `physicalLocation` regions with line numbers from `Pos`, include warning results for `AnalysisIncomplete` consumers, and stamp tool version `0.9.0`. |
+| #22, #24 | **Fixed** | Added `--verbose`/`-v` stderr logging, `var version = "0.9.0"`, and `--version` CLI flag. |
+| #25 | **Fixed** | Aligned license across `README.md` and `LICENSE` to Unlicense public domain. |
+| #26 | **Fixed** | Consolidated all semver parsing on `pkg/semverutil` (`golang.org/x/mod/semver`), removed `github.com/Masterminds/semver/v3` from `go.mod`. |
+| #31, #32 | **Fixed** | Added standard `Makefile` (with `verify`, `build`, `test`, `fuzz`, `clean`), `CONTRIBUTING.md`, and `SECURITY.md`. Cleaned all stray root coverage artifacts. |
+| #33 | **Fixed** | Deleted duplicate lowercase symlink `docs/roadmap.md`. |
+| #34, #36 | **Fixed** | Updated `docs/CLI_USAGE.md` with complete flag references, corrected upstream URLs, and documented OPA/Rego and taint capabilities. |
+| #35 | **Fixed** | Updated `README.md` to document all 19 native Go fuzz targets. |
+| #43, #44, #45, #62 | **Fixed** | Blast radius classifies findings by stable category enums, checks `wrapperMod.Outputs` for removed output references, passes `DynamicHazardRegistry` to `ScanDirectoryWithRegistry`, skips unreadable subdirectories, and tightens module source matching to resolved path equality. |
+| #47 | **Fixed** | `DynamicHazardRegistry` deterministically sorts provider and resource keys, and registers multi-key descriptors (`resName+"."+fullPath`, `fullPath`, bare `attrName`). |
+| #53, #54 | **Fixed** | `codemod.WriteMovedBlocks` made idempotent, `ApplyRemovedInputs` made atomic across multiple files, and `.tf.json` files excluded prior to reading. |
+| #55 | **Fixed** | `CheckObjectCompatibility` aggregates all breaking attribute shifts into a comprehensive incompatibility reason. |
+| #57 | **Fixed** | `WrapperOutputReferences` maps each output to a slice of delegations (`map[string][]OutputReference`). |
+| #58 | **Fixed** | `sameStrings` normalizes condition whitespace and performs sorted multiset matching. |
+| #59, #60 | **Fixed** | Added `FilterPrereleases` to filter prereleases in `GetLatestVersion`, and implemented strict weak ordering partitioned sort in `semverutil.Sort`. |
+| #61 | **Fixed** | Persistent L2 cache writes `<sha256>.json` atomically using temporary file rename. |
+| #70 | **Fixed** | Provided working default args `["--wrapper", ".", "--exit-code"]` in `.pre-commit-hooks.yaml`, and set output report file write permissions to `0644`. |
 
 One defect surfaced while landing this, unrelated to the roadmap items and present since the
 original LSP implementation:
@@ -446,3 +498,33 @@ The same binary reports three different versions to its consumers:
 
 None of them is stamped from a build-time variable, and `-X main.version` in the release workflow
 targets a symbol that does not exist. See #18 and #24.
+
+---
+
+# Pass 3 — Enterprise Deep Semantic & Dynamic Evaluation Backlog (#71 – #76) (P0)
+
+> **Status:** Closed. **Scope:** Closing the gap between static AST extraction and dynamic Terraform runtime evaluation semantics, eliminating structural blind spots in real-world enterprise infrastructure pipelines.
+
+## P0 — Dynamic State & Enterprise Evaluation
+
+| # | Issue | Architectural Risk | Required Delivery |
+| :--- | :--- | :--- | :--- |
+| 71 | **The "Static AST Fallacy": Resource instance address mutations are invisible.** A module altering an internal resource from singleton to indexed (e.g. `count`/`for_each`) or restructuring module topology preserves variable types, but triggers silent destruction and recreation of resources on `terraform apply`. | Incomplete destruction prediction for resource topology shifts. | Implement an Intermediate Representation (IR) evaluation graph that tracks full hierarchical Terraform instance addressing (`module.vpc.aws_subnet.this["a"]`) and flags state recreation hazards on address shifts. |
+| 72 | **State Drift Simulation & Automated Moved Block Synthesis.** When module refactoring alters internal addresses or names, manual code remediation is tedious and error-prone. | Operators incur production downtime or state loss during upgrades. | Detect resource address shifts between module versions and automatically synthesize Terraform 1.1+ `moved {}` blocks (`moved { from = ... to = ... }`) across resources and submodules. |
+| 73 | **Rego Parser is a hand-rolled string tokenizer, not real OPA.** Hand-rolled parser fails on standard OPA policies (sets, comprehensions, builtins, helper rules), misrepresenting enterprise policy governance. | False sense of security; enterprise compliance policies cannot run. | Vendor the official Open Policy Agent Go SDK (`github.com/open-policy-agent/opa/v1/rego`) to compile and evaluate standard Rego against the structured report findings. |
+| 74 | **Dynamic Provider Schema Auto-Discovery & Caching.** `--provider-schema` requires manual `terraform providers schema -json` invocation; non-AWS/non-GCP modules have zero ForceNew protection by default. | Unclassified provider attributes cause silent recreation. | Automatically inspect `required_providers` from module AST, discover local schemas or fetch/cache ForceNew descriptors in the persistent L2 disk cache. |
+| 75 | **Cross-Module Inter-Procedural Taint Reachability Across Blast-Radius.** Taint dependency analysis is confined to intra-module local expressions, failing to trace dynamic flows through multi-tier module delegations. | Blast-radius reports impact for consumers that pass static unaffected defaults. | Wire `--taint` into `--blast-radius` to trace dynamic value flows across module boundaries, filtering out consumers that do not actively feed tainted inputs. |
+| 76 | **True Differential Compiler Verification & Structural Invariant Fuzzing.** Differential fuzzing against Terraform Core was shallow and unverified. | AST parser may diverge from native compiler behavior on complex HCL. | Implement deep structural property testing comparing `ast.Inspect` against native HCL parser / `terraform-config-inspect` output across random HCL permutations. |
+
+### Resolution log — Pass 3 Enterprise Evaluation batch (closed)
+
+| Item | Status | What changed |
+| :--- | :--- | :--- |
+| #71 | **Fixed** | Intermediate Representation (IR) evaluation graph and canonical hierarchical addressing implemented in `pkg/ast/ir.go`. Extracts `ResourceAddress` across modules, data sources, and indexed instances. `DetectAddressShifts` detects topological and address shifts between module versions, flagging ForceNew state recreation hazards. |
+| #72 | **Fixed** | Automated Terraform 1.1+ `moved {}` block synthesis implemented in `pkg/codemod/apply.go`. `SynthesizeMovedBlocksForShifts` and `SynthesizeAndWriteMovedBlocks` translate detected AST address shifts into idempotent, deduplicated `moved` blocks. |
+| #73 | **Fixed** | Integrated official Open Policy Agent Go SDK (`github.com/open-policy-agent/opa/v1/rego`) in `pkg/policy/rego.go`. `EvaluateRegoArbitrary` supports full Rego v1 / OPA semantics, sets, maps, comprehensions, and rules against arbitrary report structures. |
+| #74 | **Fixed** | Dynamic provider schema auto-discovery and atomic disk caching implemented in `pkg/recreation/autodiscover.go`. Discovers local schemas, synthesizes standard ForceNew attribute descriptors (AzureRM, Kubernetes, Cloudflare), and caches them in the persistent L2 disk cache. |
+| #75 | **Fixed** | Cross-module inter-procedural taint reachability wired into blast radius in `pkg/blastradius/scanner.go` (`ScanDirectoryWithTaint` and `FilterTaintedCallSites`). Consumers that neither pass tainted variables nor reference tainted outputs are filtered from downstream risk reports. |
+| #76 | **Fixed** | Deep differential compiler verification implemented in `pkg/ast/diff_fuzz_test.go` (`TestDifferentialStructuralEquivalence`). Asserts strict structural invariants comparing `ast.Inspect` against `terraform-config-inspect` across variables, outputs, providers, module calls, and managed/data resources. |
+
+

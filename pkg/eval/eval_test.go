@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
@@ -375,4 +377,540 @@ locals {
 	defer func() { _ = os.Chmod(unreadableDir, 0o750) }()
 	_, errUnreadable := AnalyzeVariableTaint(unreadableDir, "v")
 	assert.Error(t, errUnreadable)
+}
+
+// writeTerragrunt lays out a Terragrunt config and returns its path.
+func writeTerragrunt(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	return path
+}
+
+// parseTerragruntBody parses a Terragrunt config for direct evaluation.
+func parseTerragruntBody(t *testing.T, path string) (*hclsyntax.Body, []byte) {
+	t.Helper()
+	src, err := os.ReadFile(path)
+	require.NoError(t, err)
+	file, diags := hclsyntax.ParseConfig(src, path, hcl.Pos{Line: 1, Column: 1})
+	require.False(t, diags.HasErrors(), "parse %s: %s", path, diags)
+	body, ok := file.Body.(*hclsyntax.Body)
+	require.True(t, ok)
+	return body, src
+}
+
+// TestReadTerragruntInputsWithContext covers the evaluator end to end, including the canonical
+// merge(local.defaults, {...}) shape.
+func TestReadTerragruntInputsWithContext(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", `
+locals {
+  defaults = {
+    region = "us-central1"
+    name   = "prod"
+  }
+}
+
+inputs = merge(local.defaults, { name = "staging" })
+`)
+	body, src := parseTerragruntBody(t, path)
+
+	resolved, err := ReadTerragruntInputsWithContext(body, src, path, TerragruntOptions{Env: map[string]string{}})
+	require.NoError(t, err)
+	assert.Equal(t, `"us-central1"`, resolved["region"])
+	assert.Equal(t, `"staging"`, resolved["name"], "merge must let the later object win")
+}
+
+// TestReadTerragruntInputs_NoInputsBlock confirms a config without inputs resolves to nothing
+// rather than erroring.
+func TestReadTerragruntInputs_NoInputsBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", "locals { a = 1 }\n")
+	body, src := parseTerragruntBody(t, path)
+
+	resolved, err := ReadTerragruntInputsWithContext(body, src, path, TerragruntOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, resolved)
+}
+
+// TestReadTerragruntLocalsFileUnresolvable covers a local that cannot be evaluated: it is omitted
+// and reported rather than guessed.
+func TestReadTerragruntLocalsFileUnresolvable(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "root.hcl", `
+locals {
+  good = "resolved"
+  bad  = get_aws_account_id()
+}
+`)
+	body, _ := parseTerragruntBody(t, path)
+
+	resolved, incomplete := ExtractTerragruntLocals(body, TerragruntOptions{Env: map[string]string{}})
+	assert.Equal(t, "resolved", resolved["good"].AsString())
+	assert.NotContains(t, resolved, "bad", "an unevaluable local must not be reported as a value")
+	assert.True(t, incomplete)
+}
+
+// TestReadTerragruntLocalsFileResolvesForwardReference confirms a local may reference one declared
+// later in the file, which requires iterating rather than a single pass.
+func TestReadTerragruntLocalsFileResolvesForwardReference(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "root.hcl", `
+locals {
+  a = local.b
+  b = "later"
+}
+`)
+	locals, err := ReadTerragruntLocalsFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "later", locals["a"].AsString())
+	assert.Equal(t, "later", locals["b"].AsString())
+}
+
+// TestReadTerragruntLocalsFileMissing covers the read error path.
+func TestReadTerragruntLocalsFileMissing(t *testing.T) {
+	_, err := ReadTerragruntLocalsFile(filepath.Join(t.TempDir(), "absent.hcl"))
+	assert.Error(t, err)
+}
+
+// TestReadTerragruntLocalsFileInvalidSyntax covers the parse error path.
+func TestReadTerragruntLocalsFileInvalidSyntax(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "broken.hcl", "locals { this is not valid\n")
+	_, err := ReadTerragruntLocalsFile(path)
+	assert.Error(t, err)
+}
+
+// TestReadTerragruntLocalsFileEmpty covers a config with no locals block.
+func TestReadTerragruntLocalsFileEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "empty.hcl", "terraform {\n  source = \"./x\"\n}\n")
+	locals, err := ReadTerragruntLocalsFile(path)
+	require.NoError(t, err)
+	assert.Empty(t, locals)
+}
+
+// TestTerragruntGetEnvUnsetWithoutDefault covers get_env with no fallback value.
+func TestTerragruntGetEnvUnsetWithoutDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", `
+locals { v = get_env("TFASTDIFF_DEFINITELY_UNSET_VAR", null) }
+
+inputs = merge({}, { v = local.v })
+`)
+	body, src := parseTerragruntBody(t, path)
+
+	resolved, err := ReadTerragruntInputsWithContext(body, src, path, TerragruntOptions{Env: map[string]string{}})
+	require.NoError(t, err)
+	assert.Contains(t, resolved, "v")
+}
+
+// TestTerragruntTryCannotCatchFunctionErrors pins the documented limit of the conservative try().
+// cty evaluates every argument before the implementation runs, so a function call that errors
+// propagates instead of being caught. The config is therefore reported as unanalysed, which is
+// honest, where a real Terragrunt run would fall back to the default.
+func TestTerragruntTryCannotCatchFunctionErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", `
+inputs = merge({}, {
+  region = try(read_terragrunt_config("absent.hcl").region, "fallback-region")
+})
+`)
+	body, src := parseTerragruntBody(t, path)
+
+	_, err := ReadTerragruntInputsWithContext(body, src, path, TerragruntOptions{Env: map[string]string{}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read_terragrunt_config")
+}
+
+// TestTerragruntReadConfigWithExplicitDefault covers the fallback that does work: read_terragrunt_config
+// applies its own default when the target cannot be read.
+func TestTerragruntReadConfigWithExplicitDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", `
+locals {
+  fallback = { region = "fallback-region" }
+}
+
+inputs = merge({}, {
+  region = read_terragrunt_config("absent.hcl", local.fallback).region
+})
+`)
+	body, src := parseTerragruntBody(t, path)
+
+	resolved, err := ReadTerragruntInputsWithContext(body, src, path, TerragruntOptions{Env: map[string]string{}})
+	require.NoError(t, err)
+	assert.Equal(t, `"fallback-region"`, resolved["region"],
+		"an unreadable config must fall back to the supplied default")
+}
+
+// TestTerragruntReadConfigWithoutLocals covers the empty-result branch of read_terragrunt_config.
+func TestTerragruntReadConfigWithoutLocals(t *testing.T) {
+	dir := t.TempDir()
+	writeTerragrunt(t, dir, "shared.hcl", "terraform {\n  source = \"./x\"\n}\n")
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", `
+inputs = merge({}, { region = read_terragrunt_config("shared.hcl").region })
+`)
+	body, src := parseTerragruntBody(t, path)
+
+	// The config has no locals, so the returned object is empty and the traversal yields null.
+	resolved, err := ReadTerragruntInputsWithContext(body, src, path, TerragruntOptions{Env: map[string]string{}})
+	if err == nil {
+		assert.Equal(t, "null", resolved["region"])
+	}
+}
+
+// TestTerragruntIncludeMissing covers an include block whose path cannot be evaluated.
+func TestTerragruntIncludeMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", `
+include {
+  path = local.no_such_path
+}
+
+inputs = { a = "b" }
+`)
+	body, src := parseTerragruntBody(t, path)
+
+	// The include cannot be resolved, so it is ignored rather than failing the whole config.
+	resolved, err := ReadTerragruntInputsWithContext(body, src, path, TerragruntOptions{Env: map[string]string{}})
+	require.NoError(t, err)
+	assert.Equal(t, `"b"`, resolved["a"])
+}
+
+// TestTerragruntIncludeWithoutPath covers an include block that declares no path.
+func TestTerragruntIncludeWithoutPath(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", `
+include {
+  expose = true
+}
+
+inputs = { a = "b" }
+`)
+	body, src := parseTerragruntBody(t, path)
+
+	resolved, err := ReadTerragruntInputsWithContext(body, src, path, TerragruntOptions{Env: map[string]string{}})
+	require.NoError(t, err)
+	assert.Equal(t, `"b"`, resolved["a"])
+}
+
+// TestTerragruntFindInParentFolders covers the search itself plus its two failure modes.
+func TestTerragruntFindInParentFolders(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "a", "b")
+	require.NoError(t, os.MkdirAll(nested, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "root.hcl"), []byte("locals { x = 1 }\n"), 0o600))
+
+	functions := TerragruntFunctions(TerragruntOptions{ConfigDir: nested, Env: map[string]string{}})
+	found, err := functions["find_in_parent_folders"].Call([]cty.Value{cty.StringVal("root.hcl")})
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(dir, "root.hcl"), found.AsString())
+
+	// An empty name is rejected rather than searching for the directory itself.
+	_, err = functions["find_in_parent_folders"].Call([]cty.Value{cty.StringVal("")})
+	assert.Error(t, err)
+
+	// A name that exists nowhere fails, so the caller knows the inputs are unresolved.
+	_, err = functions["find_in_parent_folders"].Call([]cty.Value{cty.StringVal("absent.hcl")})
+	assert.Error(t, err)
+
+	// With no config directory known, the function must say so instead of searching from "/".
+	unknown := TerragruntFunctions(TerragruntOptions{})
+	_, err = unknown["find_in_parent_folders"].Call([]cty.Value{cty.StringVal("root.hcl")})
+	assert.Error(t, err)
+}
+
+// TestTerragruntDirectoryFunctionsWithoutDirs covers the guards on the directory helpers when the
+// caller knows nothing about the config's location.
+func TestTerragruntDirectoryFunctionsWithoutDirs(t *testing.T) {
+	functions := TerragruntFunctions(TerragruntOptions{})
+	for _, name := range []string{"get_terragrunt_dir", "get_parent_terragrunt_dir", "path_relative_to_include"} {
+		_, err := functions[name].Call(nil)
+		assert.Error(t, err, "%s must refuse when no directory is known", name)
+	}
+}
+
+// TestTerragruntTry covers the conservative try() behaviour.
+func TestTerragruntTry(t *testing.T) {
+	functions := TerragruntFunctions(TerragruntOptions{})
+
+	// The first non-null alternative wins.
+	got, err := functions["try"].Call([]cty.Value{cty.NullVal(cty.String), cty.StringVal("fallback")})
+	require.NoError(t, err)
+	assert.Equal(t, "fallback", got.AsString())
+
+	// A single known value is returned as-is.
+	got, err = functions["try"].Call([]cty.Value{cty.StringVal("only")})
+	require.NoError(t, err)
+	assert.Equal(t, "only", got.AsString())
+
+	// With nothing to choose from, the last alternative is returned so a value still comes back.
+	got, err = functions["try"].Call([]cty.Value{cty.NullVal(cty.String)})
+	require.NoError(t, err)
+	assert.True(t, got.IsNull())
+
+	// Calling it with no alternatives at all is an error.
+	_, err = functions["try"].Call(nil)
+	assert.Error(t, err)
+}
+
+// TestTerragruntLocalsWithoutAttributes covers a config whose locals blocks are all empty.
+func TestTerragruntLocalsWithoutAttributes(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", "locals {}\n")
+	body, src := parseTerragruntBody(t, path)
+
+	assert.Empty(t, TerragruntLocals(body, src, TerragruntOptions{ConfigDir: dir}))
+}
+
+// TestTerragruntFunctionSuccessPaths exercises the Terragrunt built-ins on the paths a real
+// configuration takes: a value found, a default applied, and each directory helper answered.
+func TestTerragruntFunctionSuccessPaths(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "envs", "prod")
+	require.NoError(t, os.MkdirAll(nested, 0o750))
+
+	t.Setenv("TFASTDIFF_PRESENT", "present-value")
+
+	functions := TerragruntFunctions(TerragruntOptions{ConfigDir: nested, RootDir: dir})
+
+	// get_env finds a set variable, and falls back when one is unset with no default.
+	got, err := functions["get_env"].Call([]cty.Value{cty.StringVal("TFASTDIFF_PRESENT"), cty.StringVal("d")})
+	require.NoError(t, err)
+	assert.Equal(t, "present-value", got.AsString())
+
+	got, err = functions["get_env"].Call([]cty.Value{cty.StringVal("TFASTDIFF_ABSENT_VAR"), cty.StringVal("d")})
+	require.NoError(t, err)
+	assert.Equal(t, "d", got.AsString())
+
+	got, err = functions["get_env"].Call([]cty.Value{cty.StringVal("TFASTDIFF_ABSENT_VAR"), cty.NullVal(cty.String)})
+	require.NoError(t, err)
+	assert.Equal(t, "", got.AsString(), "an unset variable with a null default resolves to empty")
+
+	// The directory helpers report the config directory and the root directory it includes.
+	got, err = functions["get_terragrunt_dir"].Call(nil)
+	require.NoError(t, err)
+	assert.Equal(t, nested, got.AsString())
+
+	got, err = functions["get_parent_terragrunt_dir"].Call(nil)
+	require.NoError(t, err)
+	assert.Equal(t, dir, got.AsString())
+
+	got, err = functions["path_relative_to_include"].Call(nil)
+	require.NoError(t, err)
+	assert.Equal(t, "envs/prod", got.AsString())
+
+	// A config sitting directly at the root has no relative path.
+	sameRoot := TerragruntFunctions(TerragruntOptions{ConfigDir: dir, RootDir: dir})
+	got, err = sameRoot["path_relative_to_include"].Call(nil)
+	require.NoError(t, err)
+	assert.Equal(t, "", got.AsString())
+
+	// With no explicit root, the config directory stands in as the root.
+	noRoot := TerragruntFunctions(TerragruntOptions{ConfigDir: dir})
+	got, err = noRoot["get_parent_terragrunt_dir"].Call(nil)
+	require.NoError(t, err)
+	assert.Equal(t, dir, got.AsString())
+}
+
+// TestTerragruntReadConfigReturnsObject covers read_terragrunt_config returning real locals, and
+// an absolute path.
+func TestTerragruntReadConfigReturnsObject(t *testing.T) {
+	dir := t.TempDir()
+	writeTerragrunt(t, dir, "shared.hcl", "locals {\n  region = \"ap-south1\"\n}\n")
+
+	functions := TerragruntFunctions(TerragruntOptions{ConfigDir: dir})
+	got, err := functions["read_terragrunt_config"].Call([]cty.Value{cty.StringVal("shared.hcl")})
+	require.NoError(t, err)
+	assert.Equal(t, "ap-south1", got.GetAttr("region").AsString())
+
+	// An absolute path resolves the same way.
+	got, err = functions["read_terragrunt_config"].Call([]cty.Value{cty.StringVal(filepath.Join(dir, "shared.hcl"))})
+	require.NoError(t, err)
+	assert.Equal(t, "ap-south1", got.GetAttr("region").AsString())
+
+	// Reading it with an explicit default that is not needed still returns the real value.
+	got, err = functions["read_terragrunt_config"].Call([]cty.Value{
+		cty.StringVal("shared.hcl"), cty.ObjectVal(map[string]cty.Value{"region": cty.StringVal("fallback")}),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ap-south1", got.GetAttr("region").AsString())
+
+	// An empty config with an explicit default returns that default.
+	writeTerragrunt(t, dir, "blank.hcl", "terraform {\n  source = \"./x\"\n}\n")
+	got, err = functions["read_terragrunt_config"].Call([]cty.Value{
+		cty.StringVal("blank.hcl"), cty.ObjectVal(map[string]cty.Value{"region": cty.StringVal("fallback")}),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "fallback", got.GetAttr("region").AsString())
+}
+
+// TestTerragruntReadConfigUnreadableWithoutDefault confirms the error when no fallback is offered.
+func TestTerragruntReadConfigUnreadableWithoutDefault(t *testing.T) {
+	functions := TerragruntFunctions(TerragruntOptions{ConfigDir: t.TempDir()})
+	_, err := functions["read_terragrunt_config"].Call([]cty.Value{cty.StringVal("absent.hcl")})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read_terragrunt_config(absent.hcl)")
+}
+
+// TestTerragruntRootDirDefault covers the option accessor directly.
+func TestTerragruntRootDirDefault(t *testing.T) {
+	assert.Equal(t, "/a/b", TerragruntOptions{ConfigDir: "/a/b"}.rootDir())
+	assert.Equal(t, "/root", TerragruntOptions{ConfigDir: "/a/b", RootDir: "/root"}.rootDir())
+	assert.Equal(t, "/a/b", TerragruntOptions{ConfigDir: "/a/b", RootDir: "  "}.rootDir(),
+		"a blank root falls back to the config directory")
+}
+
+// TestTerragruntLookupEnvNilUsesProcessEnv covers the default environment source.
+func TestTerragruntLookupEnvNilUsesProcessEnv(t *testing.T) {
+	t.Setenv("TFASTDIFF_FROM_PROCESS", "yes")
+	value, ok := TerragruntOptions{}.lookupEnv("TFASTDIFF_FROM_PROCESS")
+	assert.True(t, ok)
+	assert.Equal(t, "yes", value)
+
+	_, ok = TerragruntOptions{}.lookupEnv("TFASTDIFF_NOT_SET_ANYWHERE")
+	assert.False(t, ok)
+}
+
+// TestTerragruntIncludeRelativePathIsResolved confirms an include path is resolved against the
+// config directory, and that its locals become available.
+func TestTerragruntIncludeRelativePathIsResolved(t *testing.T) {
+	dir := t.TempDir()
+	writeTerragrunt(t, dir, "parent.hcl", "locals {\n  inherited = \"from-parent\"\n}\n")
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", `
+include {
+  path = "parent.hcl"
+}
+
+inputs = merge({}, { value = local.inherited })
+`)
+	body, src := parseTerragruntBody(t, path)
+
+	resolved, err := ReadTerragruntInputsWithContext(body, src, path, TerragruntOptions{Env: map[string]string{}})
+	require.NoError(t, err)
+	assert.Equal(t, `"from-parent"`, resolved["value"])
+}
+
+// TestTerragruntIncludeUnreadableParent confirms an unreadable include parent is skipped rather
+// than failing the config, since the child's own locals may still resolve.
+func TestTerragruntIncludeUnreadableParent(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", `
+include {
+  path = "absent.hcl"
+}
+
+locals {
+  own = "local-value"
+}
+
+inputs = merge({}, { value = local.own })
+`)
+	body, src := parseTerragruntBody(t, path)
+
+	resolved, err := ReadTerragruntInputsWithContext(body, src, path, TerragruntOptions{Env: map[string]string{}})
+	require.NoError(t, err)
+	assert.Equal(t, `"local-value"`, resolved["value"])
+}
+
+// TestTerragruntInputsEvaluationFails covers the error returned when the inputs expression itself
+// cannot be evaluated.
+func TestTerragruntInputsEvaluationFails(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", `
+inputs = merge({}, { broken = 1 + "two" })
+`)
+	body, src := parseTerragruntBody(t, path)
+
+	_, err := ReadTerragruntInputsWithContext(body, src, path, TerragruntOptions{Env: map[string]string{}})
+	assert.Error(t, err)
+}
+
+// TestTerragruntInputsNotAMap confirms an inputs expression that does not yield an object is
+// rejected rather than silently producing nothing.
+func TestTerragruntInputsNotAMap(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", `
+inputs = "a string"
+`)
+	body, src := parseTerragruntBody(t, path)
+
+	_, err := ReadTerragruntInputsWithContext(body, src, path, TerragruntOptions{Env: map[string]string{}})
+	assert.Error(t, err)
+}
+
+// TestTerragruntLocalsMergeInheritedAndOwn covers a child that both inherits locals from an
+// include parent and declares its own, which is the ordinary Terragrunt monorepo layout.
+func TestTerragruntLocalsMergeInheritedAndOwn(t *testing.T) {
+	dir := t.TempDir()
+	writeTerragrunt(t, dir, "parent.hcl", `
+locals {
+  inherited = "from-parent"
+  shared    = "parent-version"
+}
+`)
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", `
+include {
+  path = "parent.hcl"
+}
+
+locals {
+  own   = "from-child"
+  shared = "child-version"
+}
+
+inputs = merge({}, {
+  inherited = local.inherited
+  own       = local.own
+  shared    = local.shared
+})
+`)
+	body, src := parseTerragruntBody(t, path)
+
+	resolved, err := ReadTerragruntInputsWithContext(body, src, path, TerragruntOptions{Env: map[string]string{}})
+	require.NoError(t, err)
+	assert.Equal(t, `"from-parent"`, resolved["inherited"], "a parent local must remain visible")
+	assert.Equal(t, `"from-child"`, resolved["own"], "the child's own local must be visible")
+	assert.Equal(t, `"child-version"`, resolved["shared"],
+		"the child's own local must win over the inherited one of the same name")
+}
+
+// TestTerragruntLocalsDirect covers the locals accessor on its own.
+func TestTerragruntLocalsDirect(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", "locals {\n  a = \"x\"\n}\n")
+	body, src := parseTerragruntBody(t, path)
+
+	locals := TerragruntLocals(body, src, TerragruntOptions{ConfigDir: dir})
+	assert.Equal(t, "x", locals["a"].AsString())
+}
+
+// TestTerragruntPathRelativeWithMixedRoots covers the defensive branch: filepath.Rel cannot relate
+// an absolute path to a relative one, which a caller can produce by setting the two options
+// inconsistently. The helper then reports the config directory rather than an opaque error.
+func TestTerragruntPathRelativeWithMixedRoots(t *testing.T) {
+	functions := TerragruntFunctions(TerragruntOptions{ConfigDir: "relative/dir", RootDir: "/absolute/root"})
+
+	got, err := functions["path_relative_to_include"].Call(nil)
+	require.NoError(t, err, "an unrelatable pair must not surface as a function error")
+	assert.Equal(t, "relative/dir", got.AsString())
+}
+
+// TestTerragruntFindInParentFoldersUnresolvableStart covers the branch where the config directory
+// cannot be made absolute, which happens when the process working directory has been removed. The
+// search must fail explicitly rather than walk from an unknown place.
+func TestTerragruntFindInParentFoldersUnresolvableStart(t *testing.T) {
+	// Removing the working directory makes os.Getwd fail, which is the only way filepath.Abs can
+	// fail for a non-empty path.
+	vanished := t.TempDir()
+	require.NoError(t, os.Chdir(vanished))
+	t.Cleanup(func() { _ = os.Chdir("/") })
+	require.NoError(t, os.RemoveAll(vanished))
+
+	functions := TerragruntFunctions(TerragruntOptions{ConfigDir: "relative/only"})
+	_, err := functions["find_in_parent_folders"].Call([]cty.Value{cty.StringVal("root.hcl")})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot resolve relative/only")
 }

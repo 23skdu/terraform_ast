@@ -153,7 +153,8 @@ output "custom_output" {
 
 	// Check output delegations
 	require.Contains(t, info.WrapperOutputReferences, "cluster_endpoint")
-	ref := info.WrapperOutputReferences["cluster_endpoint"]
+	require.NotEmpty(t, info.WrapperOutputReferences["cluster_endpoint"])
+	ref := info.WrapperOutputReferences["cluster_endpoint"][0]
 	assert.Equal(t, "gke", ref.TargetModule)
 	assert.Equal(t, "endpoint", ref.TargetOutput)
 }
@@ -196,7 +197,7 @@ output "no_val" {
 
 	info2 := &ModuleInfo{
 		ModuleCalls:             make(map[string]ModuleCallDef),
-		WrapperOutputReferences: make(map[string]OutputReference),
+		WrapperOutputReferences: make(map[string][]OutputReference),
 	}
 	enrichFromHCLFiles(dir, info2)
 	enrichFromHCLFiles(edgeDir, info2)
@@ -264,11 +265,11 @@ func TestInspect_TerraformJSON(t *testing.T) {
 	assert.Equal(t, []string{"input"}, info.ModuleCalls["child"].PassedInputs)
 	assert.Equal(t, `"${var.name}"`, info.ModuleCalls["child"].InputExpressions["input"])
 	require.Contains(t, info.WrapperOutputReferences, "child_id")
-	assert.Equal(t, OutputReference{
+	assert.Equal(t, []OutputReference{{
 		OutputName:   "child_id",
 		TargetModule: "child",
 		TargetOutput: "id",
-	}, info.WrapperOutputReferences["child_id"])
+	}}, info.WrapperOutputReferences["child_id"])
 	assert.NotContains(t, info.WrapperOutputReferences, "literal")
 }
 
@@ -461,14 +462,15 @@ func TestEnrichFromHCLFilesOutputTraversalShapes(t *testing.T) {
 			dir := t.TempDir()
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "outputs.tf"), []byte(tc.source), 0644))
 
-			info := &ModuleInfo{WrapperOutputReferences: make(map[string]OutputReference)}
+			info := &ModuleInfo{WrapperOutputReferences: make(map[string][]OutputReference)}
 			enrichFromHCLFiles(dir, info)
 			assert.Len(t, info.WrapperOutputReferences, len(tc.expected))
 			for output, target := range tc.expected {
-				ref, ok := info.WrapperOutputReferences[output]
+				refs, ok := info.WrapperOutputReferences[output]
 				require.True(t, ok)
-				assert.Equal(t, target, ref.TargetOutput)
-				assert.Equal(t, "gke", ref.TargetModule)
+				require.NotEmpty(t, refs)
+				assert.Equal(t, target, refs[0].TargetOutput)
+				assert.Equal(t, "gke", refs[0].TargetModule)
 			}
 		})
 	}
@@ -481,7 +483,7 @@ func TestEnrichFromHCLFilesSkipsUnsupportedFiles(t *testing.T) {
 
 	info := &ModuleInfo{
 		Variables:               map[string]VariableDef{"a": {Name: "a", Type: "string"}},
-		WrapperOutputReferences: make(map[string]OutputReference),
+		WrapperOutputReferences: make(map[string][]OutputReference),
 	}
 	enrichFromHCLFiles(dir, info)
 	require.NotNil(t, info.Variables["a"].Nullable)
@@ -922,4 +924,44 @@ func TestStageModuleFiles_WriteFailureIsReported(t *testing.T) {
 	err := stageModuleFiles(source, staging, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to stage main.tf")
+}
+
+func TestInspect_ResourcesAndRebase(t *testing.T) {
+	dir := t.TempDir()
+	content := `
+provider "aws" {
+  alias = "west"
+}
+resource "aws_vpc" "main" {
+  provider = aws.west
+  cidr_block = "10.0.0.0/16"
+}
+resource "aws_subnet" "sub" {
+  vpc_id = aws_vpc.main.id
+}
+data "aws_ami" "ubuntu" {
+  provider = aws.west
+  most_recent = true
+}
+data "aws_region" "current" {}
+`
+	mainPath := filepath.Join(dir, "main.tf")
+	require.NoError(t, os.WriteFile(mainPath, []byte(content), 0644))
+
+	info, err := Inspect(dir)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	assert.Len(t, info.ManagedResources, 2)
+	assert.Len(t, info.DataResources, 2)
+	assert.Equal(t, "aws.west", info.ManagedResources["aws_vpc.main"].Provider)
+	assert.Equal(t, "aws", info.ManagedResources["aws_subnet.sub"].Provider)
+	assert.Equal(t, "aws.west", info.DataResources["data.aws_ami.ubuntu"].Provider)
+	assert.Equal(t, "aws", info.DataResources["data.aws_region.current"].Provider)
+
+	// Test InspectSource overlay to trigger rebaseModulePaths on resources
+	overlayInfo, err := InspectSource(dir, mainPath, content)
+	require.NoError(t, err)
+	require.NotNil(t, overlayInfo)
+	assert.Equal(t, mainPath, overlayInfo.ManagedResources["aws_vpc.main"].Pos.Filename)
+	assert.Equal(t, mainPath, overlayInfo.DataResources["data.aws_ami.ubuntu"].Pos.Filename)
 }

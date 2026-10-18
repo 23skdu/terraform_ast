@@ -154,6 +154,11 @@ func TestRegistryClient_ListVersions_And_GetLatest(t *testing.T) {
 			_, _ = w.Write([]byte(`{"modules": [{"versions": [{"version": "not-semver"}]}]}`))
 			return
 		}
+		if r.URL.Path == "/v1/modules/hashicorp/prerelease-only/aws/versions" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"modules": [{"versions": [{"version": "1.0.0-alpha"}]}]}`))
+			return
+		}
 		if r.URL.Path == "/v1/modules/hashicorp/bad-json/aws/versions" {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{invalid-json}`))
@@ -177,6 +182,11 @@ func TestRegistryClient_ListVersions_And_GetLatest(t *testing.T) {
 	latest, err := client.GetLatestVersion(ctx, "hashicorp/consul/aws")
 	require.NoError(t, err)
 	assert.Equal(t, "v2.0.0", latest)
+
+	// 2b. Latest version when only prereleases exist
+	latestPre, err := client.GetLatestVersion(ctx, "hashicorp/prerelease-only/aws")
+	require.NoError(t, err)
+	assert.Equal(t, "1.0.0-alpha", latestPre)
 
 	// 3. Error 404
 	_, err = client.ListVersions(ctx, "hashicorp/missing/aws")

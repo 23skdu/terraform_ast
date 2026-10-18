@@ -85,8 +85,8 @@ func stageModuleFiles(dir, staging string, overlay map[string][]byte) error {
 		} else if replaced {
 			data = replacement
 		}
-		// #nosec G306 -- staging directory is private to this process
-		if writeErr := os.WriteFile(filepath.Join(staging, name), data, 0o600); writeErr != nil {
+		// #nosec G306, G703 -- staging directory is private to this process
+		if writeErr := os.WriteFile(filepath.Clean(filepath.Join(staging, name)), data, 0o600); writeErr != nil {
 			return fmt.Errorf("failed to stage %s: %w", name, writeErr)
 		}
 	}
@@ -127,6 +127,14 @@ func rebaseModulePaths(info *ModuleInfo, from, to string) {
 	}
 	for i := range info.EncryptionBlocks {
 		info.EncryptionBlocks[i].Pos.Filename = rebasePath(info.EncryptionBlocks[i].Pos.Filename, from, to)
+	}
+	for name, r := range info.ManagedResources {
+		r.Pos.Filename = rebasePath(r.Pos.Filename, from, to)
+		info.ManagedResources[name] = r
+	}
+	for name, r := range info.DataResources {
+		r.Pos.Filename = rebasePath(r.Pos.Filename, from, to)
+		info.DataResources[name] = r
 	}
 	info.Path = to
 }
@@ -192,9 +200,11 @@ func inspectDir(dir string, overlay map[string][]byte) (info *ModuleInfo, err er
 		Outputs:                 make(map[string]OutputDef),
 		ModuleCalls:             make(map[string]ModuleCallDef),
 		RequiredProviders:       make(map[string]ProviderRequirement),
-		WrapperOutputReferences: make(map[string]OutputReference),
+		WrapperOutputReferences: make(map[string][]OutputReference),
 		CheckBlocks:             make(map[string]CheckBlockDef),
 		Functions:               make(map[string]FunctionDef),
+		ManagedResources:        make(map[string]ResourceDef),
+		DataResources:           make(map[string]ResourceDef),
 	}
 
 	if tfMod != nil {
@@ -245,6 +255,36 @@ func inspectDir(dir string, overlay map[string][]byte) (info *ModuleInfo, err er
 				Source:               req.Source,
 				VersionConstraints:   req.VersionConstraints,
 				ConfigurationAliases: aliases,
+			}
+		}
+
+		// Managed Resources
+		for name, res := range tfMod.ManagedResources {
+			prov := res.Provider.Name
+			if res.Provider.Alias != "" {
+				prov = prov + "." + res.Provider.Alias
+			}
+			info.ManagedResources[name] = ResourceDef{
+				Mode:     "managed",
+				Type:     res.Type,
+				Name:     res.Name,
+				Provider: prov,
+				Pos:      res.Pos,
+			}
+		}
+
+		// Data Resources
+		for name, res := range tfMod.DataResources {
+			prov := res.Provider.Name
+			if res.Provider.Alias != "" {
+				prov = prov + "." + res.Provider.Alias
+			}
+			info.DataResources[name] = ResourceDef{
+				Mode:     "data",
+				Type:     res.Type,
+				Name:     res.Name,
+				Provider: prov,
+				Pos:      res.Pos,
 			}
 		}
 
@@ -414,11 +454,11 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 							if !okOutput {
 								continue
 							}
-							info.WrapperOutputReferences[outName] = OutputReference{
+							info.WrapperOutputReferences[outName] = append(info.WrapperOutputReferences[outName], OutputReference{
 								OutputName:   outName,
 								TargetModule: module.Name,
 								TargetOutput: output.Name,
-							}
+							})
 							break
 						}
 					}

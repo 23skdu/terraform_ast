@@ -16,6 +16,7 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/blastradius"
 	"github.com/23skdu/terraform_ast/pkg/codemod"
 	"github.com/23skdu/terraform_ast/pkg/diff"
+	"github.com/23skdu/terraform_ast/pkg/eval"
 	"github.com/23skdu/terraform_ast/pkg/gitops"
 	"github.com/23skdu/terraform_ast/pkg/lsp"
 	"github.com/23skdu/terraform_ast/pkg/planner"
@@ -25,15 +26,17 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/report"
 	"github.com/23skdu/terraform_ast/pkg/semverutil"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
-	"golang.org/x/sync/errgroup"
 )
 
 var (
+	version           = "0.9.0"
 	osExit            = os.Exit
 	mkdirTemp         = os.MkdirTemp
 	newRegistryClient = func() *registry.Client {
 		return registry.NewClient(nil)
 	}
+	analyzeVariableTaint   = eval.AnalyzeVariableTaint
+	inspectModulesParallel = ast.InspectModulesParallel
 )
 
 // defaultRegistryTimeout bounds how long the CLI will keep retrying and waiting on the Terraform
@@ -58,8 +61,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	defer stop()
 
 	if len(args) > 0 && (args[0] == "lsp" || args[0] == "daemon") {
-		server := lsp.NewServer(stdout)
-		_ = server.Serve(os.Stdin)
+		_ = lsp.RunDaemonStreams(os.Stdin, stdout)
 		return 0
 	}
 
@@ -67,6 +69,8 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 
 	var (
+		showVersion        bool
+		verbose            bool
 		wrapperPath        string
 		upstreamPath       string
 		oldPath            string
@@ -79,6 +83,8 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		checkRecreation    bool
 		enforceExit1       bool
 		policyPath         string
+		regoPolicyPath     string
+		taintVar           string
 		fixPreview         bool
 		fixMode            bool
 		upgradePath        bool
@@ -89,6 +95,9 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		registryTimeout    time.Duration
 	)
 
+	fs.BoolVar(&showVersion, "version", false, "Print version and exit")
+	fs.BoolVar(&verbose, "verbose", false, "Enable verbose logging to stderr")
+	fs.BoolVar(&verbose, "v", false, "Enable verbose logging to stderr (shorthand)")
 	fs.StringVar(&wrapperPath, "wrapper", "", "Path to the Terraform module wrapper directory")
 	fs.StringVar(&upstreamPath, "upstream", "", "Path, Git URL, or Registry identifier of the upstream Terraform module")
 	fs.StringVar(&oldPath, "old", "", "Path, Git URL, or Registry identifier to the current/old upstream module")
@@ -116,6 +125,8 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&checkRecreation, "check-recreation", true, "Check for resource recreation & state destruction hazards")
 	fs.BoolVar(&enforceExit1, "exit-code", false, "Exit with code 1 if breaking changes are detected")
 	fs.StringVar(&policyPath, "policy", "", "Optional JSON policy file for CI enforcement")
+	fs.StringVar(&regoPolicyPath, "rego-policy", "", "Optional Rego (.rego) policy file for policy enforcement")
+	fs.StringVar(&taintVar, "taint", "", "Optional input variable name to perform taint/propagation analysis on (wrapper mode)")
 	fs.BoolVar(&fixPreview, "fix-preview", false, "Preview a patch removing wrapper arguments no longer accepted upstream (never edits files)")
 	fs.BoolVar(&fixMode, "fix", false, "Apply fixes in-place to remove wrapper arguments no longer accepted upstream")
 	fs.BoolVar(&upgradePath, "upgrade-path", false, "Analyze each intermediate semantic version between --old-version and --new-version")
@@ -129,6 +140,11 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	if showVersion {
+		_, _ = fmt.Fprintf(stdout, "tfastdiff %s\n", version)
+		return 0
+	}
+
 	// Record which flags the caller actually supplied, so a default value is never mistaken for
 	// a deliberate request. --check-recreation defaults to true, so only an explicit
 	// --check-recreation=false is a request the CLI cannot honour.
@@ -136,8 +152,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	fs.Visit(func(f *flag.Flag) { supplied[f.Name] = true })
 
 	if lspDaemon {
-		server := lsp.NewServer(stdout)
-		_ = server.Serve(os.Stdin)
+		_ = lsp.RunDaemonStreams(os.Stdin, stdout)
 		return 0
 	}
 
@@ -164,6 +179,10 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		}
 		if supplied["check-recreation"] {
 			_, _ = fmt.Fprintln(stderr, "Error: --check-recreation is not supported with --fix or --fix-preview; run the audit separately")
+			return 2
+		}
+		if taintVar != "" {
+			_, _ = fmt.Fprintln(stderr, "Error: --taint is not supported with --fix or --fix-preview; run the audit separately")
 			return 2
 		}
 		// The codemod emits a plain patch, so a machine-readable format could never be honoured.
@@ -218,17 +237,31 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	var regoPolicy *policy.RegoPolicy
+	if regoPolicyPath != "" {
+		var err error
+		regoPolicy, err = policy.LoadRego(regoPolicyPath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error loading Rego policy %s: %v\n", regoPolicyPath, err)
+			return 2
+		}
+	}
+
 	// Mode 1: Wrapper Audit Mode
 	if wrapperPath != "" {
 		if upgradePath {
 			_, _ = fmt.Fprintln(stderr, "Error: --upgrade-path is only available in direct comparison mode")
 			return 2
 		}
-		return runWrapperMode(ctx, registryTimeout, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir, checkRecreation, enforceExit1, fixPreview, fixMode, policyConfig, dynamicRegistry, stdout, stderr)
+		return runWrapperMode(ctx, registryTimeout, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir, checkRecreation, enforceExit1, fixPreview, fixMode, policyConfig, regoPolicy, taintVar, verbose, dynamicRegistry, stdout, stderr)
 	}
 
 	// Mode 2: Direct Upstream Comparison Mode
 	if oldPath != "" || newPath != "" {
+		if taintVar != "" {
+			_, _ = fmt.Fprintln(stderr, "Error: --taint is only available in wrapper audit mode")
+			return 2
+		}
 		if fixPreview {
 			_, _ = fmt.Fprintln(stderr, "Error: --fix-preview is only available in wrapper audit mode")
 			return 2
@@ -243,7 +276,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stderr, "Error: --blast-radius is only available in wrapper audit mode")
 			return 2
 		}
-		return runCompareMode(ctx, registryTimeout, oldPath, newPath, oldVersion, newVersion, format, outputFile, checkRecreation, enforceExit1, upgradePath, policyConfig, dynamicRegistry, stdout, stderr)
+		return runCompareMode(ctx, registryTimeout, oldPath, newPath, oldVersion, newVersion, format, outputFile, checkRecreation, enforceExit1, upgradePath, policyConfig, regoPolicy, verbose, dynamicRegistry, stdout, stderr)
 	}
 
 	_, _ = fmt.Fprintln(stderr, "Error: Must specify either --wrapper <dir> OR --old <path> and --new <path>")
@@ -265,7 +298,13 @@ func registryContext(ctx context.Context, timeout time.Duration) (context.Contex
 	return context.WithTimeout(ctx, timeout)
 }
 
-func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir string, checkRecreation, enforceExit1, fixPreview, fixMode bool, policyConfig *policy.Policy, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
+func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir string, checkRecreation, enforceExit1, fixPreview, fixMode bool, policyConfig *policy.Policy, regoPolicy *policy.RegoPolicy, taintVar string, verbose bool, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
+	vlog := func(format string, a ...any) {
+		if verbose {
+			_, _ = fmt.Fprintf(stderr, "[verbose] "+format+"\n", a...)
+		}
+	}
+	vlog("Inspecting wrapper module %s", wrapperPath)
 	wInfo, err := ast.Inspect(wrapperPath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "Error inspecting wrapper module %s: %v\n", wrapperPath, err)
@@ -315,6 +354,7 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 				return 1
 			}
 		}
+		vlog("Downloading target upstream module %s@%s", upstreamPath, ver)
 		regCtx, cancel := registryContext(ctx, registryTimeout)
 		err = client.DownloadModule(regCtx, upstreamPath, ver, tmpTarget)
 		cancel()
@@ -324,6 +364,7 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		}
 		targetDir = tmpTarget
 	} else if isGitURL(upstreamPath) || (newVersion != "" && isGitRepo(upstreamPath)) {
+		vlog("Checking out target upstream version %s from %s", newVersion, upstreamPath)
 		tmpTarget, err := gitops.GlobalCache.GetOrExtract(upstreamPath, newVersion, newCachedDir("tf_upstream_target_*"))
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error checking out target upstream version: %v\n", err)
@@ -332,6 +373,7 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		targetDir = tmpTarget
 	}
 
+	vlog("Inspecting target upstream module %s", targetDir)
 	targetInfo, err := ast.Inspect(targetDir)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "Error inspecting target upstream module %s: %v\n", targetDir, err)
@@ -348,6 +390,7 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 				return 1
 			}
 			cleanupDirs = append(cleanupDirs, tmpPinned)
+			vlog("Downloading pinned upstream module %s@%s", upstreamPath, oldVersion)
 			regCtx, cancel := registryContext(ctx, registryTimeout)
 			err = registryClient(registryTimeout).DownloadModule(regCtx, upstreamPath, oldVersion, tmpPinned)
 			cancel()
@@ -360,6 +403,7 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 			}
 			pinnedDir = tmpPinned
 		} else if isGitURL(upstreamPath) || isGitRepo(upstreamPath) {
+			vlog("Checking out pinned upstream version %s from %s", oldVersion, upstreamPath)
 			tmpPinned, err := gitops.GlobalCache.GetOrExtract(upstreamPath, oldVersion, newCachedDir("tf_upstream_pinned_*"))
 			if err != nil {
 				_, _ = fmt.Fprintf(stderr, "Error checking out pinned upstream version %s of %s: %v\n", oldVersion, upstreamPath, err)
@@ -367,6 +411,7 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 			}
 			pinnedDir = tmpPinned
 		}
+		vlog("Inspecting pinned upstream module %s", pinnedDir)
 		pinnedInfo, err = ast.Inspect(pinnedDir)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error inspecting pinned upstream module %s: %v\n", pinnedDir, err)
@@ -374,9 +419,10 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		}
 	}
 
+	vlog("Analyzing wrapper compatibility against target upstream")
 	res := wrapper.AnalyzeWrapper(wInfo, targetInfo, pinnedInfo, newVersion, oldVersion)
 	res.WrapperPath = wrapperPath
-	if policyConfig != nil {
+	if policyConfig != nil || regoPolicy != nil {
 		policyInput := policy.Input{
 			BreakingChanges: res.TotalBreaking,
 			Warnings:        res.TotalWarnings,
@@ -387,7 +433,12 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 			policyInput.IsDowngrade = res.UpstreamDiff.IsDowngrade
 			policyInput.BumpType = string(res.UpstreamDiff.BumpType)
 		}
-		res.PolicyViolations = policy.Evaluate(policyConfig, policyInput)
+		if policyConfig != nil {
+			res.PolicyViolations = append(res.PolicyViolations, policy.Evaluate(policyConfig, policyInput)...)
+		}
+		if regoPolicy != nil {
+			res.PolicyViolations = append(res.PolicyViolations, policy.EvaluateRego(regoPolicy, policyInput)...)
+		}
 	}
 	if fixPreview {
 		var removedInputs []string
@@ -452,10 +503,25 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 
 	findings := report.Findings{}
 	if checkRecreation {
+		if dynamicRegistry == nil {
+			dynamicRegistry, _ = recreation.AutoDiscoverSchemas(wInfo, ast.GetPersistentCacheDir())
+		}
 		findings.RecreationHazards = recreation.AnalyzeWrapperHazardsWithRegistry(res, dynamicRegistry)
 	}
+	var taintReport *eval.TaintReport
+	if taintVar != "" {
+		vlog("Analyzing taint for input variable var.%s", taintVar)
+		var err error
+		taintReport, err = analyzeVariableTaint(wrapperPath, taintVar)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error analyzing variable taint: %v\n", err)
+			return 1
+		}
+		findings.Taint = taintReport
+	}
 	if blastRadiusDir != "" {
-		blastReport, err := blastradius.ScanDirectory(blastRadiusDir, wrapperPath, wInfo, res)
+		vlog("Scanning downstream consumers in %s", blastRadiusDir)
+		blastReport, err := blastradius.ScanDirectoryWithTaint(blastRadiusDir, wrapperPath, wInfo, res, dynamicRegistry, taintReport)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error scanning blast radius: %v\n", err)
 			return 1
@@ -479,7 +545,12 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 	return 0
 }
 
-func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath, newPath, oldVersion, newVersion, format, outputFile string, checkRecreation, enforceExit1, analyzeUpgradePath bool, policyConfig *policy.Policy, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
+func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath, newPath, oldVersion, newVersion, format, outputFile string, checkRecreation, enforceExit1, analyzeUpgradePath bool, policyConfig *policy.Policy, regoPolicy *policy.RegoPolicy, verbose bool, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
+	vlog := func(format string, a ...any) {
+		if verbose {
+			_, _ = fmt.Fprintf(stderr, "[verbose] "+format+"\n", a...)
+		}
+	}
 	if oldPath == "" || newPath == "" {
 		_, _ = fmt.Fprintln(stderr, "Error: Both --old and --new must be specified for module comparison")
 		return 2
@@ -524,6 +595,7 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 				return 1
 			}
 		}
+		vlog("Downloading old module version %s@%s", oldPath, ver)
 		regCtx, cancel := registryContext(ctx, registryTimeout)
 		err = client.DownloadModule(regCtx, oldPath, ver, tmpOld)
 		cancel()
@@ -533,6 +605,7 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		}
 		actualOld = tmpOld
 	} else if isGitURL(oldPath) || (oldVersion != "" && isGitRepo(oldPath)) {
+		vlog("Checking out old repository version %s from %s", oldVersion, oldPath)
 		tmpOld, err := gitops.GlobalCache.GetOrExtract(oldPath, oldVersion, newCachedDir("tf_old_*"))
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error checking out old version: %v\n", err)
@@ -560,6 +633,7 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 				return 1
 			}
 		}
+		vlog("Downloading new module version %s@%s", newPath, ver)
 		regCtx, cancel := registryContext(ctx, registryTimeout)
 		err = client.DownloadModule(regCtx, newPath, ver, tmpNew)
 		cancel()
@@ -569,6 +643,7 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		}
 		actualNew = tmpNew
 	} else if isGitURL(newPath) || (newVersion != "" && isGitRepo(newPath)) {
+		vlog("Checking out new repository version %s from %s", newVersion, newPath)
 		tmpNew, err := gitops.GlobalCache.GetOrExtract(newPath, newVersion, newCachedDir("tf_new_*"))
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error checking out new version: %v\n", err)
@@ -577,32 +652,19 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		actualNew = tmpNew
 	}
 
-	var oldInfo, newInfo *ast.ModuleInfo
-	g, _ := errgroup.WithContext(ctx)
-
-	g.Go(func() error {
-		var err error
-		oldInfo, err = ast.Inspect(actualOld)
-		if err != nil {
-			return fmt.Errorf("inspecting old module %s: %w", actualOld, err)
+	vlog("Inspecting modules in parallel: %s and %s", actualOld, actualNew)
+	modules, err := ast.InspectModulesParallel(ctx, []string{actualOld, actualNew}, 2)
+	if err != nil {
+		if strings.Contains(err.Error(), actualOld) {
+			_, _ = fmt.Fprintf(stderr, "Error comparing modules: inspecting old module %s: %v\n", actualOld, err)
+		} else {
+			_, _ = fmt.Fprintf(stderr, "Error comparing modules: inspecting new module %s: %v\n", actualNew, err)
 		}
-		return nil
-	})
-
-	g.Go(func() error {
-		var err error
-		newInfo, err = ast.Inspect(actualNew)
-		if err != nil {
-			return fmt.Errorf("inspecting new module %s: %w", actualNew, err)
-		}
-		return nil
-	})
-
-	if err := g.Wait(); err != nil {
-		_, _ = fmt.Fprintf(stderr, "Error comparing modules: %v\n", err)
 		return 1
 	}
+	oldInfo, newInfo := modules[0], modules[1]
 
+	vlog("Comparing modules: %s -> %s", oldVersion, newVersion)
 	diffReport := diff.Compare(oldInfo, newInfo, oldVersion, newVersion)
 	// Identify the compared module by the source the user asked for, so reports and SARIF
 	// artifact locations name the module instead of a temporary extraction directory.
@@ -611,6 +673,7 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		diffReport.ModuleName = comparedSource
 	}
 	if analyzeUpgradePath {
+		vlog("Analyzing upgrade path between %s and %s", oldVersion, newVersion)
 		pathReport, err := analyzeUpgradePathVersions(ctx, registryTimeout, oldPath, newPath, oldVersion, newVersion, oldInfo, newInfo)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error analyzing upgrade path: %v\n", err)
@@ -626,6 +689,16 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		if policyConfig != nil {
 			for _, step := range pathReport.Steps {
 				pathReport.PolicyViolations = append(pathReport.PolicyViolations, policy.Evaluate(policyConfig, policy.Input{
+					BreakingChanges: step.Diff.TotalBreaking,
+					Warnings:        step.Diff.TotalWarnings,
+					IsDowngrade:     step.Diff.IsDowngrade,
+					BumpType:        string(step.Diff.BumpType),
+				})...)
+			}
+		}
+		if regoPolicy != nil {
+			for _, step := range pathReport.Steps {
+				pathReport.PolicyViolations = append(pathReport.PolicyViolations, policy.EvaluateRego(regoPolicy, policy.Input{
 					BreakingChanges: step.Diff.TotalBreaking,
 					Warnings:        step.Diff.TotalWarnings,
 					IsDowngrade:     step.Diff.IsDowngrade,
@@ -651,17 +724,26 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		}
 		return 0
 	}
-	if policyConfig != nil {
-		diffReport.PolicyViolations = policy.Evaluate(policyConfig, policy.Input{
+	if policyConfig != nil || regoPolicy != nil {
+		input := policy.Input{
 			BreakingChanges: diffReport.TotalBreaking,
 			Warnings:        diffReport.TotalWarnings,
 			IsDowngrade:     diffReport.IsDowngrade,
 			BumpType:        string(diffReport.BumpType),
-		})
+		}
+		if policyConfig != nil {
+			diffReport.PolicyViolations = append(diffReport.PolicyViolations, policy.Evaluate(policyConfig, input)...)
+		}
+		if regoPolicy != nil {
+			diffReport.PolicyViolations = append(diffReport.PolicyViolations, policy.EvaluateRego(regoPolicy, input)...)
+		}
 	}
 
 	findings := report.Findings{}
 	if checkRecreation {
+		if dynamicRegistry == nil {
+			dynamicRegistry, _ = recreation.AutoDiscoverSchemas(newInfo, ast.GetPersistentCacheDir())
+		}
 		findings.RecreationHazards = recreation.AnalyzeHazardsWithRegistry(diffReport, dynamicRegistry)
 	}
 	outContent := renderDiffOutput(format, diffReport, findings)
@@ -693,6 +775,9 @@ func renderWrapperOutput(format string, res *wrapper.WrapperCompatibilityReport,
 		}
 		if findings.BlastRadius != nil {
 			out += "\n" + findings.BlastRadius.RenderMarkdown()
+		}
+		if findings.Taint != nil {
+			out += "\n" + report.FormatTaintMarkdown(findings.Taint)
 		}
 		return out
 	default:
@@ -736,46 +821,88 @@ func analyzeUpgradePathVersions(ctx context.Context, registryTimeout time.Durati
 	if err != nil {
 		return nil, err
 	}
-	snapshots := make([]planner.VersionSnapshot, 0, len(versions))
-	for _, version := range versions {
+	snapshots := make([]planner.VersionSnapshot, len(versions))
+	var intermediateIndices []int
+	var intermediateDirs []string
+	var cleanupDirs []string
+	defer func() {
+		for _, d := range cleanupDirs {
+			_ = os.RemoveAll(d)
+		}
+	}()
+
+	for i, version := range versions {
 		switch {
 		case semverutil.Compare(version, oldVersion) == 0:
-			snapshots = append(snapshots, planner.VersionSnapshot{Version: version, Module: oldInfo})
+			snapshots[i] = planner.VersionSnapshot{Version: version, Module: oldInfo}
 		case semverutil.Compare(version, newVersion) == 0:
-			snapshots = append(snapshots, planner.VersionSnapshot{Version: version, Module: newInfo})
+			snapshots[i] = planner.VersionSnapshot{Version: version, Module: newInfo}
 		default:
-			module, err := inspectModuleVersion(ctx, registryTimeout, source, version)
+			dir, isTemp, err := resolveModuleVersionDir(ctx, registryTimeout, source, version)
 			if err != nil {
-				return nil, fmt.Errorf("inspect intermediate version %s: %w", version, err)
+				return nil, fmt.Errorf("retrieve intermediate version %s: %w", version, err)
 			}
-			snapshots = append(snapshots, planner.VersionSnapshot{Version: version, Module: module})
+			if isTemp {
+				cleanupDirs = append(cleanupDirs, dir)
+			}
+			intermediateIndices = append(intermediateIndices, i)
+			intermediateDirs = append(intermediateDirs, dir)
 		}
 	}
+
+	if len(intermediateDirs) > 0 {
+		inspected, err := inspectModulesParallel(ctx, intermediateDirs, 4)
+		if err != nil {
+			for idx, dir := range intermediateDirs {
+				if strings.Contains(err.Error(), dir) {
+					origIdx := intermediateIndices[idx]
+					return nil, fmt.Errorf("inspect intermediate version %s: %w", versions[origIdx], err)
+				}
+			}
+			return nil, fmt.Errorf("inspect intermediate versions: %w", err)
+		}
+		for idx, mod := range inspected {
+			origIdx := intermediateIndices[idx]
+			snapshots[origIdx] = planner.VersionSnapshot{Version: versions[origIdx], Module: mod}
+		}
+	}
+
 	return planner.AnalyzeUpgradePath(snapshots)
 }
 
 func inspectModuleVersion(ctx context.Context, registryTimeout time.Duration, source, version string) (*ast.ModuleInfo, error) {
+	dir, isTemp, err := resolveModuleVersionDir(ctx, registryTimeout, source, version)
+	if err != nil {
+		return nil, err
+	}
+	if isTemp {
+		defer func() { _ = os.RemoveAll(dir) }()
+	}
+	return ast.Inspect(dir)
+}
+
+func resolveModuleVersionDir(ctx context.Context, registryTimeout time.Duration, source, version string) (string, bool, error) {
 	if registry.IsRegistrySource(source) {
 		directory, err := mkdirTemp("", "tfastdiff_upgrade_step_*")
 		if err != nil {
-			return nil, fmt.Errorf("create temporary module directory: %w", err)
+			return "", false, fmt.Errorf("create temporary module directory: %w", err)
 		}
-		defer func() { _ = os.RemoveAll(directory) }()
 		regCtx, cancel := registryContext(ctx, registryTimeout)
 		defer cancel()
 		if err := registryClient(registryTimeout).DownloadModule(regCtx, source, version, directory); err != nil {
-			return nil, fmt.Errorf("download registry module %s@%s: %w", source, version, err)
+			_ = os.RemoveAll(directory)
+			return "", false, fmt.Errorf("download registry module %s@%s: %w", source, version, err)
 		}
-		return ast.Inspect(directory)
+		return directory, true, nil
 	}
 	if isGitURL(source) || isGitRepo(source) {
 		directory, err := gitops.GlobalCache.GetOrExtract(source, version, newCachedDir("tfastdiff_upgrade_step_*"))
 		if err != nil {
-			return nil, fmt.Errorf("checkout repository version %s: %w", version, err)
+			return "", false, fmt.Errorf("checkout repository version %s: %w", version, err)
 		}
-		return ast.Inspect(directory)
+		return directory, false, nil
 	}
-	return nil, fmt.Errorf("cannot retrieve intermediate version %s from a non-versioned local directory", version)
+	return "", false, fmt.Errorf("cannot retrieve intermediate version %s from a non-versioned local directory", version)
 }
 
 // newCachedDir builds the directory factory handed to the shared repository cache so that
@@ -805,7 +932,8 @@ func isGitRepo(path string) bool {
 
 func writeOutput(outputFile, content string, stdout io.Writer) error {
 	if outputFile != "" {
-		return os.WriteFile(filepath.Clean(outputFile), []byte(content), 0600)
+		// #nosec G306 -- reports are intended to be readable by downstream CI tooling
+		return os.WriteFile(filepath.Clean(outputFile), []byte(content), 0644)
 	}
 	_, err := fmt.Fprint(stdout, content)
 	return err

@@ -55,22 +55,25 @@ func Compare(v1, v2 string) int {
 // Sort sorts a slice of version strings in ascending semver order.
 // Non-semver items are sorted lexicographically at the front.
 func Sort(versions []string) []string {
-	result := make([]string, len(versions))
-	copy(result, versions)
-	sort.Slice(result, func(i, j int) bool {
-		vi, vj := Normalize(result[i]), Normalize(result[j])
-		validI, validJ := semver.IsValid(vi), semver.IsValid(vj)
-		if validI && validJ {
-			return semver.Compare(vi, vj) < 0
+	var nonSemver, validSemver []string
+	for _, v := range versions {
+		if IsValid(v) {
+			validSemver = append(validSemver, v)
+		} else {
+			nonSemver = append(nonSemver, v)
 		}
-		if validI {
-			return false
+	}
+	sort.Strings(nonSemver)
+	sort.Slice(validSemver, func(i, j int) bool {
+		cmp := semver.Compare(Normalize(validSemver[i]), Normalize(validSemver[j]))
+		if cmp != 0 {
+			return cmp < 0
 		}
-		if validJ {
-			return true
-		}
-		return result[i] < result[j]
+		return validSemver[i] < validSemver[j]
 	})
+	result := make([]string, 0, len(versions))
+	result = append(result, nonSemver...)
+	result = append(result, validSemver...)
 	return result
 }
 
@@ -83,6 +86,23 @@ func FilterValid(versions []string) []string {
 		}
 	}
 	return valid
+}
+
+// IsPrerelease returns true if v is a valid semver with a prerelease component.
+func IsPrerelease(v string) bool {
+	norm := Normalize(v)
+	return IsValid(norm) && semver.Prerelease(norm) != ""
+}
+
+// FilterPrereleases filters out any prerelease versions.
+func FilterPrereleases(versions []string) []string {
+	var stable []string
+	for _, v := range versions {
+		if !IsPrerelease(v) {
+			stable = append(stable, v)
+		}
+	}
+	return stable
 }
 
 // DetermineBumpType analyzes the transition from oldVer to newVer.

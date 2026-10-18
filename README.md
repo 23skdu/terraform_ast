@@ -29,10 +29,14 @@
   - Detects broken output delegations (`module.<name>.<output>`).
   - Generates recommended pinning constraints (e.g. `version = "30.0.0"`).
   - Outlines exact remediation steps for engineers.
+- **State Graph & Intermediate Representation (IR)**: Tracks canonical hierarchical Terraform resource instance addresses (`module.vpc.aws_subnet.this["a"]`) and detects state destruction hazards when topology or naming shifts between module versions.
+- **Automated `moved {}` Block Synthesis**: Translates detected resource address shifts directly into Terraform 1.1+ `moved {}` blocks (`moved { from = ... to = ... }`), eliminating manual remediation.
+- **Dynamic Provider Schema Auto-Discovery**: Automatically inspects `required_providers`, discovers local schemas or queries built-in ForceNew attribute tables for standard cloud providers (AWS, GCP, AzureRM, Kubernetes, Cloudflare), and caches them in the persistent L2 disk cache.
 - **Multi-Format Output**: Terminal text with visual indicators, GitHub-flavored Markdown for PR comments, machine-readable JSON for CI/CD gates, and SARIF for code scanning.
-- **Policy & Remediation Previews**: Enforce JSON-defined breaking-change, warning, downgrade, and maximum-bump rules; preview a unified patch for removed wrapper arguments without modifying Terraform files.
+- **Enterprise Policy Governance (OPA Rego v1)**: Enforce JSON or official OPA SDK-powered Rego policies (`--policy`, `--rego-policy`) evaluating arbitrary findings; trace input variable taint dependency graphs across module boundaries (`--taint`); preview unified patches for removed wrapper arguments.
 - **Upgrade-Path Analysis**: Compare adjacent semantic-version Git tags or Registry releases across a major-version jump, identify the last continuously safe version, and emit text, Markdown, or JSON reports.
-- **Enterprise Test Coverage**: **100% statement coverage** across every package, enforced in CI. Validated via [Terratest](test/terratest/) on realistic GKE/EKS fixtures, [Golden Image / Golden File](test/golden/) regression testing, and native Go fuzz targets over every parser.
+- **Language Server Protocol (LSP)**: Built-in JSON-RPC 2.0 language server (`tfastdiff daemon` / `--lsp`) with buffer-aware diagnostics and automated quick fixes.
+- **Enterprise Test Coverage**: **100% statement coverage** across every package, enforced in CI. Validated via [Terratest](test/terratest/) on realistic GKE/EKS fixtures, [Golden Image / Golden File](test/golden/) regression testing, and 19 native Go fuzz targets over every parser.
 
 ---
 
@@ -212,16 +216,22 @@ Native Go fuzz targets cover every untrusted-input parser. Each one is seeded, r
 | `FuzzInspect` | `pkg/ast` | Inspect never panics and re-inspection is stable |
 | `FuzzCheckTypeCompatibility` | `pkg/ast` | Compatible is never breaking; `any` widening/narrowing rules hold |
 | `FuzzParseObjectSchema` | `pkg/ast` | Parsed attribute keys always match their recorded names |
+| `FuzzParseModernHCLBlocks` | `pkg/ast` | Modern HCL blocks parse stably or fail gracefully |
+| `FuzzDifferentialValidation` | `pkg/ast` | AST parser matches compiler validation invariants |
 | `FuzzDiscoverCallSites` | `pkg/blastradius` | Consumer scanning never panics and always yields a complete call site |
-| `FuzzTerragruntInputKey` | `pkg/blastradius` | Terragrunt keys resolve to a name or cleanly fail |
 | `FuzzDiscoverJSONCallSites` | `pkg/blastradius` | Terraform JSON scanning never panics |
+| `FuzzTerragruntInputKey` | `pkg/blastradius` | Terragrunt keys resolve to a name or cleanly fail |
 | `FuzzPreviewRemovedInputs` | `pkg/codemod` | Patch generation never modifies the wrapper it inspects |
 | `FuzzUnifiedReplacement` | `pkg/codemod` | Generated patches always carry a valid unified diff header |
+| `FuzzFormatMovedBlocks` | `pkg/codemod` | Generated `moved {}` blocks are syntactically valid |
+| `FuzzEvaluateExpression` | `pkg/eval` | HCL expression evaluation never panics |
+| `FuzzLSPServe` | `pkg/lsp` | LSP JSON-RPC framing handles arbitrary payloads safely |
+| `FuzzParseProviderSchema` | `pkg/recreation` | Dynamic provider schema parsing never panics |
 | `FuzzIsRegistrySource` | `pkg/registry` | Local paths and VCS addresses are never treated as Registry sources |
 | `FuzzParseRegistrySource` | `pkg/registry` | Registry addresses parse completely or are rejected |
 | `FuzzNormalizeAndIsValid` | `pkg/semverutil` | Normalisation is idempotent and agrees with the semver library |
 | `FuzzDetermineBumpType` | `pkg/semverutil` | Bump classification always matches semver ordering |
-| `FuzzSort` | `pkg/semverutil` | Sorting preserves every element |
+| `FuzzSort` | `pkg/semverutil` | Sorting preserves every element and enforces strict weak ordering |
 
 Run a single target:
 
@@ -254,4 +264,4 @@ go test -v ./test/docker
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is released into the public domain under the Unlicense - see the [LICENSE](LICENSE) file for details.

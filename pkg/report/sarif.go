@@ -87,7 +87,7 @@ const (
 	sarifSchema = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
 	sarifVer    = "2.1.0"
 	toolName    = "terraform-ast-diff"
-	toolVer     = "0.1.0"
+	toolVer     = "0.9.0"
 	toolURI     = "https://github.com/23skdu/terraform_ast"
 
 	ruleBreaking         = "TF-DIFF-BREAKING-CHANGE"
@@ -139,13 +139,20 @@ var defaultRules = []SARIFRule{
 	},
 }
 
-func sarifLocation(artifact string) []SARIFLocation {
+func sarifLocationWithLine(artifact string, line int) []SARIFLocation {
+	if line <= 0 {
+		line = 1
+	}
 	return []SARIFLocation{{
 		PhysicalLocation: SARIFPhysicalLocation{
-			ArtifactLocation: SARIFArtifactLocation{URI: artifact},
-			Region:           SARIFRegion{StartLine: 1},
+			ArtifactLocation: SARIFArtifactLocation{URI: artifactOrDefault(artifact)},
+			Region:           SARIFRegion{StartLine: line},
 		},
 	}}
+}
+
+func sarifLocation(artifact string) []SARIFLocation {
+	return sarifLocationWithLine(artifact, 1)
 }
 
 func artifactOrDefault(artifact string) string {
@@ -252,11 +259,15 @@ func RenderWrapperSARIF(res *wrapper.WrapperCompatibilityReport, findings Findin
 }
 
 func sarifResult(ruleID, level, artifact, message string) SARIFResult {
+	return sarifResultWithLine(ruleID, level, artifact, 1, message)
+}
+
+func sarifResultWithLine(ruleID, level, artifact string, line int, message string) SARIFResult {
 	return SARIFResult{
 		RuleID:    ruleID,
 		Level:     level,
 		Message:   SARIFMessageText{Text: message},
-		Locations: sarifLocation(artifact),
+		Locations: sarifLocationWithLine(artifact, line),
 	}
 }
 
@@ -275,14 +286,21 @@ func appendBlastResults(results []SARIFResult, blast *blastradius.BlastRadiusRep
 	for _, impact := range blast.ImpactedRootModules {
 		if impact.CanSafelyUpdate && len(impact.RemovedInputsPassed) == 0 &&
 			len(impact.MissingRequiredInputs) == 0 && len(impact.RemovedOutputsReferenced) == 0 &&
-			len(impact.RecreationHazards) == 0 {
+			len(impact.RecreationHazards) == 0 && !impact.AnalysisIncomplete {
 			continue
 		}
-		results = append(results, sarifResult(ruleBlastRadius, "error", artifactOrDefault(impact.Dir),
-			fmt.Sprintf("[%s] downstream consumer %s is impacted (risk %s): removed inputs %v, missing required inputs %v, removed outputs %v, recreation hazards %v",
-				impact.ModuleName, impact.Dir, impact.RiskScore,
-				impact.RemovedInputsPassed, impact.MissingRequiredInputs,
-				impact.RemovedOutputsReferenced, impact.RecreationHazards)))
+		level := "error"
+		if impact.AnalysisIncomplete && impact.CanSafelyUpdate {
+			level = "warning"
+		}
+		msg := fmt.Sprintf("[%s] downstream consumer %s is impacted (risk %s): removed inputs %v, missing required inputs %v, removed outputs %v, recreation hazards %v",
+			impact.ModuleName, impact.Dir, impact.RiskScore,
+			impact.RemovedInputsPassed, impact.MissingRequiredInputs,
+			impact.RemovedOutputsReferenced, impact.RecreationHazards)
+		if impact.AnalysisIncomplete {
+			msg += " (analysis incomplete: some dynamic inputs could not be statically evaluated)"
+		}
+		results = append(results, sarifResult(ruleBlastRadius, level, artifactOrDefault(impact.Dir), msg))
 	}
 	return results
 }

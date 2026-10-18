@@ -129,7 +129,7 @@ func cloneModule(src *ast.ModuleInfo, newPath string) *ast.ModuleInfo {
 		Variables:               make(map[string]ast.VariableDef),
 		Outputs:                 make(map[string]ast.OutputDef),
 		ModuleCalls:             make(map[string]ast.ModuleCallDef),
-		WrapperOutputReferences: make(map[string]ast.OutputReference),
+		WrapperOutputReferences: make(map[string][]ast.OutputReference),
 		RequiredCore:            src.RequiredCore,
 	}
 	for k, v := range src.Variables {

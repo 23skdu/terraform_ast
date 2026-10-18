@@ -36,34 +36,41 @@ flowchart LR
 - **Terragrunt Dynamic Inputs**: Evaluates Terragrunt `inputs = merge(...)` blocks and wrapper variable delegations without failing with incomplete analysis.
 - **Dependency Taint Analysis**: Traces input variables through intermediate `locals` and child module calls to verify whether an upstream breaking change reaches an active managed resource or remains dead code.
 
-### 3. State Recreation & `ForceNew` Hazard Detection (`pkg/recreation`)
-- **Dynamic Provider Schema Ingestion**: Ingests schema dumps (`terraform providers schema -json`) to extract `requires_replace` metadata across all cloud resource attributes.
+### 3. State Recreation, `ForceNew` Hazards & Dynamic Auto-Discovery (`pkg/recreation`)
+- **Dynamic Provider Schema Auto-Discovery**: Automatically inspects `required_providers` in the AST, discovers local schemas or queries built-in ForceNew attribute tables for standard cloud providers (AWS, GCP, AzureRM, Kubernetes, Cloudflare), and writes schemas to the persistent L2 disk cache.
+- **Dynamic Provider Schema Ingestion**: Ingests custom schema dumps (`terraform providers schema -json`) to extract `requires_replace` metadata across arbitrary cloud resource attributes.
 - **Built-in Cloud Heuristics**: Pre-configured immutability detection for flagship multi-cloud modules:
   - **GCP GKE**: Cluster name, region, network, subnetwork, and secondary pod CIDR blocks.
   - **AWS EKS**: Cluster name, VPC attachment, and IP family.
   - **Azure AKS**: Cluster name, resource group, location, and DNS prefix.
 - **Disaster Prevention**: Alerts teams before applying plans that would trigger complete database rebuilds or Kubernetes control plane destructions.
 
-### 4. Monorepo Blast Radius & Terragrunt Scanner (`pkg/blastradius`)
+### 4. Intermediate Representation (IR) & State Graph Theory (`pkg/ast`)
+- **Eliminating the "Static AST Fallacy"**: While static variable analysis ensures syntactic compatibility, Terraform's runtime state is organized as a hierarchical instance address graph. If an internal resource switches from singleton to indexed (`count` or `for_each`) or is moved into a child module, the interface diff is empty, but Terraform destroys and recreates the resource on apply.
+- **Canonical Address Model**: Evaluates addresses into canonical forms (`module.vpc.aws_subnet.this["a"]`) capturing module nesting, resource mode (`managed` vs `data`), type, name, and index keys.
+- **Evaluation Graph & Shift Detection**: Builds an IR graph (`EvaluationGraph`) of module resources and detects address displacements between versions (`DetectAddressShifts`), alerting operators to unmitigated state destruction.
+
+### 5. Monorepo Blast Radius & Inter-Procedural Taint Reachability (`pkg/blastradius`, `pkg/eval`)
 - **Recursive Monorepo Traversal**: Discovers all downstream root modules and Terragrunt environments consuming an upstream module.
+- **Inter-Procedural Taint Reachability**: Directly wires `--taint <var>` into `--blast-radius` scans, dynamically tracing value flows through module calls and filtering out downstream consumers that do not actively pass or consume tainted variables.
 - **Consumer Impact Assessment**: Pinpoints exactly which call sites pass deprecated arguments or reference removed outputs.
 - **Unified SARIF & JSON Reporting**: Emits structured diagnostics (`TF-BLAST-RADIUS-CONSUMER`) for GitHub Code Scanning and enterprise compliance dashboards.
 
-### 5. Automated Migration Codemods & Planner (`pkg/codemod`, `pkg/planner`)
+### 6. Automated Migration Codemods & State Refactoring (`pkg/codemod`, `pkg/planner`)
 - **In-Place Refactoring (`--fix`)**: Modifies `.tf` files using `hclwrite` to cleanly strip obsolete arguments while preserving indentation and comments.
-- **Safe `moved {}` Block Synthesis**: Automatically outputs refactoring declarations (`from = ...` to `to = ...`) to prevent resource re-creation when upstream refactors internal module addresses.
+- **Automated `moved {}` Block Synthesis**: Detects resource address shifts between module versions and automatically synthesizes Terraform 1.1+ state migration declarations (`moved { from = ... to = ... }`), preventing production downtime and state loss.
 - **Transitive Multi-Version Planner**: Analyzes intermediate Git releases (e.g. `v25.0.0` to `v31.0.0`) to find the highest contiguous "safe harbor" version.
 
-### 6. Enterprise Policy Governance (OPA / Rego & JSON Gates) (`pkg/policy`)
-- **Open Policy Agent (OPA) Integration**: Evaluates customizable Rego policies (`deny[msg]`, `violation[msg]`) against diff and blast radius reports.
+### 7. Enterprise Policy Governance (Official OPA Go SDK & Rego v1) (`pkg/policy`)
+- **Real Open Policy Agent (OPA) Integration**: Powered by the official Open Policy Agent Go SDK (`github.com/open-policy-agent/opa/v1/rego`) with full Rego v1 keyword support (`contains`, `if`), comprehensions, sets, and helper rules.
 - **Architectural Rules**: Enforce policies such as blocking major version jumps in production environments, requiring review if blast radius exceeds 5 root modules, or disallowing breaking changes in PCI-DSS compliant repositories.
 
-### 7. IDE Language Server Protocol Daemon (`pkg/lsp`)
+### 8. IDE Language Server Protocol Daemon (`pkg/lsp`)
 - **Editor Diagnostics**: Runs over stdio (`tfastdiff daemon` / `--lsp`) implementing JSON-RPC 2.0 for VS Code, Neovim, and JetBrains. Diagnostics are published on open, change, and save, and are computed from the in-editor buffer so they reflect unsaved edits.
 - **Quick-Fix Code Actions**: `textDocument/codeAction` and `workspace/executeCommand` write `moved {}` blocks and inject missing required module inputs. Both commands are registered in `executeCommandProvider`, so a client can actually run them.
-- **Protocol Correctness**: Notifications are never answered, the `initialize`/`shutdown`/`exit` lifecycle is honoured, and message framing rejects an out-of-range `Content-Length` instead of allocating from it. Currently reports deprecated variables; editor-side breaking-change analysis is roadmap item #43.
+- **Protocol Correctness**: Notifications are never answered, the `initialize`/`shutdown`/`exit` lifecycle is honoured, and message framing rejects an out-of-range `Content-Length` instead of allocating from it.
 
-### 8. Enterprise Supply Chain Security & SLSA Level 3 (`.github/workflows`)
+### 9. Enterprise Supply Chain Security & SLSA Level 3 (`.github/workflows`)
 - **Hermetic SLSA Level 3 Provenance**: Automated cryptographic build attestations via GitHub Actions builders.
 - **Sigstore Cosign Keyless Signing**: Cryptographically signs release binaries and container images.
 - **Syft SBOM**: Generates both CycloneDX and SPDX Software Bill of Materials at build time.

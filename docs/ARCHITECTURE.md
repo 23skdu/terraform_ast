@@ -103,7 +103,33 @@ flowchart TD
   - Recommends exact version pinning syntax (e.g. `version = "30.0.0"`).
   - Generates clear, actionable remediation steps.
 
-### 9. `pkg/report` (Multi-Format Reporting & Golden Matcher)
+### 9. `pkg/ast` Intermediate Representation (IR) & State Graph Theory
+- **The "Static AST Fallacy"**: Traditional Terraform static checkers compare module interfaces (variables and outputs). In the Terraform execution engine, however, state persistence is keyed strictly by **hierarchical instance addresses** (`module.vpc.aws_subnet.this["public"]`). If an internal module refactoring converts a singleton resource to an indexed one (`count` or `for_each`) or changes submodule nesting, interface types remain 100% identical, but `terraform apply` triggers silent **destruction and re-creation** of all existing cloud resources.
+- **Canonical Address Model (`ResourceAddress`)**:
+  - Full hierarchical address decomposition: `[ModulePath].[Mode].[Type].[Name][[IndexKey]]`.
+  - Canonical formatting and parsing: handles arbitrary module depths (`module.parent.module.child`), data resources (`data.aws_ami.ubuntu`), and instance keys (`[0]`, `["a"]`).
+- **Evaluation Graph (`EvaluationGraph`)**:
+  - Constructs a directed graph of all declared managed and data resource addresses.
+  - Nodes $N = \{ \text{addr} \to \text{ResourceDef} \}$ track resource mode, type, name, and provider configurations.
+- **Topological Shift Detection & Recreation Prediction**:
+  - `DetectAddressShifts(oldMod, newMod)` performs bidirectional bipartite address comparison.
+  - Unmatched addresses sharing identical type/mode are detected as address shifts ($\text{addr}_{old} \to \text{addr}_{new}$) and flagged as state recreation hazards (`IsRecreation: true`).
+  - Completely dropped resources are identified as state instance deletions.
+
+### 10. `pkg/codemod` (Automated Code Remediation & State Migration)
+- **Capabilities**:
+  - In-place AST refactoring with `hclwrite` preserving comments, formatting, and file structure.
+  - Atomic multi-file writes: all modified files are staged in memory and validated before committing to disk.
+  - Automated `moved {}` block synthesis: `SynthesizeMovedBlocksForShifts` maps detected AST address shifts directly into Terraform 1.1+ state migration blocks (`moved { from = ...; to = ... }`), deduplicating transitions and appending idempotently via `WriteMovedBlocks`.
+
+### 11. `pkg/policy` (Open Policy Agent OPA & Rego v1 Governance)
+- **Engine**: Official Open Policy Agent Go SDK (`github.com/open-policy-agent/opa/v1/rego`).
+- **Capabilities**:
+  - Evaluates standard OPA Rego policies against structured findings (`input.breaking_changes`, `input.bump_type`, `input.blast_radius`).
+  - Supports modern Rego v1 syntax (`contains`, `if`) and legacy rule formats (`deny[msg]`, `violation[msg]`).
+  - Fail-closed security architecture: invalid queries or unknown rule blocks fail explicitly rather than permitting unvalidated changes.
+
+### 12. `pkg/report` (Multi-Format Reporting & Golden Matcher)
 - **Capabilities**:
   - Formats results into interactive terminal text with leading status indicators that mark
     breaking changes, new features, warnings, and policy violations.

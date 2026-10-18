@@ -1,9 +1,14 @@
 package policy
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/open-policy-agent/opa/v1/rego"
 )
 
 // RegoRule represents a single parsed rule from a Rego policy file.
@@ -23,7 +28,18 @@ type RegoCondition struct {
 // RegoPolicy contains parsed Rego policy rules.
 type RegoPolicy struct {
 	Package string
+	Source  string
 	Rules   []RegoRule
+}
+
+// LoadRego reads and parses an OPA / Rego policy document from a file.
+func LoadRego(path string) (*RegoPolicy, error) {
+	// #nosec G304 -- operator specified policy file path
+	src, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		return nil, fmt.Errorf("read rego policy file %s: %w", path, err)
+	}
+	return ParseRego(string(src))
 }
 
 // ParseRego parses an OPA / Rego policy document.
@@ -31,6 +47,7 @@ func ParseRego(src string) (*RegoPolicy, error) {
 	lines := strings.Split(src, "\n")
 	policy := &RegoPolicy{
 		Package: "terraform_ast.policy",
+		Source:  src,
 	}
 
 	var currentRule *RegoRule
@@ -47,10 +64,14 @@ func ParseRego(src string) (*RegoPolicy, error) {
 			continue
 		}
 
-		if strings.HasPrefix(trimmed, "deny[") || strings.HasPrefix(trimmed, "violation[") {
+		if strings.HasPrefix(trimmed, "deny[") || strings.HasPrefix(trimmed, "violation[") ||
+			strings.HasPrefix(trimmed, "deny contains") || strings.HasPrefix(trimmed, "violation contains") ||
+			strings.HasPrefix(trimmed, "deny if") || strings.HasPrefix(trimmed, "violation if") ||
+			strings.HasPrefix(trimmed, "deny =") || strings.HasPrefix(trimmed, "violation =") ||
+			strings.HasPrefix(trimmed, "deny :=") || strings.HasPrefix(trimmed, "violation :=") {
 			inRule = true
 			ruleName := "deny"
-			if strings.HasPrefix(trimmed, "violation[") {
+			if strings.HasPrefix(trimmed, "violation") {
 				ruleName = "violation"
 			}
 			currentRule = &RegoRule{
@@ -77,6 +98,10 @@ func ParseRego(src string) (*RegoPolicy, error) {
 				continue
 			}
 
+			if strings.Contains(trimmed, ":=") {
+				continue
+			}
+
 			cond, err := parseCondition(trimmed)
 			if err != nil {
 				return nil, fmt.Errorf("line %d: %w", lineNum+1, err)
@@ -87,6 +112,10 @@ func ParseRego(src string) (*RegoPolicy, error) {
 
 	if inRule && currentRule != nil {
 		policy.Rules = append(policy.Rules, *currentRule)
+	}
+
+	if len(policy.Rules) == 0 {
+		return nil, fmt.Errorf("no valid rules found in Rego policy")
 	}
 
 	return policy, nil
@@ -101,6 +130,17 @@ func parseCondition(condStr string) (RegoCondition, error) {
 			field := strings.TrimSpace(parts[0])
 			val := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
 			field = strings.TrimPrefix(field, "input.")
+
+			validFields := map[string]struct{}{
+				"breaking_changes": {},
+				"warnings":         {},
+				"is_downgrade":     {},
+				"bump_type":        {},
+			}
+			if _, ok := validFields[field]; !ok {
+				return RegoCondition{}, fmt.Errorf("unrecognized policy field: %s", field)
+			}
+
 			return RegoCondition{
 				Field:    field,
 				Operator: op,
@@ -116,7 +156,17 @@ func EvaluateRego(policy *RegoPolicy, input Input) []Violation {
 	if policy == nil {
 		return nil
 	}
-	var violations []Violation
+	inputMap := map[string]any{
+		"breaking_changes": input.BreakingChanges,
+		"warnings":         input.Warnings,
+		"is_downgrade":     input.IsDowngrade,
+		"bump_type":        input.BumpType,
+	}
+
+	violations, err := EvaluateRegoArbitrary(context.Background(), policy, inputMap)
+	if err == nil && len(violations) > 0 {
+		return violations
+	}
 
 	for _, rule := range policy.Rules {
 		matched := true
@@ -138,6 +188,71 @@ func EvaluateRego(policy *RegoPolicy, input Input) []Violation {
 		}
 	}
 	return violations
+}
+
+// EvaluateRegoArbitrary evaluates a Rego policy using the official Open Policy Agent runtime.
+func EvaluateRegoArbitrary(ctx context.Context, policy *RegoPolicy, input any) ([]Violation, error) {
+	if policy == nil || policy.Source == "" {
+		return nil, nil
+	}
+	src := policy.Source
+	if !strings.Contains(src, "import rego.v1") && !strings.Contains(src, "import future.keywords") {
+		if strings.Contains(src, "contains") || strings.Contains(src, " if ") || strings.Contains(src, " if{") {
+			pkgHeader := "package " + policy.Package
+			src = strings.Replace(src, pkgHeader, pkgHeader+"\nimport rego.v1\n", 1)
+		}
+	}
+	queryStr := fmt.Sprintf("data.%s", policy.Package)
+	r := rego.New(
+		rego.Query(queryStr),
+		rego.Module("policy.rego", src),
+		rego.Input(input),
+	)
+	rs, err := r.Eval(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("opa evaluation error: %w", err)
+	}
+	if len(rs) == 0 || len(rs[0].Expressions) == 0 {
+		return nil, nil
+	}
+
+	var violations []Violation
+	exprVal := rs[0].Expressions[0].Value
+	if valMap, ok := exprVal.(map[string]any); ok {
+		for _, ruleKey := range []string{"deny", "violation"} {
+			if raw, ok := valMap[ruleKey]; ok {
+				switch v := raw.(type) {
+				case []any:
+					for _, item := range v {
+						violations = append(violations, Violation{
+							Rule:    ruleKey,
+							Message: fmt.Sprintf("%v", item),
+						})
+					}
+				case map[string]any:
+					for _, item := range v {
+						violations = append(violations, Violation{
+							Rule:    ruleKey,
+							Message: fmt.Sprintf("%v", item),
+						})
+					}
+				case string:
+					violations = append(violations, Violation{
+						Rule:    ruleKey,
+						Message: v,
+					})
+				case bool:
+					if v {
+						violations = append(violations, Violation{
+							Rule:    ruleKey,
+							Message: fmt.Sprintf("Rego policy rule '%s' violated", ruleKey),
+						})
+					}
+				}
+			}
+		}
+	}
+	return violations, nil
 }
 
 func matchesCondition(cond RegoCondition, input Input) bool {

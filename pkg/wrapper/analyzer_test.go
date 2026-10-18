@@ -42,12 +42,12 @@ func TestAnalyzeWrapper_BreakingIssues(t *testing.T) {
 		Outputs: map[string]ast.OutputDef{
 			"endpoint": {Name: "endpoint"},
 		},
-		WrapperOutputReferences: map[string]ast.OutputReference{
-			"endpoint": {
+		WrapperOutputReferences: map[string][]ast.OutputReference{
+			"endpoint": {{
 				OutputName:   "endpoint",
 				TargetModule: "gke",
 				TargetOutput: "legacy_endpoint", // removed in upstream
-			},
+			}},
 		},
 	}
 
@@ -74,6 +74,11 @@ func TestAnalyzeWrapper_BreakingIssues(t *testing.T) {
 				Type:       "bool",
 				HasDefault: true,
 			},
+			"existing_optional": {
+				Name:       "existing_optional",
+				Type:       "bool",
+				HasDefault: true,
+			},
 		},
 		Outputs: map[string]ast.OutputDef{
 			"cluster_id": {Name: "cluster_id"},
@@ -82,8 +87,9 @@ func TestAnalyzeWrapper_BreakingIssues(t *testing.T) {
 
 	pinnedUpstream := &ast.ModuleInfo{
 		Variables: map[string]ast.VariableDef{
-			"project_id":     {Name: "project_id", Type: "string"},
-			"obsolete_param": {Name: "obsolete_param", Type: "string"},
+			"project_id":        {Name: "project_id", Type: "string"},
+			"obsolete_param":    {Name: "obsolete_param", Type: "string"},
+			"existing_optional": {Name: "existing_optional", Type: "bool", HasDefault: true},
 		},
 		Outputs: map[string]ast.OutputDef{
 			"legacy_endpoint": {Name: "legacy_endpoint"},
@@ -392,11 +398,11 @@ func TestAnalyzeWrapper_OutputDelegationScopedToAuditedCalls(t *testing.T) {
 		},
 		Variables: map[string]ast.VariableDef{},
 		Outputs:   map[string]ast.OutputDef{},
-		WrapperOutputReferences: map[string]ast.OutputReference{
+		WrapperOutputReferences: map[string][]ast.OutputReference{
 			// Belongs to the audited call.
-			"mine": {OutputName: "mine", TargetModule: "gke", TargetOutput: "gone"},
+			"mine": {{OutputName: "mine", TargetModule: "gke", TargetOutput: "gone"}},
 			// Belongs to an unrelated module, which this upstream cannot speak for.
-			"theirs": {OutputName: "theirs", TargetModule: "something_else", TargetOutput: "also_gone"},
+			"theirs": {{OutputName: "theirs", TargetModule: "something_else", TargetOutput: "also_gone"}},
 		},
 	}
 	targetUpstream := &ast.ModuleInfo{
@@ -467,7 +473,7 @@ func TestSelectTargetCallsDeterministic(t *testing.T) {
 			"mid":   {Name: "mid"},
 		},
 	}
-	calls := selectTargetCalls(wrapperMod, &ast.ModuleInfo{})
+	calls := selectTargetCalls(wrapperMod)
 	require.Len(t, calls, 3)
 	assert.Equal(t, []string{"alpha", "mid", "zeta"}, callNames(calls))
 }

@@ -3,9 +3,13 @@ package blastradius
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
+	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/23skdu/terraform_ast/pkg/diff"
+	"github.com/23skdu/terraform_ast/pkg/eval"
+	"github.com/23skdu/terraform_ast/pkg/recreation"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
@@ -228,8 +232,56 @@ func TestIsMatchingSource(t *testing.T) {
 	caller := "/repos/app/main.tf"
 	assert.True(t, isMatchingSource(caller, "../modules/vpc", "../modules/vpc"))
 	assert.True(t, isMatchingSource(caller, "../modules/vpc", "vpc"))
+	assert.False(t, isMatchingSource(caller, "../modules/vpc", "other"))
 	assert.True(t, isMatchingSource(caller, "./submod", "/repos/app/submod"))
 	assert.False(t, isMatchingSource(caller, "hashicorp/consul", "my-vpc"))
+
+	// filepath.IsAbs(cleanTarget) with relative resolved
+	relCaller := "app/main.tf"
+	absTarget, _ := filepath.Abs("app/submod")
+	assert.True(t, isMatchingSource(relCaller, "./submod", absTarget))
+
+	// filepath.IsAbs(callerDir) && !filepath.IsAbs(cleanTarget) where absTarget matches resolved
+	cwd, _ := os.Getwd()
+	nestedCaller := filepath.Join(cwd, "nested", "main.tf")
+	assert.True(t, isMatchingSource(nestedCaller, "./submod", "nested/submod"))
+
+	// sourceHasSlash && strings.HasSuffix(resolved, cleanTarget)
+	assert.True(t, isMatchingSource("/a/b/main.tf", "c/d", "b/c/d"))
+	assert.False(t, isMatchingSource("/a/b/main.tf", "c/d", "x/y"))
+}
+
+func TestEvaluateCallSiteImpact_WrapperModOutputsAndRegistry(t *testing.T) {
+	wrapperMod := &ast.ModuleInfo{
+		Outputs: map[string]ast.OutputDef{
+			"existing_out": {Name: "existing_out"},
+		},
+	}
+	cs := CallSite{
+		OutputsReferenced: []string{"existing_out", "deleted_out"},
+		PassedInputs:      map[string]string{"custom_force_new": "val"},
+	}
+	ps := &recreation.ProviderSchemas{
+		ProviderSchemas: map[string]recreation.ProviderSchema{
+			"aws": {
+				ResourceSchemas: map[string]recreation.ResourceSchema{
+					"aws_instance": {
+						Block: recreation.BlockSchema{
+							Attributes: map[string]recreation.AttributeSchema{
+								"custom_force_new": {RequiresReplace: true},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	reg := recreation.NewDynamicHazardRegistry(ps)
+	impact := evaluateCallSiteImpact(cs, wrapperMod, &wrapper.WrapperCompatibilityReport{}, reg)
+	assert.False(t, impact.CanSafelyUpdate)
+	assert.Contains(t, impact.RemovedOutputsReferenced, "deleted_out")
+	require.Len(t, impact.RecreationHazards, 1)
+	assert.Contains(t, impact.RecreationHazards[0], "custom_force_new")
 }
 
 func TestExtractModuleReferencesUsesExpressions(t *testing.T) {
@@ -280,12 +332,17 @@ func TestScanDirectory_FilteringAndErrors(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, rep.TotalCallSitesScanned)
 
-	// Unreadable dir triggers error in WalkDir
+	// Unreadable subdirectory is skipped in WalkDir without aborting scan
 	unreadable := filepath.Join(dir, "unreadable")
 	require.NoError(t, os.MkdirAll(unreadable, 0750))
 	require.NoError(t, os.Chmod(unreadable, 0000))
 	defer func() { _ = os.Chmod(unreadable, 0750) }()
-	_, err = ScanDirectory(dir, "target", nil, nil)
+	rep, err = ScanDirectory(dir, "target", nil, nil)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, rep.TotalCallSitesScanned)
+
+	// Scanning unreadable root directly returns an error
+	_, err = ScanDirectory(unreadable, "target", nil, nil)
 	assert.Error(t, err)
 }
 
@@ -309,7 +366,7 @@ func TestEvaluateCallSiteImpact_RiskLevels(t *testing.T) {
 			},
 		},
 	}
-	impactHigh := evaluateCallSiteImpact(cs, nil, auditHigh)
+	impactHigh := evaluateCallSiteImpact(cs, nil, auditHigh, nil)
 	assert.Equal(t, "HIGH", impactHigh.RiskScore)
 	assert.False(t, impactHigh.CanSafelyUpdate)
 
@@ -324,7 +381,7 @@ func TestEvaluateCallSiteImpact_RiskLevels(t *testing.T) {
 			},
 		},
 	}
-	impactMed := evaluateCallSiteImpact(cs, nil, auditMed)
+	impactMed := evaluateCallSiteImpact(cs, nil, auditMed, nil)
 	assert.Equal(t, "MEDIUM", impactMed.RiskScore)
 	assert.False(t, impactMed.CanSafelyUpdate)
 }
@@ -583,7 +640,13 @@ func TestDiscoverCallSitesPropagatesWalkErrors(t *testing.T) {
 		t.Skip("filesystem allows reading mode-000 directories; skipping the walk error branch")
 	}
 
-	_, err := discoverCallSites(root, "wrapper")
+	// Unreadable subdirectory should be skipped without error
+	sites, err := discoverCallSites(root, "wrapper")
+	require.NoError(t, err)
+	assert.Empty(t, sites)
+
+	// Unreadable root searchDir should return an error
+	_, err = discoverCallSites(blocked, "wrapper")
 	require.Error(t, err)
 }
 
@@ -627,7 +690,7 @@ func TestEvaluateCallSiteImpact_BlockingTypeMismatchIsMediumRisk(t *testing.T) {
 				Description: "Wrapper variable 'zones' type changed incompatibly",
 			},
 		},
-	})
+	}, nil)
 	assert.False(t, impact.CanSafelyUpdate)
 	assert.Equal(t, "MEDIUM", impact.RiskScore)
 }
@@ -649,7 +712,7 @@ func TestEvaluateCallSiteImpact_IncompleteAnalysisOnly(t *testing.T) {
 		Dir:                     "/envs/dev",
 		ModuleName:              "dev_cluster",
 		InputAnalysisIncomplete: true,
-	}, nil, nil)
+	}, nil, nil, nil)
 	assert.False(t, impact.CanSafelyUpdate)
 	assert.Equal(t, "MEDIUM", impact.RiskScore)
 }
@@ -659,7 +722,7 @@ func TestEvaluateCallSiteImpact_IncompleteAnalysisIsAlwaysMedium(t *testing.T) {
 		Dir:                     "/envs/dev",
 		ModuleName:              "dev_cluster",
 		InputAnalysisIncomplete: true,
-	}, nil, &wrapper.WrapperCompatibilityReport{})
+	}, nil, &wrapper.WrapperCompatibilityReport{}, nil)
 	assert.False(t, impact.CanSafelyUpdate)
 	assert.Equal(t, "MEDIUM", impact.RiskScore)
 }
@@ -719,7 +782,7 @@ func TestEvaluateCallSiteImpact_HazardSurvivesWithoutMatchingWrapperIssue(t *tes
 		Issues:        []wrapper.WrapperIssue{},
 		TotalBreaking: 0,
 		Verdict:       "SAFE_TO_PIN",
-	})
+	}, nil)
 
 	assert.Len(t, impact.RecreationHazards, 2,
 		"project_id and name are immutable GKE attributes and must be reported")
@@ -740,6 +803,460 @@ func TestEvaluateCallSiteImpact_HazardReportedOncePerInput(t *testing.T) {
 			{Category: "MissingRequiredInput", Target: "name"},
 			{Category: "TypeMismatch", Target: "name"},
 		},
-	})
+	}, nil)
 	assert.Len(t, impact.RecreationHazards, 1)
+}
+
+// parseTerragrunt reads a config from dir and returns the resolved call site, which is what the
+// tests below assert against. Going through the parser directly rather than ScanDirectory keeps
+// the assertions focused on input evaluation rather than on the directory walk.
+func parseTerragrunt(t *testing.T, path, target string) CallSite {
+	t.Helper()
+	src, err := os.ReadFile(path)
+	require.NoError(t, err)
+	site, ok := parseTerragruntCallSite(src, path, target)
+	require.True(t, ok, "the config must be recognised as a call site")
+	return site
+}
+
+// TestTerragruntDynamicInputsAreEvaluated is the regression test for roadmap #14. Dynamic inputs
+// were evaluated against an empty context with no Terragrunt built-ins, so the canonical
+// `merge(local.defaults, {...})` idiom always failed and every realistic Terragrunt consumer was
+// reported as fully unanalysed.
+func TestTerragruntDynamicInputsAreEvaluated(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "terragrunt.hcl")
+	config := `
+locals {
+  region = "us-central1"
+  defaults = {
+    region        = local.region
+    removed_input = "legacy"
+    cluster_name  = "prod"
+  }
+}
+
+terraform {
+  source = "../modules/gke_wrapper"
+}
+
+inputs = merge(local.defaults, {
+  cluster_name = "prod-override"
+})
+`
+	require.NoError(t, os.WriteFile(path, []byte(config), 0600))
+
+	site := parseTerragrunt(t, path, "gke_wrapper")
+	assert.False(t, site.InputAnalysisIncomplete,
+		"a config whose locals resolve must not be reported as unanalysed")
+	assert.Equal(t, `"prod-override"`, site.PassedInputs["cluster_name"],
+		"merge must let the explicit object override the locals default")
+	assert.Equal(t, `"us-central1"`, site.PassedInputs["region"],
+		"a local referencing another local must resolve")
+	assert.Equal(t, `"legacy"`, site.PassedInputs["removed_input"])
+}
+
+// TestTerragruntInputsFromIncludeChainParents covers a root config supplying the locals a child
+// merges, which is how a real Terragrunt monorepo is laid out.
+func TestTerragruntInputsFromIncludeChainParents(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "root.hcl")
+	require.NoError(t, os.WriteFile(root, []byte(`
+locals {
+  defaults = {
+    region       = "us-east1"
+    cluster_name = "from-root"
+  }
+}
+`), 0600))
+
+	childDir := filepath.Join(dir, "live")
+	require.NoError(t, os.MkdirAll(childDir, 0750))
+	child := filepath.Join(childDir, "terragrunt.hcl")
+	require.NoError(t, os.WriteFile(child, []byte(`
+include {
+  path = find_in_parent_folders("root.hcl")
+}
+
+terraform {
+  source = "../modules/gke_wrapper"
+}
+
+inputs = merge(local.defaults, { cluster_name = "child" })
+`), 0600))
+
+	site := parseTerragrunt(t, child, "gke_wrapper")
+	assert.False(t, site.InputAnalysisIncomplete)
+	assert.Equal(t, `"child"`, site.PassedInputs["cluster_name"])
+	assert.Equal(t, `"us-east1"`, site.PassedInputs["region"],
+		"a local declared in the include parent must be visible to the child")
+}
+
+// TestTerragruntChildLocalsOverrideParentLocals pins Terragrunt's precedence: a child's own local
+// wins over one it would otherwise inherit.
+func TestTerragruntChildLocalsOverrideParentLocals(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "root.hcl"), []byte(`
+locals {
+  region = "us-east1"
+}
+`), 0600))
+
+	path := filepath.Join(dir, "terragrunt.hcl")
+	require.NoError(t, os.WriteFile(path, []byte(`
+locals {
+  region = "europe-west1"
+}
+
+include {
+  path = "root.hcl"
+}
+
+terraform {
+  source = "../modules/gke_wrapper"
+}
+
+inputs = merge({}, { region = local.region })
+`), 0600))
+
+	site := parseTerragrunt(t, path, "gke_wrapper")
+	assert.False(t, site.InputAnalysisIncomplete)
+	assert.Equal(t, `"europe-west1"`, site.PassedInputs["region"],
+		"the child's own local must win over the inherited one")
+}
+
+// TestTerragruntInputsUsingGetEnv covers get_env, including its default argument.
+func TestTerragruntInputsUsingGetEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "terragrunt.hcl")
+	require.NoError(t, os.WriteFile(path, []byte(`
+locals {
+  cluster_name = get_env("TFASTDIFF_CLUSTER_NAME", "fallback")
+  region       = get_env("TFASTDIFF_UNSET_VAR", "default-region")
+}
+
+terraform {
+  source = "../modules/gke_wrapper"
+}
+
+inputs = merge({}, {
+  cluster_name = local.cluster_name
+  region       = local.region
+})
+`), 0600))
+
+	t.Setenv("TFASTDIFF_CLUSTER_NAME", "from-env")
+
+	site := parseTerragrunt(t, path, "gke_wrapper")
+	assert.False(t, site.InputAnalysisIncomplete)
+	assert.Equal(t, `"from-env"`, site.PassedInputs["cluster_name"],
+		"get_env must read the environment when the variable is set")
+	assert.Equal(t, `"default-region"`, site.PassedInputs["region"],
+		"get_env must fall back to its default when the variable is unset")
+}
+
+// TestTerragruntStaticInputsKeepSourceText documents the other branch: a literal inputs object is
+// recorded as written, without evaluation. Blast radius only compares input names against the
+// wrapper, so the raw text is both sufficient and more faithful to what the file says.
+func TestTerragruntStaticInputsKeepSourceText(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "terragrunt.hcl")
+	require.NoError(t, os.WriteFile(path, []byte(`
+terraform {
+  source = "../modules/gke_wrapper"
+}
+
+inputs = {
+  cluster_name = get_env("TFASTDIFF_CLUSTER_NAME", "fallback")
+}
+`), 0600))
+
+	site := parseTerragrunt(t, path, "gke_wrapper")
+	assert.False(t, site.InputAnalysisIncomplete)
+	assert.Equal(t, `get_env("TFASTDIFF_CLUSTER_NAME", "fallback")`, site.PassedInputs["cluster_name"],
+		"a literal inputs object records the expression as written")
+}
+
+// TestTerragruntPathFunctions covers the directory helpers that depend on the include relationship.
+func TestTerragruntPathFunctions(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "envs", "prod")
+	require.NoError(t, os.MkdirAll(nested, 0750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "root.hcl"), []byte("locals { x = 1 }\n"), 0600))
+
+	path := filepath.Join(nested, "terragrunt.hcl")
+	require.NoError(t, os.WriteFile(path, []byte(`
+include {
+  path = find_in_parent_folders("root.hcl")
+}
+
+locals {
+  here  = get_terragrunt_dir()
+  there = get_parent_terragrunt_dir()
+  rel   = path_relative_to_include()
+}
+
+terraform {
+  source = "../modules/gke_wrapper"
+}
+
+inputs = merge({}, {
+  dir    = local.here
+  parent = local.there
+  rel    = local.rel
+})
+`), 0600))
+
+	site := parseTerragrunt(t, path, "gke_wrapper")
+	assert.False(t, site.InputAnalysisIncomplete)
+	assert.Equal(t, strconv.Quote(nested), site.PassedInputs["dir"])
+	assert.Equal(t, strconv.Quote(dir), site.PassedInputs["parent"])
+	assert.Equal(t, `"envs/prod"`, site.PassedInputs["rel"])
+}
+
+// TestTerragruntReadTerragruntConfig covers reading another config's locals by path.
+func TestTerragruntReadTerragruntConfig(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shared.hcl"), []byte(`
+locals {
+  region = "ap-south1"
+}
+`), 0600))
+
+	path := filepath.Join(dir, "terragrunt.hcl")
+	require.NoError(t, os.WriteFile(path, []byte(`
+terraform {
+  source = "../modules/gke_wrapper"
+}
+
+inputs = merge({}, { region = read_terragrunt_config("shared.hcl").region })
+`), 0600))
+
+	site := parseTerragrunt(t, path, "gke_wrapper")
+	assert.False(t, site.InputAnalysisIncomplete)
+	assert.Equal(t, `"ap-south1"`, site.PassedInputs["region"])
+}
+
+// TestTerragruntUnresolvableInputsStayIncomplete confirms the honest failure mode survives: an
+// input depending on something unknowable offline is reported as unanalysed rather than guessed.
+func TestTerragruntUnresolvableInputsStayIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "terragrunt.hcl")
+	require.NoError(t, os.WriteFile(path, []byte(`
+terraform {
+  source = "../modules/gke_wrapper"
+}
+
+inputs = merge(local.defaults, { cluster_name = local.missing })
+`), 0600))
+
+	site := parseTerragrunt(t, path, "gke_wrapper")
+	assert.True(t, site.InputAnalysisIncomplete,
+		"an unresolvable reference must be reported, not silently treated as resolved")
+}
+
+// TestTerragruntUnreachableIncludeStaysIncomplete covers an include whose parent cannot be found.
+func TestTerragruntUnreachableIncludeStaysIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "terragrunt.hcl")
+	require.NoError(t, os.WriteFile(path, []byte(`
+include {
+  path = find_in_parent_folders("absent.hcl")
+}
+
+terraform {
+  source = "../modules/gke_wrapper"
+}
+
+inputs = merge(local.defaults, { cluster_name = "x" })
+`), 0600))
+
+	site := parseTerragrunt(t, path, "gke_wrapper")
+	assert.True(t, site.InputAnalysisIncomplete)
+}
+
+// TestScanDirectory_TerragruntFixtureEndToEnd runs the committed terragrunt.hcl fixtures through the
+// real scanner. Roadmap #14 asked for one: the package had no Terragrunt fixture at all, so the
+// ecosystem the blast-radius feature exists to serve was entirely untested.
+func TestScanDirectory_TerragruntFixtureEndToEnd(t *testing.T) {
+	fixtures := filepath.Join("..", "..", "test", "fixtures", "terragrunt_env")
+
+	// The fixtures call the gke wrapper and pass ip_range_services, which v30 removed.
+	audit := &wrapper.WrapperCompatibilityReport{
+		TargetModuleName: "gke",
+		Issues: []wrapper.WrapperIssue{
+			{Category: "PassedRemovedInput", Target: "ip_range_services", Severity: diff.SeverityBreaking},
+			{Category: "MissingRequiredInput", Target: "grant_registry_access", Severity: diff.SeverityBreaking},
+		},
+	}
+
+	report, err := ScanDirectory(fixtures, "gke_wrapper", nil, audit)
+	require.NoError(t, err)
+	assert.Equal(t, 2, report.TotalCallSitesScanned, "both environments must be discovered")
+
+	for _, impact := range report.ImpactedRootModules {
+		assert.False(t, impact.AnalysisIncomplete,
+			"%s must resolve its inputs through the include chain and locals", impact.Dir)
+		assert.False(t, impact.CanSafelyUpdate,
+			"%s passes a removed input", impact.Dir)
+		assert.Contains(t, impact.RemovedInputsPassed, "ip_range_services",
+			"the dynamic expression must resolve far enough to see ip_range_services")
+	}
+
+	// Only the prod fixture omits the newly required input; dev sets it explicitly.
+	var prod, dev *RootModuleImpact
+	for i := range report.ImpactedRootModules {
+		switch filepath.Base(report.ImpactedRootModules[i].Dir) {
+		case "prod":
+			prod = &report.ImpactedRootModules[i]
+		case "dev":
+			dev = &report.ImpactedRootModules[i]
+		}
+	}
+	require.NotNil(t, prod, "the prod environment must be discovered")
+	require.NotNil(t, dev, "the dev environment must be discovered")
+	assert.Contains(t, prod.MissingRequiredInputs, "grant_registry_access")
+	assert.NotContains(t, dev.MissingRequiredInputs, "grant_registry_access",
+		"dev supplies it, so it must not be reported as missing")
+
+	// ip_range_services is a GKE immutable attribute, so both consumers are also hazard-flagged.
+	assert.Equal(t, "CRITICAL", report.HighestRisk)
+}
+
+// TestParseTerragruntFixtureOverridesLocal pins that a child's own locals win, using the committed
+// dev fixture which declares name locally.
+func TestParseTerragruntFixtureOverridesLocal(t *testing.T) {
+	path := filepath.Join("..", "..", "test", "fixtures", "terragrunt_env", "dev", "terragrunt.hcl")
+
+	site := parseTerragrunt(t, path, "gke_wrapper")
+	assert.False(t, site.InputAnalysisIncomplete)
+	assert.Equal(t, `"dev-cluster"`, site.PassedInputs["name"],
+		"the dev fixture declares its own name local, which must win over the inherited one")
+	assert.Equal(t, `"us-central1"`, site.PassedInputs["region"],
+		"region still comes from the root config's defaults")
+	assert.Equal(t, "false", site.PassedInputs["grant_registry_access"])
+}
+
+// TestParseTerragruntFixtureNestedObjectInput confirms a structured input value survives evaluation,
+// since a real wrapper passes objects for things like autoscaling profiles.
+func TestParseTerragruntFixtureNestedObjectInput(t *testing.T) {
+	path := filepath.Join("..", "..", "test", "fixtures", "terragrunt_env", "prod", "terragrunt.hcl")
+
+	site := parseTerragrunt(t, path, "gke_wrapper")
+	assert.False(t, site.InputAnalysisIncomplete)
+
+	profile := site.PassedInputs["cluster_autoscaling_profile"]
+	assert.Contains(t, profile, "enable_cpu_autoscaling")
+	assert.Contains(t, profile, "prod")
+	assert.Equal(t, `"10.2.0.0/20"`, site.PassedInputs["ip_range_services"])
+	assert.NotContains(t, site.PassedInputs, "grant_registry_access",
+		"the prod fixture deliberately omits it, so it must read as a missing required input")
+}
+
+func TestFilterTaintedCallSites(t *testing.T) {
+	// nil report returns call sites as-is
+	sites := []CallSite{
+		{ModuleName: "site1"},
+	}
+	assert.Equal(t, sites, FilterTaintedCallSites(sites, nil))
+
+	report := &eval.TaintReport{
+		TargetVariable: "network_name",
+		TracePath:      []string{"var.network_name", "local.net", "output.network_id"},
+		AffectedResourceAttributes: []string{
+			"google_compute_network.this.name",
+			"output.network_self_link",
+		},
+	}
+
+	callSites := []CallSite{
+		// Site 1: passes tainted input directly
+		{
+			ModuleName:   "site1",
+			PassedInputs: map[string]string{"network_name": `"custom-vpc"`},
+		},
+		// Site 2: references tainted output directly
+		{
+			ModuleName:        "site2",
+			OutputsReferenced: []string{"network_id"},
+		},
+		// Site 3: passes input expression referencing tainted output
+		{
+			ModuleName:   "site3",
+			PassedInputs: map[string]string{"vpc_id": "module.vpc.network_self_link"},
+		},
+		// Site 4: unrelated consumer
+		{
+			ModuleName:        "site4",
+			PassedInputs:      map[string]string{"cluster_name": `"prod"`},
+			OutputsReferenced: []string{"cluster_ca_certificate"},
+		},
+	}
+
+	filtered := FilterTaintedCallSites(callSites, report)
+	require.Len(t, filtered, 3)
+	assert.Equal(t, "site1", filtered[0].ModuleName)
+	assert.Equal(t, "site2", filtered[1].ModuleName)
+	assert.Equal(t, "site3", filtered[2].ModuleName)
+}
+
+func TestScanDirectoryWithTaint(t *testing.T) {
+	dir := t.TempDir()
+	c1Dir := filepath.Join(dir, "consumer1")
+	c2Dir := filepath.Join(dir, "consumer2")
+	require.NoError(t, os.Mkdir(c1Dir, 0o750))
+	require.NoError(t, os.Mkdir(c2Dir, 0o750))
+
+	// c1 passes tainted input
+	c1TF := `
+module "gke" {
+  source = "./modules/gke"
+  network_name = "custom"
+}
+`
+	// c2 passes unrelated input
+	c2TF := `
+module "gke" {
+  source = "./modules/gke"
+  cluster_name = "test"
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(c1Dir, "main.tf"), []byte(c1TF), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(c2Dir, "main.tf"), []byte(c2TF), 0o600))
+
+	reportTainted := &eval.TaintReport{
+		TargetVariable: "network_name",
+		TracePath:      []string{"var.network_name"},
+	}
+
+	// Scan with taint filter
+	res, err := ScanDirectoryWithTaint(dir, "./modules/gke", nil, nil, nil, reportTainted)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Equal(t, 1, res.TotalCallSitesScanned)
+	assert.Contains(t, res.Summary, "filtered to 1 tainted by var.network_name")
+
+	// Scan with taint report matching 0 consumers
+	reportUnmatched := &eval.TaintReport{
+		TargetVariable: "non_existent",
+	}
+	res0, err := ScanDirectoryWithTaint(dir, "./modules/gke", nil, nil, nil, reportUnmatched)
+	require.NoError(t, err)
+	assert.Equal(t, 0, res0.TotalCallSitesScanned)
+	assert.Contains(t, res0.Summary, "0 consumers are reachable from tainted variable var.non_existent")
+
+	// Scan with breaking audit and taint
+	audit := &wrapper.WrapperCompatibilityReport{
+		TargetModuleName: "gke",
+		Issues: []wrapper.WrapperIssue{
+			{
+				Category: "PassedRemovedInput",
+				Target:   "network_name",
+			},
+		},
+	}
+	resBreaking, err := ScanDirectoryWithTaint(dir, "./modules/gke", nil, audit, nil, reportTainted)
+	require.NoError(t, err)
+	assert.False(t, resBreaking.CanSafelyUpdateAll)
+	assert.Contains(t, resBreaking.Summary, "detected breaking impacts")
 }

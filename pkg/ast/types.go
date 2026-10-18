@@ -93,6 +93,15 @@ type EncryptionBlockDef struct {
 	Pos         tfconfig.SourcePos `json:"pos"`
 }
 
+// ResourceDef captures managed and data resource definitions in a Terraform module.
+type ResourceDef struct {
+	Mode     string             `json:"mode"` // "managed" or "data"
+	Type     string             `json:"type"`
+	Name     string             `json:"name"`
+	Provider string             `json:"provider,omitempty"`
+	Pos      tfconfig.SourcePos `json:"pos"`
+}
+
 // ModuleInfo is the normalized AST representation of a Terraform module.
 type ModuleInfo struct {
 	Path                    string                         `json:"path"`
@@ -101,12 +110,14 @@ type ModuleInfo struct {
 	ModuleCalls             map[string]ModuleCallDef       `json:"module_calls"`
 	RequiredCore            []string                       `json:"required_core,omitempty"`
 	RequiredProviders       map[string]ProviderRequirement `json:"required_providers,omitempty"`
-	WrapperOutputReferences map[string]OutputReference     `json:"wrapper_output_references,omitempty"`
+	WrapperOutputReferences map[string][]OutputReference   `json:"wrapper_output_references,omitempty"`
 	RemovedBlocks           []RemovedBlockDef              `json:"removed_blocks,omitempty"`
 	CheckBlocks             map[string]CheckBlockDef       `json:"check_blocks,omitempty"`
 	ImportBlocks            []ImportBlockDef               `json:"import_blocks,omitempty"`
 	Functions               map[string]FunctionDef         `json:"functions,omitempty"`
 	EncryptionBlocks        []EncryptionBlockDef           `json:"encryption_blocks,omitempty"`
+	ManagedResources        map[string]ResourceDef         `json:"managed_resources,omitempty"`
+	DataResources           map[string]ResourceDef         `json:"data_resources,omitempty"`
 }
 
 // TypeCompatibilityResult describes the compatibility between two type constraints.
@@ -313,6 +324,8 @@ func splitObjectAttributes(inner string) []string {
 
 // CheckObjectCompatibility compares attributes between two object schemas.
 func CheckObjectCompatibility(oldAttrs, newAttrs map[string]ObjectAttribute) TypeCompatibilityResult {
+	var reasons []string
+
 	// 1. Check for removed attributes from object schema in sorted order
 	var oldNames []string
 	for name := range oldAttrs {
@@ -322,11 +335,7 @@ func CheckObjectCompatibility(oldAttrs, newAttrs map[string]ObjectAttribute) Typ
 
 	for _, name := range oldNames {
 		if _, exists := newAttrs[name]; !exists {
-			return TypeCompatibilityResult{
-				Compatible: false,
-				IsBreaking: true,
-				Reason:     fmt.Sprintf("Attribute '%s' was removed from object schema", name),
-			}
+			reasons = append(reasons, fmt.Sprintf("Attribute '%s' was removed from object schema", name))
 		}
 	}
 
@@ -342,32 +351,28 @@ func CheckObjectCompatibility(oldAttrs, newAttrs map[string]ObjectAttribute) Typ
 		oldAttr, exists := oldAttrs[name]
 		if !exists {
 			if !newAttr.IsOptional {
-				return TypeCompatibilityResult{
-					Compatible: false,
-					IsBreaking: true,
-					Reason:     fmt.Sprintf("New required attribute '%s' added to object schema", name),
-				}
+				reasons = append(reasons, fmt.Sprintf("New required attribute '%s' added to object schema", name))
 			}
 			continue
 		}
 
 		// Was optional, now required
 		if oldAttr.IsOptional && !newAttr.IsOptional {
-			return TypeCompatibilityResult{
-				Compatible: false,
-				IsBreaking: true,
-				Reason:     fmt.Sprintf("Object attribute '%s' changed from optional to required", name),
-			}
+			reasons = append(reasons, fmt.Sprintf("Object attribute '%s' changed from optional to required", name))
 		}
 
 		// Compare inner attribute types
 		subCompat := CheckTypeCompatibility(oldAttr.Type, newAttr.Type)
 		if subCompat.IsBreaking {
-			return TypeCompatibilityResult{
-				Compatible: false,
-				IsBreaking: true,
-				Reason:     fmt.Sprintf("Object attribute '%s' type changed incompatibly: %s", name, subCompat.Reason),
-			}
+			reasons = append(reasons, fmt.Sprintf("Object attribute '%s' type changed incompatibly: %s", name, subCompat.Reason))
+		}
+	}
+
+	if len(reasons) > 0 {
+		return TypeCompatibilityResult{
+			Compatible: false,
+			IsBreaking: true,
+			Reason:     strings.Join(reasons, "; "),
 		}
 	}
 

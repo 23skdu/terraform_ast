@@ -32,7 +32,7 @@ Audits a local wrapper module (such as a Google GKE or AWS EKS wrapper) against 
 # Audit wrapper directly against a remote upstream Git repository
 ./bin/tfastdiff \
   --wrapper ./my-eks-wrapper \
-  --upstream https://github.com/terraform-aws-modules/terraform-aws-eks.git \
+  --upstream https://github.com/terraform-aws-modules/terraform-eks.git \
   --new-version v20.0.0 \
   --old-version v19.21.0 \
   --format text \
@@ -44,15 +44,22 @@ Audits a local wrapper module (such as a Google GKE or AWS EKS wrapper) against 
 - `--upstream <dir|git-url|registry>`: Upstream module path, Git URL, or Terraform Registry identifier (e.g. `terraform-google-modules/kubernetes-engine/google`). Inferred from `module` block `source` if omitted. A source that resolves to a directory on disk is always treated as a local module, even when it has three or four path segments.
 - `--new-version <tag>`: Target upstream Git version or Registry version to pin (e.g. `v30.0.0` or `30.0.0`).
 - `--old-version <tag>`: Currently pinned upstream Git version (enables side-by-side upstream diff).
+- `--policy <file>`: Optional path to a JSON policy file to enforce breaking-change, warning, downgrade, and max-bump constraints.
+- `--rego-policy <file>`: Optional path to an Open Policy Agent / Rego policy document (`.rego`) evaluated against the audit result.
+- `--taint <var>`: Trace input variable taint reachability from wrapper declarations through locals to downstream module inputs and outputs.
 - `--blast-radius <dir>`: Optional root directory (e.g. `./environments`) to recursively scan for downstream consumer root modules affected by breaking changes.
 - `--check-recreation`: Enables or disables state destruction and `ForceNew` hazard detection heuristics (default: `true`). Hazards are reported in every output format: an alert block in `text`/`markdown`, a `recreation_hazards` array in `json`, and `TF-RECREATION-HAZARD` SARIF results for code scanning.
 - `--format <text|markdown|json|sarif>`: Output format (default: `text`). Use `sarif` for GitHub Code Scanning.
-- `--output <file>`: Write report to destination file.
-- `--exit-code`: Returns non-zero exit code (1) if breaking changes are detected.
+- `--output <file>`: Write report to destination file (written with permissions `0644`).
+- `--exit-code`: Returns non-zero exit code (1) if breaking changes or policy violations are detected.
 - `--fix-preview`: Emit a preview-only unified patch for removed arguments passed by the wrapper. Currently supports removal of direct module-call arguments; it does not change files or apply other remediation types.
 - `--fix`: Apply fixes in-place to remove wrapper arguments no longer accepted upstream. Uses `hclwrite` to preserve comments and formatting. Mutually exclusive with `--fix-preview`.
 - `--provider-schema <file>`: Optional path to a provider schema JSON file (`terraform providers schema -json`). Dynamically extracts `requires_replace` metadata across resources and nested blocks to detect ForceNew recreation hazards across any cloud provider.
 - `--cache-dir <dir>`: Optional path to an on-disk directory for persistent L2 AST caching, accelerating monorepo traversals and pre-commit checks.
+- `--clear-cache`: Clears only cache files matching `<sha256>.json` in the `--cache-dir`.
+- `--registry-timeout <duration>`: Timeout for Terraform Registry operations (default: `2m`).
+- `--verbose`, `-v`: Enable verbose progress and diagnostic logging to stderr.
+- `--version`: Print CLI version (`0.9.0`) and exit.
 
 Example policy:
 
@@ -136,8 +143,13 @@ Compares two versions of an upstream module directly:
 - `--output <file>`: Path to file destination.
 - `--exit-code`: Exits with code 1 if breaking changes exist.
 - `--policy <file>`: Applies the same JSON policy gates as wrapper audit mode.
+- `--rego-policy <file>`: Optional path to an Open Policy Agent / Rego policy document (`.rego`) evaluated against comparison findings.
 - `--provider-schema <file>`: Supply a provider schema JSON file (`terraform providers schema -json`) for dynamic ForceNew recreation detection across all providers.
 - `--cache-dir <dir>`: Optional path to an on-disk directory for persistent L2 AST caching.
+- `--clear-cache`: Clears only cache files matching `<sha256>.json` in the `--cache-dir`.
+- `--registry-timeout <duration>`: Timeout for Terraform Registry operations (default: `2m`).
+- `--verbose`, `-v`: Enable verbose progress and diagnostic logging to stderr.
+- `--version`: Print CLI version (`0.9.0`) and exit.
 - `--upgrade-path`: Inspects each intermediate semantic-version Git tag or Registry release and reports adjacent compatibility transitions. Requires both version flags, the same source for `--old` and `--new`, and text, Markdown, or JSON output. For local directories, only the supplied endpoint snapshots are available. Git repositories are downloaded once and reused for every intermediate tag, so stepping across a major version does not re-clone per release.
 
 ---

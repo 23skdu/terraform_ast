@@ -77,7 +77,8 @@ func TestTerratest_TerraformJSONInspection(t *testing.T) {
 	require.Contains(t, info.ModuleCalls, "child")
 	assert.Equal(t, []string{"input"}, info.ModuleCalls["child"].PassedInputs)
 	require.Contains(t, info.WrapperOutputReferences, "child_id")
-	assert.Equal(t, "id", info.WrapperOutputReferences["child_id"].TargetOutput)
+	require.NotEmpty(t, info.WrapperOutputReferences["child_id"])
+	assert.Equal(t, "id", info.WrapperOutputReferences["child_id"][0].TargetOutput)
 
 	blastReport, err := blastradius.ScanDirectory(dir, filepath.Join(dir, "child"), nil, &wrapper.WrapperCompatibilityReport{
 		Issues: []wrapper.WrapperIssue{

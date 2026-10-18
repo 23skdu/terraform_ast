@@ -52,22 +52,6 @@
       "severity": "NEW_FEATURE",
       "confidence_score": 9,
       "category": "OptionalVariableAvailable",
-      "target": "cluster_endpoint_public_access",
-      "description": "New optional upstream parameter 'cluster_endpoint_public_access' (type bool) can be exposed in wrapper",
-      "remediation": "Consider declaring variable \"cluster_endpoint_public_access\" in wrapper and forwarding to upstream"
-    },
-    {
-      "severity": "NEW_FEATURE",
-      "confidence_score": 9,
-      "category": "OptionalVariableAvailable",
-      "target": "cluster_version",
-      "description": "New optional upstream parameter 'cluster_version' (type string) can be exposed in wrapper",
-      "remediation": "Consider declaring variable \"cluster_version\" in wrapper and forwarding to upstream"
-    },
-    {
-      "severity": "NEW_FEATURE",
-      "confidence_score": 9,
-      "category": "OptionalVariableAvailable",
       "target": "enable_cluster_creator_admin_permissions",
       "description": "New optional upstream parameter 'enable_cluster_creator_admin_permissions' (type bool) can be exposed in wrapper",
       "remediation": "Consider declaring variable \"enable_cluster_creator_admin_permissions\" in wrapper and forwarding to upstream"

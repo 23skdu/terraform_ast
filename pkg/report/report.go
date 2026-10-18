@@ -7,6 +7,7 @@ import (
 
 	"github.com/23skdu/terraform_ast/pkg/blastradius"
 	"github.com/23skdu/terraform_ast/pkg/diff"
+	"github.com/23skdu/terraform_ast/pkg/eval"
 	"github.com/23skdu/terraform_ast/pkg/policy"
 	"github.com/23skdu/terraform_ast/pkg/recreation"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
@@ -18,6 +19,7 @@ import (
 type Findings struct {
 	RecreationHazards []recreation.RecreationHazard  `json:"recreation_hazards,omitempty"`
 	BlastRadius       *blastradius.BlastRadiusReport `json:"blast_radius,omitempty"`
+	Taint             *eval.TaintReport              `json:"taint,omitempty"`
 }
 
 // RenderText formats a DiffReport into human-readable text.
@@ -213,6 +215,21 @@ func RenderWrapperText(w *wrapper.WrapperCompatibilityReport, findings Findings)
 		sb.WriteString("\n")
 		sb.WriteString(findings.BlastRadius.RenderText())
 	}
+	if findings.Taint != nil {
+		sb.WriteString(fmt.Sprintf("\nVARIABLE TAINT ANALYSIS (var.%s):\n", findings.Taint.TargetVariable))
+		if findings.Taint.IsDeadCode {
+			sb.WriteString(fmt.Sprintf("  • Status: DEAD CODE (no downstream references in %s)\n", w.WrapperPath))
+		} else {
+			sb.WriteString("  • Status: REACHABLE\n")
+			sb.WriteString(fmt.Sprintf("  • Trace path: %s\n", strings.Join(findings.Taint.TracePath, " -> ")))
+			if len(findings.Taint.AffectedResourceAttributes) > 0 {
+				sb.WriteString(fmt.Sprintf("  • Affected attributes (%d):\n", len(findings.Taint.AffectedResourceAttributes)))
+				for _, attr := range findings.Taint.AffectedResourceAttributes {
+					sb.WriteString(fmt.Sprintf("    - %s\n", attr))
+				}
+			}
+		}
+	}
 	writePolicyViolations(&sb, w.PolicyViolations)
 
 	sb.WriteString("======================================================================\n")
@@ -278,4 +295,26 @@ func RenderWrapperJSON(w *wrapper.WrapperCompatibilityReport, findings Findings)
 func marshalJSON(v any) []byte {
 	encoded, _ := json.MarshalIndent(v, "", "  ")
 	return encoded
+}
+
+// FormatTaintMarkdown formats a TaintReport into Markdown.
+func FormatTaintMarkdown(t *eval.TaintReport) string {
+	if t == nil {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("### Variable Taint Analysis (`var.%s`)\n\n", t.TargetVariable))
+	if t.IsDeadCode {
+		sb.WriteString("- **Status**: Unused / dead code\n\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("- **Status**: Reachable\n- **Trace path**: `%s`\n\n", strings.Join(t.TracePath, " -> ")))
+		if len(t.AffectedResourceAttributes) > 0 {
+			sb.WriteString(fmt.Sprintf("#### Affected Resource Attributes (%d)\n\n", len(t.AffectedResourceAttributes)))
+			for _, attr := range t.AffectedResourceAttributes {
+				sb.WriteString(fmt.Sprintf("- `%s`\n", attr))
+			}
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
 }

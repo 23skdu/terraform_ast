@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -201,6 +202,22 @@ func TestWriteMovedBlocks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(content2), "from = module.a")
 	assert.Contains(t, string(content2), "from = module.c")
+
+	// Calling again with the same blocks is idempotent (does not duplicate)
+	require.NoError(t, WriteMovedBlocks(target, moreBlocks))
+	content3, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, string(content2), string(content3))
+
+	// Blank from/to blocks are ignored
+	blankBlocks := []MovedBlock{
+		{From: "  ", To: "module.e"},
+		{From: "module.e", To: ""},
+	}
+	require.NoError(t, WriteMovedBlocks(target, blankBlocks))
+	content4, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, string(content3), string(content4))
 }
 
 func TestWriteMovedBlocksErrors(t *testing.T) {
@@ -226,4 +243,47 @@ func TestWriteMovedBlocksErrors(t *testing.T) {
 	}
 	err = WriteMovedBlocks(readOnlyFile, []MovedBlock{{From: "a", To: "b"}})
 	assert.ErrorContains(t, err, "write moved blocks file")
+}
+
+func TestSynthesizeMovedBlocks(t *testing.T) {
+	shifts := []ast.ResourceAddressShift{
+		{
+			OldAddress: ast.ResourceAddress{Type: "aws_subnet", Name: "this"},
+			NewAddress: ast.ResourceAddress{Type: "aws_subnet", Name: "renamed"},
+		},
+		{
+			OldAddress: ast.ResourceAddress{ModulePath: "module.old", Type: "aws_vpc", Name: "main"},
+			NewAddress: ast.ResourceAddress{ModulePath: "module.new", Type: "aws_vpc", Name: "main"},
+		},
+		// Invalid / empty address shift should be skipped
+		{
+			OldAddress: ast.ResourceAddress{Type: "aws_s3_bucket", Name: "data"},
+			NewAddress: ast.ResourceAddress{},
+		},
+		// Same address shift should be skipped
+		{
+			OldAddress: ast.ResourceAddress{Type: "aws_iam_role", Name: "role"},
+			NewAddress: ast.ResourceAddress{Type: "aws_iam_role", Name: "role"},
+		},
+	}
+
+	blocks := SynthesizeMovedBlocksForShifts(shifts)
+	require.Len(t, blocks, 2)
+	assert.Equal(t, "aws_subnet.this", blocks[0].From)
+	assert.Equal(t, "aws_subnet.renamed", blocks[0].To)
+	assert.Equal(t, "module.old.aws_vpc.main", blocks[1].From)
+	assert.Equal(t, "module.new.aws_vpc.main", blocks[1].To)
+
+	// Test duplicate shifts deduplication
+	shiftsWithDup := append(shifts, shifts[0])
+	blocksDup := SynthesizeMovedBlocksForShifts(shiftsWithDup)
+	assert.Len(t, blocksDup, 2)
+
+	// Test SynthesizeAndWriteMovedBlocks
+	target := filepath.Join(t.TempDir(), "moved.tf")
+	require.NoError(t, SynthesizeAndWriteMovedBlocks(target, shifts))
+	content, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Contains(t, string(content), `from = aws_subnet.this`)
+	assert.Contains(t, string(content), `to   = aws_subnet.renamed`)
 }

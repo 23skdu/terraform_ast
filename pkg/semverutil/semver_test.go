@@ -67,3 +67,19 @@ func TestDetermineBumpType(t *testing.T) {
 		assert.Equal(t, tt.expected, actual, "BumpType(%s, %s)", tt.oldVer, tt.newVer)
 	}
 }
+
+func TestIsPrerelease(t *testing.T) {
+	assert.True(t, IsPrerelease("v1.0.0-alpha"))
+	assert.True(t, IsPrerelease("1.0.0-beta.1"))
+	assert.True(t, IsPrerelease("v2.0.0-rc1"))
+	assert.False(t, IsPrerelease("v1.0.0"))
+	assert.False(t, IsPrerelease("1.0.0"))
+	assert.False(t, IsPrerelease("not-semver"))
+}
+
+func TestFilterPrereleases(t *testing.T) {
+	input := []string{"v1.0.0", "v1.1.0-alpha", "v2.0.0", "2.1.0-beta", "v3.0.0"}
+	actual := FilterPrereleases(input)
+	expected := []string{"v1.0.0", "v2.0.0", "v3.0.0"}
+	assert.Equal(t, expected, actual)
+}

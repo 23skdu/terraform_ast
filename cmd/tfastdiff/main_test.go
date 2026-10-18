@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
+	"github.com/23skdu/terraform_ast/pkg/eval"
 	"github.com/23skdu/terraform_ast/pkg/gitops"
 	"github.com/23skdu/terraform_ast/pkg/registry"
 	"github.com/go-git/go-git/v5"
@@ -1425,6 +1427,93 @@ func TestExecute_UpgradePathFailsOnUnreadableIntermediateVersion(t *testing.T) {
 	assert.Contains(t, stderr.String(), "inspect intermediate version v1.1.0")
 }
 
+func TestExecute_UpgradePathRegistryIntermediateVersions(t *testing.T) {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	content := []byte(`variable "cluster_name" { type = string }`)
+	_ = tw.WriteHeader(&tar.Header{
+		Name:     "main.tf",
+		Mode:     0600,
+		Size:     int64(len(content)),
+		Typeflag: tar.TypeReg,
+	})
+	_, _ = tw.Write(content)
+	_ = tw.Close()
+	_ = gw.Close()
+	tarData := buf.Bytes()
+
+	var failDownload bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/versions") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"modules": [{"versions": [{"version": "1.0.0"}, {"version": "1.1.0"}, {"version": "2.0.0"}]}]
+			}`))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/download") {
+			if failDownload && strings.Contains(r.URL.Path, "1.1.0") {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(tarData)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	origClient := newRegistryClient
+	newRegistryClient = func() *registry.Client {
+		c := registry.NewClient(server.Client())
+		c.BaseURL = server.URL
+		c.RetryMaxElapsedTime = 20 * time.Millisecond
+		return c
+	}
+	defer func() { newRegistryClient = origClient }()
+
+	// 1. Success case: intermediate version 1.1.0 is downloaded and cleaned up.
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--old", "hashicorp/consul/aws", "--new", "hashicorp/consul/aws",
+		"--old-version", "1.0.0", "--new-version", "2.0.0",
+		"--upgrade-path", "--format", "json",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+
+	// 2. Download failure on intermediate version.
+	failDownload = true
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", "hashicorp/consul/aws", "--new", "hashicorp/consul/aws",
+		"--old-version", "1.0.0", "--new-version", "2.0.0",
+		"--upgrade-path",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "retrieve intermediate version 1.1.0")
+	failDownload = false
+
+	// 3. Fallthrough error in inspectModulesParallel (error does not contain dir).
+	origInspect := inspectModulesParallel
+	inspectModulesParallel = func(ctx context.Context, dirs []string, maxConcurrent int) ([]*ast.ModuleInfo, error) {
+		return nil, errors.New("simulated unmapped parallel error")
+	}
+	defer func() { inspectModulesParallel = origInspect }()
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", "hashicorp/consul/aws", "--new", "hashicorp/consul/aws",
+		"--old-version", "1.0.0", "--new-version", "2.0.0",
+		"--upgrade-path",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "inspect intermediate versions: simulated unmapped parallel error")
+}
+
 func TestInspectModuleVersion(t *testing.T) {
 	repoDir := createTestTFRepo(t, "v1.0.0", `variable "name" { type = string }`)
 
@@ -2079,4 +2168,181 @@ func TestExecute_ClearCacheRequiresCacheDir(t *testing.T) {
 	assert.Equal(t, 2, code)
 	assert.Contains(t, stderr.String(), "--clear-cache requires --cache-dir")
 	assert.Empty(t, stdout.String())
+}
+
+func TestExecute_VersionFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--version"}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "tfastdiff 0.9.0")
+	assert.Empty(t, stderr.String())
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"-version"}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "tfastdiff 0.9.0")
+}
+
+func TestExecute_VerboseLogging(t *testing.T) {
+	wrapperDir := t.TempDir()
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "cluster" { type = string }`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), fmt.Appendf(nil, `
+module "child" {
+  source  = %q
+  cluster = "prod"
+}
+`, upstreamDir), 0644))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--verbose"}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stderr.String(), "[verbose]")
+
+	// Compare mode verbose
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", upstreamDir, "--new", upstreamDir, "-v"}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stderr.String(), "[verbose]")
+}
+
+func TestExecute_TaintAnalysis(t *testing.T) {
+	// Rejection in compare mode
+	var stdout, stderr bytes.Buffer
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(`variable "x" { type = string }`), 0644))
+	code := Execute([]string{"--old", dir, "--new", dir, "--taint", "x"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--taint is only available in wrapper audit mode")
+
+	// Rejection in fix mode
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--wrapper", dir, "--fix", "--taint", "x"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--taint is not supported with --fix or --fix-preview")
+
+	// Rejection in fix-preview mode
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--wrapper", dir, "--fix-preview", "--taint", "x"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--taint is not supported with --fix or --fix-preview")
+
+	// Valid taint analysis in wrapper mode: text and markdown format
+	wrapperDir := t.TempDir()
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "region" { type = string }`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), fmt.Appendf(nil, `
+variable "input_region" {
+  type = string
+}
+
+locals {
+  eff_region = var.input_region
+}
+
+module "test" {
+  source = %q
+  region = local.eff_region
+}
+`, upstreamDir), 0644))
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--wrapper", wrapperDir, "--taint", "input_region", "--format", "text"}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "VARIABLE TAINT ANALYSIS (var.input_region)")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--wrapper", wrapperDir, "--taint", "input_region", "--format", "markdown"}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "Variable Taint Analysis (`var.input_region`)")
+
+	// Error when taint analysis fails
+	origTaint := analyzeVariableTaint
+	analyzeVariableTaint = func(dir, target string) (*eval.TaintReport, error) {
+		return nil, errors.New("simulated taint error")
+	}
+	defer func() { analyzeVariableTaint = origTaint }()
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--wrapper", wrapperDir, "--taint", "x"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error analyzing variable taint: simulated taint error")
+}
+
+func TestExecute_RegoPolicy(t *testing.T) {
+	// 1. Invalid rego policy file path
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", t.TempDir(), "--rego-policy", "/non/existent/policy.rego"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "Error loading Rego policy")
+
+	// Create a valid rego policy that denies when breaking_changes > 0 or bump_type is MAJOR
+	regoFile := filepath.Join(t.TempDir(), "rule.rego")
+	require.NoError(t, os.WriteFile(regoFile, []byte(`
+package terraform.analysis
+
+deny[msg] {
+    input.breaking_changes > 0
+    msg := "Breaking changes are disallowed by company policy"
+}
+
+deny[msg] {
+    input.bump_type == "MAJOR"
+    msg := "Major version bumps are disallowed by company policy"
+}
+`), 0644))
+
+	// 2. Wrapper mode with breaking changes triggering rego violation
+	wrapperDir := t.TempDir()
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "cluster" { type = string }`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), fmt.Appendf(nil, `
+module "child" {
+  source      = %q
+  cluster     = "prod"
+  removed_arg = "foo"
+}
+`, upstreamDir), 0644))
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--wrapper", wrapperDir, "--rego-policy", regoFile, "--exit-code"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stdout.String(), "Breaking changes are disallowed by company policy")
+
+	// 3. Compare mode triggering rego violation
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(oldDir, "main.tf"), []byte(`variable "foo" { type = string }`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(newDir, "main.tf"), []byte(``), 0644))
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", oldDir, "--new", newDir, "--rego-policy", regoFile, "--exit-code"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stdout.String(), "Breaking changes are disallowed by company policy")
+
+	// 4. Upgrade-path mode triggering rego violation
+	_, cleanup := setupMockRegistryServer(t)
+	defer cleanup()
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", "hashicorp/consul/aws",
+		"--new", "hashicorp/consul/aws",
+		"--old-version", "0.9.0",
+		"--new-version", "1.0.0",
+		"--upgrade-path",
+		"--rego-policy", regoFile,
+		"--exit-code",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stdout.String(), "Major version bumps are disallowed by company policy")
 }

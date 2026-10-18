@@ -126,17 +126,27 @@ func makeStringSet(values []string) map[string]struct{} {
 	return set
 }
 
+func normalizeCondition(s string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
+}
+
 func sameStrings(left, right []string) bool {
 	if len(left) != len(right) {
 		return false
 	}
-	leftSet := makeStringSet(left)
-	rightSet := makeStringSet(right)
-	if len(leftSet) != len(rightSet) {
+	leftCounts := make(map[string]int, len(left))
+	for _, s := range left {
+		leftCounts[normalizeCondition(s)]++
+	}
+	rightCounts := make(map[string]int, len(right))
+	for _, s := range right {
+		rightCounts[normalizeCondition(s)]++
+	}
+	if len(leftCounts) != len(rightCounts) {
 		return false
 	}
-	for value := range leftSet {
-		if _, exists := rightSet[value]; !exists {
+	for k, v := range leftCounts {
+		if rightCounts[k] != v {
 			return false
 		}
 	}

@@ -49,7 +49,7 @@ type WrapperCompatibilityReport struct {
 // broke on the first, so a wrapper calling several upstream modules was audited against exactly
 // one of them and the rest were never checked: a removed input passed to any other call was
 // reported as safe.
-func selectTargetCalls(wrapperMod *ast.ModuleInfo, targetUpstream *ast.ModuleInfo) []ast.ModuleCallDef {
+func selectTargetCalls(wrapperMod *ast.ModuleInfo) []ast.ModuleCallDef {
 	names := make([]string, 0, len(wrapperMod.ModuleCalls))
 	for name := range wrapperMod.ModuleCalls {
 		names = append(names, name)
@@ -118,7 +118,7 @@ func AnalyzeWrapper(
 			Variables:               make(map[string]ast.VariableDef),
 			Outputs:                 make(map[string]ast.OutputDef),
 			ModuleCalls:             make(map[string]ast.ModuleCallDef),
-			WrapperOutputReferences: make(map[string]ast.OutputReference),
+			WrapperOutputReferences: make(map[string][]ast.OutputReference),
 		}
 	}
 	if targetUpstream == nil {
@@ -140,7 +140,7 @@ func AnalyzeWrapper(
 	// upstream module, and every one of them has to be checked: auditing only the
 	// alphabetically-first call silently ignored the others, so a removed input passed to a
 	// second call was reported as safe.
-	calls := selectTargetCalls(wrapperMod, targetUpstream)
+	calls := selectTargetCalls(wrapperMod)
 	report.TargetModuleName = strings.Join(callNames(calls), ", ")
 
 	passedInputSet := make(map[string]bool)
@@ -226,18 +226,20 @@ func AnalyzeWrapper(
 	// Only delegations aimed at a selected call are checked: an output reading from a module the
 	// audit did not target cannot be judged against this upstream.
 	for _, outName := range sortedKeys(wrapperMod.WrapperOutputReferences) {
-		ref := wrapperMod.WrapperOutputReferences[outName]
-		if !targetsAnyCall(ref.TargetModule, calls) {
-			continue
-		}
-		if _, exists := targetUpstream.Outputs[ref.TargetOutput]; !exists {
-			report.Issues = append(report.Issues, WrapperIssue{
-				Severity:    diff.SeverityBreaking,
-				Category:    "BrokenOutputDelegation",
-				Target:      outName,
-				Description: fmt.Sprintf("Wrapper output '%s' references module.%s.%s, but output '%s' was removed in target upstream %s", outName, ref.TargetModule, ref.TargetOutput, ref.TargetOutput, targetVersion),
-				Remediation: fmt.Sprintf("Update or remove output \"%s\" in wrapper outputs.tf", outName),
-			})
+		refs := wrapperMod.WrapperOutputReferences[outName]
+		for _, ref := range refs {
+			if !targetsAnyCall(ref.TargetModule, calls) {
+				continue
+			}
+			if _, exists := targetUpstream.Outputs[ref.TargetOutput]; !exists {
+				report.Issues = append(report.Issues, WrapperIssue{
+					Severity:    diff.SeverityBreaking,
+					Category:    "BrokenOutputDelegation",
+					Target:      outName,
+					Description: fmt.Sprintf("Wrapper output '%s' references module.%s.%s, but output '%s' was removed in target upstream %s", outName, ref.TargetModule, ref.TargetOutput, ref.TargetOutput, targetVersion),
+					Remediation: fmt.Sprintf("Update or remove output \"%s\" in wrapper outputs.tf", outName),
+				})
+			}
 		}
 	}
 
@@ -257,6 +259,11 @@ func AnalyzeWrapper(
 	for _, varName := range sortedKeys(targetUpstream.Variables) {
 		upVar := targetUpstream.Variables[varName]
 		if !upVar.Required && upVar.HasDefault && !passedByEveryCall(varName, calls) {
+			if pinnedUpstream != nil {
+				if _, existed := pinnedUpstream.Variables[varName]; existed {
+					continue
+				}
+			}
 			if _, inWrapper := wrapperMod.Variables[varName]; !inWrapper {
 				report.NewFeatureAdoptions = append(report.NewFeatureAdoptions, WrapperIssue{
 					Severity:    diff.SeverityNewFeature,

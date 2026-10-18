@@ -710,7 +710,7 @@ func TestLSP_OversizedContentLengthIsRejected(t *testing.T) {
 func TestLSP_ContentLengthAtTheLimitIsAccepted(t *testing.T) {
 	var out bytes.Buffer
 	server := NewServer(&out)
-	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"pad":""}}`)
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"pad":""}}`
 	require.NoError(t, server.Serve(strings.NewReader(frame(body))))
 	assert.Contains(t, out.String(), `"id":1`)
 	assert.Equal(t, 64<<20, maxMessageBytes)

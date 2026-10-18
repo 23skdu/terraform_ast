@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -182,4 +183,112 @@ deny[msg] {
 	unclosed, err := ParseRego("deny[msg] {\n input.breaking_changes > 0")
 	require.NoError(t, err)
 	assert.Len(t, unclosed.Rules, 1)
+
+	// No valid rules found
+	_, errNoRules := ParseRego("package test\n# just a comment\n")
+	assert.Error(t, errNoRules)
+	assert.Contains(t, errNoRules.Error(), "no valid rules found in Rego policy")
+
+	// Unrecognized policy field
+	_, errBadField := ParseRego("deny[msg] {\n input.unknown_custom_field == true\n}")
+	assert.Error(t, errBadField)
+	assert.Contains(t, errBadField.Error(), "unrecognized policy field")
+
+	// LoadRego valid file
+	tmpRego := filepath.Join(t.TempDir(), "policy.rego")
+	require.NoError(t, os.WriteFile(tmpRego, []byte("package test\ndeny[msg] {\n input.breaking_changes > 0\n}"), 0644))
+	loaded, err := LoadRego(tmpRego)
+	require.NoError(t, err)
+	assert.Len(t, loaded.Rules, 1)
+
+	// LoadRego non-existent file
+	_, errMissing := LoadRego("/nonexistent/rego/path.rego")
+	assert.Error(t, errMissing)
+}
+
+func TestEvaluateRego_OPAFullSuite(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Nil policy or empty source
+	res, err := EvaluateRegoArbitrary(ctx, nil, nil)
+	assert.NoError(t, err)
+	assert.Nil(t, res)
+
+	res, err = EvaluateRegoArbitrary(ctx, &RegoPolicy{}, nil)
+	assert.NoError(t, err)
+	assert.Nil(t, res)
+
+	// 2. Evaluation error (invalid rego syntax in source)
+	badPolicy := &RegoPolicy{Package: "bad", Source: "package bad\n= syntax error"}
+	_, err = EvaluateRegoArbitrary(ctx, badPolicy, nil)
+	assert.Error(t, err)
+
+	// 3. OPA with set/slice of deny strings (deny contains msg)
+	regoSrc := `package terraform_ast.policy
+deny contains msg if {
+	input.breaking_changes > 0
+	msg := sprintf("breaking changes found: %v", [input.breaking_changes])
+}
+`
+	pol, err := ParseRego(regoSrc)
+	require.NoError(t, err)
+	violations, err := EvaluateRegoArbitrary(ctx, pol, map[string]any{"breaking_changes": 3})
+	require.NoError(t, err)
+	require.Len(t, violations, 1)
+	assert.Equal(t, "deny", violations[0].Rule)
+	assert.Contains(t, violations[0].Message, "breaking changes found: 3")
+
+	// Call EvaluateRego top-level helper which should invoke OPA and return violations
+	topViolations := EvaluateRego(pol, Input{BreakingChanges: 3})
+	require.Len(t, topViolations, 1)
+	assert.Contains(t, topViolations[0].Message, "breaking changes found: 3")
+
+	// 4. Boolean violation rule
+	regoBool := `package terraform_ast.policy
+violation = true if {
+	input.is_downgrade == true
+}
+`
+	polBool, err := ParseRego(regoBool)
+	require.NoError(t, err)
+	violationsBool, err := EvaluateRegoArbitrary(ctx, polBool, map[string]any{"is_downgrade": true})
+	require.NoError(t, err)
+	require.Len(t, violationsBool, 1)
+	assert.Equal(t, "violation", violationsBool[0].Rule)
+
+	// 5. String deny rule
+	reGoString := `package terraform_ast.policy
+deny := "direct string violation" if {
+	input.warnings > 5
+}
+`
+	polStr, err := ParseRego(reGoString)
+	require.NoError(t, err)
+	violationsStr, err := EvaluateRegoArbitrary(ctx, polStr, map[string]any{"warnings": 10})
+	require.NoError(t, err)
+	require.Len(t, violationsStr, 1)
+	assert.Equal(t, "direct string violation", violationsStr[0].Message)
+
+	// 6. Map of items in deny
+	regoMap := `package terraform_ast.policy
+deny[k] := v if {
+	k := "item1"
+	v := "detail1"
+}
+`
+	polMap, err := ParseRego(regoMap)
+	require.NoError(t, err)
+	violationsMap, err := EvaluateRegoArbitrary(ctx, polMap, map[string]any{})
+	require.NoError(t, err)
+	require.Len(t, violationsMap, 1)
+	assert.Equal(t, "detail1", violationsMap[0].Message)
+
+	// 7. Undefined package or empty expressions
+	regoEmpty := `package other_pkg
+deny = true if { false }
+`
+	polEmpty := &RegoPolicy{Package: "nonexistent_pkg", Source: regoEmpty}
+	violationsEmpty, err := EvaluateRegoArbitrary(ctx, polEmpty, map[string]any{})
+	require.NoError(t, err)
+	assert.Nil(t, violationsEmpty)
 }

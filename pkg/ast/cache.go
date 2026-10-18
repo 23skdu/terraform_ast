@@ -197,8 +197,14 @@ func cacheModule(path, fingerprint string, info *ModuleInfo) error {
 	diskDir := GetPersistentCacheDir()
 	if diskDir != "" {
 		if err := os.MkdirAll(diskDir, 0o750); err == nil {
-			diskFile := filepath.Join(diskDir, fingerprint+".json")
-			_ = os.WriteFile(diskFile, data, 0o600)
+			tmpFile, err := os.CreateTemp(diskDir, "cache-tmp-*")
+			if err == nil {
+				tmpName := tmpFile.Name()
+				_, _ = tmpFile.Write(data)
+				_ = tmpFile.Close()
+				diskFile := filepath.Join(diskDir, fingerprint+".json")
+				_ = os.Rename(tmpName, diskFile)
+			}
 		}
 	}
 	return nil

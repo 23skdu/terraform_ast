@@ -9,7 +9,6 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/gitops"
 	"github.com/23skdu/terraform_ast/pkg/registry"
 	"github.com/23skdu/terraform_ast/pkg/semverutil"
-	"github.com/Masterminds/semver/v3"
 )
 
 // UpgradePlanner is responsible for analyzing multi-version jumps
@@ -28,17 +27,15 @@ func NewUpgradePlanner(rc *registry.Client) *UpgradePlanner {
 
 // PlanUpgrade computes the intermediate "safe harbor" versions for an upgrade
 func (p *UpgradePlanner) PlanUpgrade(ctx context.Context, moduleSource string, fromVersion, toVersion string) ([]string, error) {
-	from, err := semver.NewVersion(fromVersion)
-	if err != nil {
-		return nil, fmt.Errorf("invalid from version: %w", err)
+	if !semverutil.IsValid(fromVersion) {
+		return nil, fmt.Errorf("invalid from version: %s", fromVersion)
 	}
 
-	to, err := semver.NewVersion(toVersion)
-	if err != nil {
-		return nil, fmt.Errorf("invalid to version: %w", err)
+	if !semverutil.IsValid(toVersion) {
+		return nil, fmt.Errorf("invalid to version: %s", toVersion)
 	}
 
-	if from.GreaterThan(to) || from.Equal(to) {
+	if semverutil.Compare(fromVersion, toVersion) >= 0 {
 		return []string{fromVersion}, nil
 	}
 
@@ -46,7 +43,10 @@ func (p *UpgradePlanner) PlanUpgrade(ctx context.Context, moduleSource string, f
 		return []string{fromVersion, toVersion}, nil
 	}
 
-	var versions []string
+	var (
+		versions []string
+		err      error
+	)
 	if registry.IsRegistrySource(moduleSource) {
 		versions, err = p.RegistryClient.ListVersions(ctx, moduleSource)
 		if err != nil {
@@ -66,8 +66,6 @@ func (p *UpgradePlanner) PlanUpgrade(ctx context.Context, moduleSource string, f
 		if err != nil {
 			return nil, fmt.Errorf("open repository for upgrade planning: %w", err)
 		}
-		// CloneOrOpen only yields a repository together with a nil error, so listing its tags
-		// cannot fail here.
 		versions, _ = gitops.ListSemverTags(repo)
 	}
 

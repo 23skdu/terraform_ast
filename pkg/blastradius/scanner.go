@@ -60,6 +60,29 @@ func ScanDirectory(
 	wrapperMod *ast.ModuleInfo,
 	wrapperAudit *wrapper.WrapperCompatibilityReport,
 ) (*BlastRadiusReport, error) {
+	return ScanDirectoryWithRegistry(searchDir, wrapperIdentifier, wrapperMod, wrapperAudit, nil)
+}
+
+// ScanDirectoryWithRegistry searches searchDir recursively with dynamic hazard registry support.
+func ScanDirectoryWithRegistry(
+	searchDir string,
+	wrapperIdentifier string,
+	wrapperMod *ast.ModuleInfo,
+	wrapperAudit *wrapper.WrapperCompatibilityReport,
+	registry *recreation.DynamicHazardRegistry,
+) (*BlastRadiusReport, error) {
+	return ScanDirectoryWithTaint(searchDir, wrapperIdentifier, wrapperMod, wrapperAudit, registry, nil)
+}
+
+// ScanDirectoryWithTaint searches searchDir recursively with dynamic hazard registry and cross-module taint reachability.
+func ScanDirectoryWithTaint(
+	searchDir string,
+	wrapperIdentifier string,
+	wrapperMod *ast.ModuleInfo,
+	wrapperAudit *wrapper.WrapperCompatibilityReport,
+	registry *recreation.DynamicHazardRegistry,
+	taintReport *eval.TaintReport,
+) (*BlastRadiusReport, error) {
 	cleanSearchDir := filepath.Clean(searchDir)
 	fi, err := os.Stat(cleanSearchDir)
 	if err != nil {
@@ -74,6 +97,11 @@ func ScanDirectory(
 		return nil, err
 	}
 
+	totalDiscovered := len(callSites)
+	if taintReport != nil {
+		callSites = FilterTaintedCallSites(callSites, taintReport)
+	}
+
 	report := &BlastRadiusReport{
 		SearchDir:             searchDir,
 		WrapperIdentifier:     wrapperIdentifier,
@@ -83,7 +111,7 @@ func ScanDirectory(
 	}
 
 	for _, cs := range callSites {
-		impact := evaluateCallSiteImpact(cs, wrapperMod, wrapperAudit)
+		impact := evaluateCallSiteImpact(cs, wrapperMod, wrapperAudit, registry)
 		if !impact.CanSafelyUpdate {
 			report.CanSafelyUpdateAll = false
 		}
@@ -94,14 +122,87 @@ func ScanDirectory(
 	}
 
 	if len(report.ImpactedRootModules) == 0 {
-		report.Summary = fmt.Sprintf("No downstream consumer modules found calling '%s' in %s", wrapperIdentifier, searchDir)
+		if taintReport != nil && totalDiscovered > 0 {
+			report.Summary = fmt.Sprintf("Scanned %d downstream call sites; 0 consumers are reachable from tainted variable var.%s in %s", totalDiscovered, taintReport.TargetVariable, searchDir)
+		} else {
+			report.Summary = fmt.Sprintf("No downstream consumer modules found calling '%s' in %s", wrapperIdentifier, searchDir)
+		}
 	} else if report.CanSafelyUpdateAll {
-		report.Summary = fmt.Sprintf("Scanned %d downstream call sites; all consumer modules can safely update without breaking changes", len(callSites))
+		if taintReport != nil {
+			report.Summary = fmt.Sprintf("Scanned %d downstream call sites (filtered to %d tainted by var.%s); all tainted consumers can safely update", totalDiscovered, len(callSites), taintReport.TargetVariable)
+		} else {
+			report.Summary = fmt.Sprintf("Scanned %d downstream call sites; all consumer modules can safely update without breaking changes", len(callSites))
+		}
 	} else {
-		report.Summary = fmt.Sprintf("Scanned %d downstream call sites; detected breaking impacts with highest risk %s", len(callSites), report.HighestRisk)
+		if taintReport != nil {
+			report.Summary = fmt.Sprintf("Scanned %d downstream call sites (filtered to %d tainted by var.%s); detected breaking impacts with highest risk %s", totalDiscovered, len(callSites), taintReport.TargetVariable, report.HighestRisk)
+		} else {
+			report.Summary = fmt.Sprintf("Scanned %d downstream call sites; detected breaking impacts with highest risk %s", len(callSites), report.HighestRisk)
+		}
 	}
 
 	return report, nil
+}
+
+// FilterTaintedCallSites filters call sites to only those downstream consumers that
+// either pass the tainted input variable or reference an output tainted by it.
+func FilterTaintedCallSites(callSites []CallSite, taintReport *eval.TaintReport) []CallSite {
+	if taintReport == nil {
+		return callSites
+	}
+
+	taintedOutputs := make(map[string]struct{})
+	for _, attr := range taintReport.AffectedResourceAttributes {
+		if strings.HasPrefix(attr, "output.") {
+			taintedOutputs[strings.TrimPrefix(attr, "output.")] = struct{}{}
+		}
+	}
+	for _, path := range taintReport.TracePath {
+		if strings.HasPrefix(path, "output.") {
+			taintedOutputs[strings.TrimPrefix(path, "output.")] = struct{}{}
+		}
+	}
+
+	var filtered []CallSite
+	for _, cs := range callSites {
+		isTainted := false
+
+		// 1. Consumer explicitly passes the tainted input
+		if _, passed := cs.PassedInputs[taintReport.TargetVariable]; passed {
+			isTainted = true
+		}
+
+		// 2. Consumer references an output tainted by the target variable
+		if !isTainted {
+			for _, ref := range cs.OutputsReferenced {
+				if _, ok := taintedOutputs[ref]; ok {
+					isTainted = true
+					break
+				}
+			}
+		}
+
+		// 3. Consumer's passed input expression references a tainted output (e.g. module.wrapper.tainted_output)
+		if !isTainted {
+			for _, expr := range cs.PassedInputs {
+				for outName := range taintedOutputs {
+					if strings.Contains(expr, "."+outName) {
+						isTainted = true
+						break
+					}
+				}
+				if isTainted {
+					break
+				}
+			}
+		}
+
+		if isTainted {
+			filtered = append(filtered, cs)
+		}
+	}
+
+	return filtered
 }
 
 func discoverCallSites(searchDir, wrapperIdentifier string) ([]CallSite, error) {
@@ -110,7 +211,10 @@ func discoverCallSites(searchDir, wrapperIdentifier string) ([]CallSite, error) 
 
 	err := filepath.WalkDir(searchDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return err
+			if path == searchDir {
+				return err
+			}
+			return nil
 		}
 		if d.IsDir() {
 			name := d.Name()
@@ -257,6 +361,10 @@ func discoverJSONCallSites(src []byte, path, targetIdentifier string) []CallSite
 	return callSites
 }
 
+// terragruntEnv is the environment the Terragrunt built-ins read. It defaults to the process
+// environment and can be replaced so tests are hermetic.
+var terragruntEnv map[string]string
+
 func parseTerragruntCallSite(src []byte, path, targetIdentifier string) (CallSite, bool) {
 	file, diags := hclsyntax.ParseConfig(src, path, hcl.Pos{Line: 1, Column: 1})
 	if diags.HasErrors() || file == nil {
@@ -294,14 +402,19 @@ func parseTerragruntCallSite(src []byte, path, targetIdentifier string) (CallSit
 				}
 			}
 		} else {
-			rawExpr := string(src[inputsAttr.Expr.Range().Start.Byte:inputsAttr.Expr.Range().End.Byte])
-			ctx := eval.BuildEvalContext(nil, nil)
-			if resolved, err := eval.ResolveTerragruntInputs(rawExpr, ctx); err == nil {
-				for k, v := range resolved {
-					passedInputs[k] = v
-				}
-			} else {
+			// A dynamic `inputs` expression is evaluated against the config's own locals and the
+			// Terragrunt built-ins, following its include chain. This used to be evaluated against
+			// BuildEvalContext(nil, nil), which left `local` empty and implemented none of the
+			// Terragrunt functions, so the canonical `merge(local.defaults, {...})` idiom always
+			// failed and every realistic Terragrunt consumer was reported as fully unanalysed.
+			resolved, err := eval.ReadTerragruntInputsWithContext(body, src, path, eval.TerragruntOptions{
+				Env: terragruntEnv,
+			})
+			if err != nil {
 				inputAnalysisIncomplete = true
+			}
+			for k, v := range resolved {
+				passedInputs[k] = v
 			}
 		}
 	}
@@ -345,12 +458,37 @@ func isMatchingSource(callerFilePath, sourceVal, targetIdentifier string) bool {
 	if cleanSource == cleanTarget || sourceVal == targetIdentifier {
 		return true
 	}
-	if filepath.Base(cleanSource) == filepath.Base(cleanTarget) {
+	targetHasSlash := strings.Contains(targetIdentifier, "/") || strings.Contains(targetIdentifier, string(filepath.Separator))
+	sourceHasSlash := strings.Contains(sourceVal, "/") || strings.Contains(sourceVal, string(filepath.Separator))
+
+	// If target has no path separators (a bare module name like "vpc" or "gke"), allow matching against source basename.
+	if !targetHasSlash {
+		return filepath.Base(cleanSource) == cleanTarget
+	}
+
+	// If target has slashes, require resolved path equality.
+	callerDir := filepath.Dir(callerFilePath)
+	resolved := filepath.Clean(filepath.Join(callerDir, sourceVal))
+
+	if resolved == cleanTarget {
 		return true
 	}
-	// Check relative resolution
-	resolved := filepath.Clean(filepath.Join(filepath.Dir(callerFilePath), sourceVal))
-	return resolved == cleanTarget || strings.HasSuffix(resolved, cleanTarget) || strings.HasSuffix(cleanSource, cleanTarget)
+	if filepath.IsAbs(cleanTarget) {
+		absResolved, err := filepath.Abs(resolved)
+		if err == nil && absResolved == cleanTarget {
+			return true
+		}
+	}
+	if filepath.IsAbs(callerDir) && !filepath.IsAbs(cleanTarget) {
+		absTarget, err := filepath.Abs(cleanTarget)
+		if err == nil && resolved == absTarget {
+			return true
+		}
+	}
+	if sourceHasSlash && strings.HasSuffix(resolved, cleanTarget) {
+		return true
+	}
+	return false
 }
 
 func extractSourceVal(src []byte, expr hcl.Expression) string {
@@ -424,8 +562,9 @@ func addModuleReferencesWithSeen(refs map[string][]string, seen map[string]map[s
 
 func evaluateCallSiteImpact(
 	cs CallSite,
-	_ *ast.ModuleInfo,
+	wrapperMod *ast.ModuleInfo,
 	audit *wrapper.WrapperCompatibilityReport,
+	registry *recreation.DynamicHazardRegistry,
 ) RootModuleImpact {
 	impact := RootModuleImpact{
 		Dir:                cs.Dir,
@@ -447,21 +586,21 @@ func evaluateCallSiteImpact(
 
 	// 1. Check for removed inputs passed by this caller
 	for _, issue := range audit.Issues {
-		if (strings.Contains(issue.Description, "removed") || issue.Category == "PassedRemovedInput") && (strings.HasPrefix(issue.Category, "Variable") || issue.Category == "PassedRemovedInput") {
+		if issue.Category == "PassedRemovedInput" || (strings.HasPrefix(issue.Category, "Variable") && strings.Contains(issue.Description, "removed")) {
 			if _, passed := cs.PassedInputs[issue.Target]; passed {
 				impact.RemovedInputsPassed = append(impact.RemovedInputsPassed, issue.Target)
 				impact.CanSafelyUpdate = false
 			}
 		}
 		// 2. Check for missing required inputs
-		if (strings.Contains(issue.Description, "required") || issue.Category == "MissingRequiredInput") && (strings.HasPrefix(issue.Category, "Variable") || issue.Category == "MissingRequiredInput") {
+		if issue.Category == "MissingRequiredInput" || (strings.HasPrefix(issue.Category, "Variable") && strings.Contains(issue.Description, "required")) {
 			if _, passed := cs.PassedInputs[issue.Target]; !passed {
 				impact.MissingRequiredInputs = append(impact.MissingRequiredInputs, issue.Target)
 				impact.CanSafelyUpdate = false
 			}
 		}
-		// 3. Check for removed outputs referenced by this caller
-		if strings.Contains(issue.Description, "output") || strings.HasPrefix(issue.Category, "Output") || issue.Category == "BrokenOutputDelegation" {
+		// 3. Check for removed outputs referenced by this caller from wrapper issues
+		if issue.Category == "BrokenOutputDelegation" || strings.HasPrefix(issue.Category, "Output") {
 			for _, ref := range cs.OutputsReferenced {
 				if ref == issue.Target {
 					impact.RemovedOutputsReferenced = append(impact.RemovedOutputsReferenced, issue.Target)
@@ -469,34 +608,50 @@ func evaluateCallSiteImpact(
 				}
 			}
 		}
-		// 4. Check for other breaking modifications on passed inputs (e.g. type changes)
-		if !strings.Contains(issue.Description, "removed") && (strings.HasPrefix(issue.Category, "Variable") || issue.Category == "TypeMismatch") && issue.Severity == diff.SeverityBreaking {
+		// 4. Check for other breaking modifications on passed inputs (e.g. type changes or nullability)
+		if (issue.Category == "TypeMismatch" || issue.Category == "VariableNullability" || (strings.HasPrefix(issue.Category, "Variable") && (strings.Contains(issue.Description, "type") || strings.Contains(issue.Description, "incompatible")))) && issue.Severity == diff.SeverityBreaking {
 			if _, passed := cs.PassedInputs[issue.Target]; passed {
 				impact.CanSafelyUpdate = false
 			}
 		}
 	}
 
-	// 4. Check for state recreation hazards in passed inputs in sorted order
+	// Check if caller references outputs that the wrapper itself no longer declares
+	if wrapperMod != nil && len(wrapperMod.Outputs) > 0 {
+		for _, ref := range cs.OutputsReferenced {
+			if _, exists := wrapperMod.Outputs[ref]; !exists {
+				impact.RemovedOutputsReferenced = append(impact.RemovedOutputsReferenced, ref)
+				impact.CanSafelyUpdate = false
+			}
+		}
+	}
+
+	// 5. Check for state recreation hazards in passed inputs in sorted order
 	var passedNames []string
 	for inputName := range cs.PassedInputs {
 		passedNames = append(passedNames, inputName)
 	}
 	sort.Strings(passedNames)
 
+	lookup := func(name string) (recreation.HazardDescriptor, bool) {
+		if registry != nil {
+			if desc, ok := registry.Lookup(name); ok {
+				return desc, true
+			}
+		}
+		return recreation.LookupHazard(audit.TargetModuleName, name)
+	}
+
 	for _, inputName := range passedNames {
-		// The hazard lookup is authoritative on its own. Gating it on a matching wrapper issue
-		// discarded ForceNew findings for any input that happened to be compatible, which is
-		// exactly the set of inputs a consumer passes most freely.
-		if desc, ok := recreation.LookupHazard(audit.TargetModuleName, inputName); ok {
+		if desc, ok := lookup(inputName); ok {
 			impact.RecreationHazards = append(impact.RecreationHazards, fmt.Sprintf("%s (%s)", inputName, desc.Impact))
 			impact.CanSafelyUpdate = false
 		}
 	}
-	sort.Strings(impact.RecreationHazards)
-	sort.Strings(impact.RemovedOutputsReferenced)
-	sort.Strings(impact.MissingRequiredInputs)
-	sort.Strings(impact.RemovedInputsPassed)
+	impact.RecreationHazards = dedupeSorted(impact.RecreationHazards)
+	impact.RemovedOutputsReferenced = dedupeSorted(impact.RemovedOutputsReferenced)
+	impact.MissingRequiredInputs = dedupeSorted(impact.MissingRequiredInputs)
+	impact.RemovedInputsPassed = dedupeSorted(impact.RemovedInputsPassed)
 
 	// Compute RiskScore
 	if len(impact.RecreationHazards) > 0 || len(impact.RemovedOutputsReferenced) > 0 {
@@ -511,6 +666,20 @@ func evaluateCallSiteImpact(
 	}
 
 	return impact
+}
+
+func dedupeSorted(s []string) []string {
+	if len(s) == 0 {
+		return s
+	}
+	sort.Strings(s)
+	res := make([]string, 0, len(s))
+	for _, v := range s {
+		if len(res) == 0 || res[len(res)-1] != v {
+			res = append(res, v)
+		}
+	}
+	return res
 }
 
 func riskRank(r string) int {

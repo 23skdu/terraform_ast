@@ -6,6 +6,7 @@ import (
 
 	"github.com/23skdu/terraform_ast/pkg/blastradius"
 	"github.com/23skdu/terraform_ast/pkg/diff"
+	"github.com/23skdu/terraform_ast/pkg/eval"
 	"github.com/23skdu/terraform_ast/pkg/policy"
 	"github.com/23skdu/terraform_ast/pkg/recreation"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
@@ -296,6 +297,76 @@ func TestSafePinAndPolicyViolationsAreRendered(t *testing.T) {
 	assert.Empty(t, emptySARIFLog.Runs)
 	emptyWrapperSARIFLog := unmarshalSARIF(t, RenderWrapperSARIF(nil, Findings{}))
 	assert.Empty(t, emptyWrapperSARIFLog.Runs)
+}
+
+func TestTaintRendering(t *testing.T) {
+	assert.Equal(t, "", FormatTaintMarkdown(nil))
+
+	deadTaint := &eval.TaintReport{
+		TargetVariable: "unused_var",
+		IsDeadCode:     true,
+	}
+	mdDead := FormatTaintMarkdown(deadTaint)
+	assert.Contains(t, mdDead, "### Variable Taint Analysis (`var.unused_var`)")
+	assert.Contains(t, mdDead, "Unused / dead code")
+
+	w := sampleWrapperReport()
+	findingsDead := Findings{Taint: deadTaint}
+	textDead := RenderWrapperText(w, findingsDead)
+	assert.Contains(t, textDead, "DEAD CODE (no downstream references in /repos/gke-wrapper)")
+
+	liveTaint := &eval.TaintReport{
+		TargetVariable:             "active_var",
+		IsDeadCode:                 false,
+		TracePath:                  []string{"var.active_var", "local.active", "google_container_cluster.primary.name"},
+		AffectedResourceAttributes: []string{"google_container_cluster.primary.name"},
+	}
+	mdLive := FormatTaintMarkdown(liveTaint)
+	assert.Contains(t, mdLive, "Reachable")
+	assert.Contains(t, mdLive, "Affected Resource Attributes (1)")
+
+	findingsLive := Findings{Taint: liveTaint}
+	textLive := RenderWrapperText(w, findingsLive)
+	assert.Contains(t, textLive, "Status: REACHABLE")
+	assert.Contains(t, textLive, "Affected attributes (1):")
+}
+
+func TestSARIF_EdgeCases(t *testing.T) {
+	loc1 := sarifLocation("custom.tf")
+	assert.Equal(t, 1, loc1[0].PhysicalLocation.Region.StartLine)
+	assert.Equal(t, "custom.tf", loc1[0].PhysicalLocation.ArtifactLocation.URI)
+
+	locZero := sarifLocationWithLine("", 0)
+	assert.Equal(t, 1, locZero[0].PhysicalLocation.Region.StartLine)
+	assert.Equal(t, "main.tf", locZero[0].PhysicalLocation.ArtifactLocation.URI)
+
+	locPos := sarifLocationWithLine("test.tf", 42)
+	assert.Equal(t, 42, locPos[0].PhysicalLocation.Region.StartLine)
+	assert.Equal(t, "test.tf", locPos[0].PhysicalLocation.ArtifactLocation.URI)
+
+	// Blast radius with incomplete analysis and CanSafelyUpdate = true produces a warning result
+	blastIncomplete := &blastradius.BlastRadiusReport{
+		ImpactedRootModules: []blastradius.RootModuleImpact{
+			{
+				Dir:                "/consumer/dir",
+				ModuleName:         "consumer_app",
+				RiskScore:          "MEDIUM",
+				CanSafelyUpdate:    true,
+				AnalysisIncomplete: true,
+			},
+		},
+	}
+	sarifBytes := RenderWrapperSARIF(sampleWrapperReport(), Findings{BlastRadius: blastIncomplete})
+	log := unmarshalSARIF(t, sarifBytes)
+	var foundWarning bool
+	for _, res := range log.Runs[0].Results {
+		if res.RuleID == ruleBlastRadius {
+			assert.Equal(t, "warning", res.Level)
+			assert.Contains(t, res.Message.Text, "analysis incomplete")
+			foundWarning = true
+		}
+	}
+	assert.True(t, foundWarning)
 }
 
 func unmarshalSARIF(t *testing.T, data []byte) SARIFLog {

@@ -185,6 +185,10 @@ func (c *Client) GetLatestVersion(ctx context.Context, source string) (string, e
 	if len(versions) == 0 {
 		return "", fmt.Errorf("no valid semantic versions found for module %s", source)
 	}
+	stable := semverutil.FilterPrereleases(versions)
+	if len(stable) > 0 {
+		return stable[len(stable)-1], nil
+	}
 	return versions[len(versions)-1], nil
 }
 

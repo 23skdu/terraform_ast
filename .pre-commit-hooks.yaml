@@ -4,3 +4,4 @@
   entry: tfastdiff
   language: system
   pass_filenames: false
+  args: ["--wrapper", ".", "--exit-code"]
