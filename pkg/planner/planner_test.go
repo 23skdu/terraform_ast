@@ -128,6 +128,9 @@ func TestIsGitSourceAndIsGitURL(t *testing.T) {
 	require.True(t, isGitURL("https://github.com/org/repo.git"))
 	require.True(t, isGitURL("file:///srv/repo"))
 	require.True(t, isGitURL("git@github.com:org/repo.git"))
+	require.True(t, isGitURL("github.com/org/repo"))
+	require.True(t, isGitURL("bitbucket.org/org/repo"))
+	require.True(t, isGitURL("git://github.com/org/repo.git"))
 	require.False(t, isGitURL("./local"))
 
 	repoDir := t.TempDir()

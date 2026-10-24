@@ -913,12 +913,10 @@ func newCachedDir(pattern string) gitops.DirFactory {
 	}
 }
 
+// isGitURL reports whether path is a remote VCS source. The predicate lives in gitops so the CLI,
+// the planner and the clone path all agree on what counts as a git source.
 func isGitURL(path string) bool {
-	return strings.HasPrefix(path, "http://") ||
-		strings.HasPrefix(path, "https://") ||
-		strings.HasPrefix(path, "file://") ||
-		strings.HasPrefix(path, "git@") ||
-		strings.HasPrefix(path, "git::")
+	return gitops.IsGitURL(path)
 }
 
 func isGitRepo(path string) bool {

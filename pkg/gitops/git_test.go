@@ -103,6 +103,179 @@ func TestCloneOrOpen(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestParseGitSource covers the source syntax the checkout path must honour: both separator
+// orders Terraform accepts, "git::" stripping, shorthand expansion (including against a pinned
+// reference, which must never become part of the path), query decoding, and the guarantee that a
+// local path is never split on "//".
+func TestParseGitSource(t *testing.T) {
+	cases := []struct{ source, url, subDir, ref string }{
+		{"", "", "", ""},
+		{"git::https://example.com/vpc.git", "https://example.com/vpc.git", "", ""},
+		{"git::https://example.com/vpc.git?ref=v1.2.3", "https://example.com/vpc.git", "", "v1.2.3"},
+		{"https://example.com/vpc.git?ref=v1.2.3", "https://example.com/vpc.git", "", "v1.2.3"},
+		{"git::https://example.com/vpc.git//modules/vpc?ref=v1.2.3", "https://example.com/vpc.git", "modules/vpc", "v1.2.3"},
+		{"git::https://example.com/vpc.git?ref=v1.2.3//modules/vpc", "https://example.com/vpc.git", "modules/vpc", "v1.2.3"},
+		{"https://example.com/vpc.git?depth=1&ref=v9", "https://example.com/vpc.git", "", "v9"},
+		{"git::file:///srv/repo", "file:///srv/repo", "", ""},
+		{"git::file:///srv/repo?ref=feature%2Fx", "file:///srv/repo", "", "feature/x"},
+		{"git::file:///srv/repo?ref=%zz", "file:///srv/repo", "", "%zz"},
+		{"file:///srv/repo//nested/sub", "file:///srv/repo", "nested/sub", ""},
+		{"github.com/org/repo", "https://github.com/org/repo.git", "", ""},
+		{"github.com/org/repo.git", "https://github.com/org/repo.git", "", ""},
+		{"git::github.com/org/repo.git//modules/vpc", "https://github.com/org/repo.git", "modules/vpc", ""},
+		{"github.com/org/repo//modules/vpc?ref=v2.0.0", "https://github.com/org/repo.git", "modules/vpc", "v2.0.0"},
+		{"bitbucket.org/org/repo", "https://bitbucket.org/org/repo.git", "", ""},
+		{"bitbucket.org/org/repo.git?ref=v1", "https://bitbucket.org/org/repo.git", "", "v1"},
+		{"git@github.com:org/repo.git//sub?ref=v1", "git@github.com:org/repo.git", "sub", "v1"},
+		// Local paths are never split: "//" is an ordinary path character there.
+		{"/srv//modules/vpc", "/srv//modules/vpc", "", ""},
+		{"/srv/modules/vpc", "/srv/modules/vpc", "", ""},
+	}
+	for _, tc := range cases {
+		got := ParseGitSource(tc.source)
+		assert.Equal(t, GitSource{URL: tc.url, SubDir: tc.subDir, Ref: tc.ref}, got, "source %q", tc.source)
+	}
+}
+
+// createRepoWithSubdir builds a repository whose root is not a module: the module lives in
+// modules/gke and its inputs change between the v1.0.0 and v2.0.0 tags (head is v2.0.0).
+func createRepoWithSubdir(t *testing.T) string {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+	w, err := repo.Worktree()
+	require.NoError(t, err)
+	sig := &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()}
+
+	writeRelease := func(tag, rootContent, gkeContent string) {
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "modules", "gke"), 0750))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(rootContent), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "modules", "gke", "main.tf"), []byte(gkeContent), 0644))
+		_, err := w.Add("main.tf")
+		require.NoError(t, err)
+		_, err = w.Add("modules/gke/main.tf")
+		require.NoError(t, err)
+		commit, err := w.Commit("release "+tag, &git.CommitOptions{Author: sig, Committer: sig})
+		require.NoError(t, err)
+		_, err = repo.CreateTag(tag, commit, nil)
+		require.NoError(t, err)
+	}
+
+	writeRelease("v1.0.0",
+		`variable "from_root" {}`,
+		`variable "cluster_name" { type = string }`)
+	writeRelease("v2.0.0",
+		`variable "from_root" {}`,
+		`variable "other_name" { type = string }`)
+	return dir
+}
+
+// TestGetOrExtract_SubdirAndPinnedRef is the end to end guarantee: a source that names a
+// subdirectory and pins a revision yields that subdirectory at that revision, the source's pin is
+// used when the caller passes no ref, an explicit ref wins over it, and repeats are memoised.
+func TestGetOrExtract_SubdirAndPinnedRef(t *testing.T) {
+	repoDir := createRepoWithSubdir(t)
+	cache := NewRepositoryCache()
+	source := "git::file://" + repoDir + "//modules/gke?ref=v1.0.0"
+
+	dir, err := cache.GetOrExtract(source, "", tempDir(t))
+	require.NoError(t, err)
+	assert.Equal(t, "gke", filepath.Base(dir), "the module's subdirectory must be returned, not the root")
+
+	module, err := os.ReadFile(filepath.Join(dir, "main.tf"))
+	require.NoError(t, err)
+	assert.Contains(t, string(module), "cluster_name", "the source's ?ref= pin selects v1.0.0")
+	assert.NotContains(t, string(module), "other_name", "the v2.0.0 content must not appear")
+
+	root, err := os.ReadFile(filepath.Join(filepath.Dir(filepath.Dir(dir)), "main.tf"))
+	require.NoError(t, err)
+	assert.Contains(t, string(root), "from_root", "the repository root differs from the module")
+
+	// An explicit ref beats the source's pin.
+	dirV2, err := cache.GetOrExtract(source, "v2.0.0", tempDir(t))
+	require.NoError(t, err)
+	moduleV2, err := os.ReadFile(filepath.Join(dirV2, "main.tf"))
+	require.NoError(t, err)
+	assert.Contains(t, string(moduleV2), "other_name")
+
+	// Same source and effective ref is served from the cache.
+	again, err := cache.GetOrExtract(source, "", tempDir(t))
+	require.NoError(t, err)
+	assert.Equal(t, dir, again)
+}
+
+// TestGetOrExtract_SubdirErrors rejects a source whose subdirectory is not in the repository or
+// escapes the checkout, instead of silently analysing the repository root.
+func TestGetOrExtract_SubdirErrors(t *testing.T) {
+	repoDir := createRepoWithSubdir(t)
+	cache := NewRepositoryCache()
+
+	_, err := cache.GetOrExtract("git::file://"+repoDir+"//does/not/exist?ref=v1.0.0", "", tempDir(t))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "subdirectory")
+	assert.Contains(t, err.Error(), "does/not/exist")
+
+	_, err = cache.GetOrExtract("git::file://"+repoDir+"//../../../etc", "", tempDir(t))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "escapes")
+
+	_, err = cache.GetOrExtract("git::file://"+repoDir+"//main.tf?ref=v1.0.0", "", tempDir(t))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a directory")
+
+	dirDot, err := cache.GetOrExtract("git::file://"+repoDir+"//.?ref=v1.0.0", "", tempDir(t))
+	require.NoError(t, err)
+	assert.NotEmpty(t, dirDot)
+}
+
+// TestSharedClone_SharesRepositoryBehindSubdirSources proves the shared clone is keyed on the
+// repository, so every source addressing it (with or without subdirectory/ref syntax) reuses one
+// local copy instead of downloading the same repository again.
+func TestSharedClone_SharesRepositoryBehindSubdirSources(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
+	cache := NewRepositoryCache()
+
+	mirror, err := cache.SharedClone("git::file://" + repoDir + "//modules/vpc?ref=v1.0.0")
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(mirror, "README.md"))
+	require.NoError(t, err, "the mirror is the repository root")
+
+	same, err := cache.SharedClone("file://" + repoDir)
+	require.NoError(t, err)
+	assert.Equal(t, mirror, same)
+}
+
+// TestCloneOrOpen_GitPrefix proves the "git::" rewrite reaches the transport: a Terraform git
+// source wrapping a repository clones, where the raw prefix used to fail URL parsing.
+func TestCloneOrOpen_GitPrefix(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
+
+	dest := t.TempDir()
+	repo, err := CloneOrOpen("git::file://"+repoDir, dest)
+	require.NoError(t, err)
+	require.NotNil(t, repo)
+	_, err = os.Stat(filepath.Join(dest, "README.md"))
+	assert.NoError(t, err)
+}
+
+func TestIsGitURL(t *testing.T) {
+	for _, source := range []string{
+		"https://github.com/org/repo.git",
+		"git::https://github.com/org/repo.git",
+		"git@github.com:org/repo.git",
+		"ssh://git@github.com/org/repo.git",
+		"git://github.com/org/repo.git",
+		"file:///srv/repo",
+		"github.com/org/repo",
+		"bitbucket.org/org/repo",
+	} {
+		assert.True(t, IsGitURL(source), "%q is a git source", source)
+	}
+	for _, source := range []string{"./local", "/abs/local", "namespace/module/provider", ""} {
+		assert.False(t, IsGitURL(source), "%q is not a git source", source)
+	}
+}
+
 func TestNilRepoHandling(t *testing.T) {
 	_, err := ListSemverTags(nil)
 	assert.Error(t, err)

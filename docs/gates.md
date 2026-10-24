@@ -1,0 +1,159 @@
+# Quality & Accuracy Gates Specification
+
+This document details the quality assurance, verification, and accuracy governance architecture of `terraform_ast` (`tfastdiff`).
+
+The system employs two foundational verification gates:
+1. **The Pre-Commit & Verification Quality Gate**: An invariant pipeline enforcing code formatting, static security scanning, 100.0% statement coverage, and continuous differential fuzzing before merge.
+2. **The Upgrade Path Accuracy Gate Engine**: An end-to-end empirical verification engine evaluating real-world AWS EKS and Google GKE upstream module releases across random and structured version paths to validate semantic correctness, safe version boundaries, exit codes, and confidence scoring.
+
+---
+
+## 1. Upgrade Path Accuracy Gate Engine
+
+The Upgrade Path Accuracy Gate ([`scripts/validate_upgrade_accuracy.sh`](file:///home/rsd/REPOS/terraform_ast/scripts/validate_upgrade_accuracy.sh)) validates `tfastdiff` against live upstream releases of enterprise Terraform modules.
+
+It exercises multi-step version paths across **AWS EKS** (`terraform-aws-modules/terraform-aws-eks`) and **Google GKE** (`terraform-google-modules/terraform-google-kubernetes-engine`), asserting mathematical and semantic invariants over the generated Abstract Syntax Tree (AST) comparison graph.
+
+```mermaid
+flowchart TD
+    subgraph INGRESS["1. Module Ingress & Tag Discovery"]
+        EKS["AWS EKS Upstream Repo"] --> DISCOVER["Remote Tag Discovery (git ls-remote)"]
+        GKE["Google GKE Upstream Repo"] --> DISCOVER
+        DISCOVER --> POOL["Semver Candidate Pool (vX.Y.Z)"]
+    end
+
+    subgraph SAMPLING["2. Upgrade Path Sampling"]
+        POOL --> S_PATCH["Patch Series (e.g. v19.0.0 -> v19.0.4)"]
+        POOL --> S_MINOR["Minor Bumps (e.g. v19.0.0 -> v19.2.0)"]
+        POOL --> S_MAJOR["Major Jumps (e.g. v18.31.2 -> v19.0.0)"]
+    end
+
+    subgraph ENGINE["3. tfastdiff Execution"]
+        S_PATCH --> EXEC["tfastdiff --upgrade-path --format json"]
+        S_MINOR --> EXEC
+        S_MAJOR --> EXEC
+        EXEC --> JSON_OUT["JSON UpgradePathReport"]
+        EXEC --> EXIT_CHECK["tfastdiff --exit-code Parity Check"]
+    end
+
+    subgraph INVARIANTS["4. Semantic Invariant Verification Engine"]
+        JSON_OUT --> INV1["INV-1: Valid JSON & Schema Integrity"]
+        JSON_OUT --> INV2["INV-2: Monotonic Ascending Version Progression"]
+        JSON_OUT --> INV3["INV-3: Safety Parity (total_breaking == 0 <=> Safe)"]
+        JSON_OUT --> INV4["INV-4: Verdict Soundness (SAFE / WARNINGS / BREAKING)"]
+        JSON_OUT --> INV5["INV-5: Contiguous Safe Version Recommendation Bounds"]
+        JSON_OUT --> INV6["INV-6: Confidence Score Bounds (1 <= score <= 10)"]
+        EXIT_CHECK --> INV7["INV-7: Exit-Code Parity (Code 0 for safe, 1 for break)"]
+    end
+
+    subgraph SCORING["5. Gate Decision & Confidence Scoring"]
+        INV1 --> METRICS["Accuracy Rate Calculation"]
+        INV2 --> METRICS
+        INV3 --> METRICS
+        INV4 --> METRICS
+        INV5 --> METRICS
+        INV6 --> METRICS
+        INV7 --> METRICS
+        METRICS --> EVAL{"Accuracy Rate >= Threshold (100%)?"}
+        EVAL -->|Yes| PASS["GATE PASS: Exit 0 (Export JSON Artifact)"]
+        EVAL -->|No| FAIL["GATE FAIL: Exit 1 (Violations Reported)"]
+    end
+```
+
+### Invariant Rules Enforced
+
+| Rule ID | Name | Semantic Definition |
+| :--- | :--- | :--- |
+| **INV-1** | Schema Integrity | Output parses as valid JSON adhering to `UpgradePathReport` with non-empty `steps`. |
+| **INV-2** | Monotonic Ordering | For all steps $i$, $v_{from, i} < v_{to, i}$ in strict semver ascending order. |
+| **INV-3** | Safety Equivalence | $\text{total\_breaking} = 0 \iff \text{can\_safely\_update} = \text{true}$. |
+| **INV-4** | Verdict Soundness | Verdict $\in \{\text{"SAFE"}, \text{"WARNINGS\_ONLY"}, \text{"BREAKING\_CHANGES"}, \text{"DOWNGRADE"}\}$. |
+| **INV-5** | Recommendation Bounds | If $\text{can\_safely\_update\_all} = \text{true}$, $\text{recommended} = \text{target}$. If false, $\text{recommended} = v_{from}$ of the first breaking step. |
+| **INV-6** | Confidence Score Bounds | For all findings, $1 \le \text{confidence\_score} \le 10$. Breaking findings must satisfy $\text{confidence\_score} \ge 7$. |
+| **INV-7** | Exit-Code Parity | `--exit-code` produces exit code `0` if all transitions are safe, and code `1` if breaking changes exist. |
+
+### Execution
+
+```bash
+# Run validation with default settings (3 paths per module, 100.0% threshold)
+make accuracy-gate
+
+# Run directly with customized sampling and artifact export
+./scripts/validate_upgrade_accuracy.sh \
+  --samples 5 \
+  --min-accuracy 100.0 \
+  --seed 1337 \
+  --output /tmp/accuracy_report.json
+```
+
+---
+
+## 2. Pre-Commit & Verification Quality Gate
+
+The quality gate ensures that every commit, pull request, and release artifact maintains clean formatting, strict static analysis, complete statement coverage, and fuzz resilience.
+
+The gate is implemented through [`scripts/verify.sh`](file:///home/rsd/REPOS/terraform_ast/scripts/verify.sh) and integrated directly into git pre-commit hooks ([`.pre-commit-hooks.yaml`](file:///home/rsd/REPOS/terraform_ast/.pre-commit-hooks.yaml)) and GitHub Actions CI ([`.github/workflows/ci.yml`](file:///home/rsd/REPOS/terraform_ast/.github/workflows/ci.yml)).
+
+```mermaid
+flowchart TD
+    subgraph HOOK["1. Developer Entrypoint"]
+        GIT_COMMIT["git commit / pre-commit run"] --> HOOK_DEF[".pre-commit-hooks.yaml"]
+        HOOK_DEF --> WRAPPER_CHECK["tfastdiff --wrapper . --exit-code"]
+        CLI_MAKE["make verify"] --> VERIFY_SCRIPT["scripts/verify.sh"]
+    end
+
+    subgraph STATIC["2. Static Hygiene & Linting"]
+        VERIFY_SCRIPT --> FMT["gofmt -l . (Zero Unformatted Files)"]
+        FMT --> VET["go vet ./..."]
+        VET --> LINT["golangci-lint run (govet, errcheck, staticcheck, unused, gosec)"]
+    end
+
+    subgraph COVERAGE["3. Statement Coverage Gate"]
+        LINT --> TEST["go test -covermode=atomic -coverprofile=coverage.out ./..."]
+        TEST --> COV_EVAL["go tool cover -func=coverage.out"]
+        COV_EVAL --> COV_GATE{"Coverage == 100.0% Across All Packages?"}
+        COV_GATE -->|No| COV_FAIL["REJECT: Coverage Under 100.0%"]
+    end
+
+    subgraph FUZZ["4. Differential & Property Fuzzing"]
+        COV_GATE -->|Yes| SMOKE["Fuzz Smoke Run (10s per target)"]
+        SMOKE --> F_AST["pkg/ast (FuzzInspect, FuzzCheckTypeCompatibility, FuzzParseModernHCLBlocks)"]
+        SMOKE --> F_REG["pkg/registry (FuzzIsRegistrySource, FuzzParseRegistrySource)"]
+        SMOKE --> F_LSP["pkg/lsp (FuzzLSPServe)"]
+        SMOKE --> F_BLAST["pkg/blastradius (FuzzDiscoverCallSites, FuzzTerragruntInputKey)"]
+        SMOKE --> F_CODE["pkg/codemod (FuzzFormatMovedBlocks, FuzzUnifiedReplacement)"]
+        SMOKE --> F_SEM["pkg/semverutil (FuzzDetermineBumpType, FuzzSort)"]
+        SMOKE --> F_REC["pkg/recreation (FuzzParseProviderSchema)"]
+        SMOKE --> F_EVAL["pkg/eval (FuzzEvaluateExpression)"]
+    end
+
+    subgraph MERGE["5. Gate Verdict & CI Release"]
+        F_AST --> PASS_ALL["All 19 Fuzz Targets Clean"]
+        F_REG --> PASS_ALL
+        F_LSP --> PASS_ALL
+        F_BLAST --> PASS_ALL
+        F_CODE --> PASS_ALL
+        F_SEM --> PASS_ALL
+        F_REC --> PASS_ALL
+        F_EVAL --> PASS_ALL
+        PASS_ALL --> GREEN["PASSED: Safe to Merge / Release"]
+    end
+```
+
+### Quality Gate Stages
+
+1. **Source Formatting (`gofmt`)**: Rejects any commit with unformatted Go files.
+2. **Static Analysis (`go vet`)**: Validates Go idioms, type alignments, and struct tags.
+3. **Multi-Linter Security Gate (`golangci-lint`)**:
+   - `govet`: Compiler correctness and shadow variable detection.
+   - `errcheck`: Ensures zero unhandled error returns.
+   - `staticcheck`: Static code analysis and deprecation warnings.
+   - `unused`: Rejects dead code and unreferenced package symbols.
+   - `gosec`: AST-level security vulnerability scanning (CWE-compliant).
+4. **100.0% Statement Coverage Gate**:
+   - Evaluated atomically via `go test -covermode=atomic -coverprofile=... ./...`.
+   - Rejects the build if a single statement across all packages remains uncovered.
+5. **Differential & Property Fuzzing**:
+   - Executes smoke fuzzing across all 19 native Go fuzz targets across AST parsing, semver calculation, Terragrunt evaluation, LSP message framing, and codemod replacements.
+6. **Pre-Commit Hook (`.pre-commit-hooks.yaml`)**:
+   - Executes `tfastdiff --wrapper . --exit-code` on wrapper directories to catch backward-incompatible changes before code is staged or pushed.

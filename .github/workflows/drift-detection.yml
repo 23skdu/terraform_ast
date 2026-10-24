@@ -14,25 +14,26 @@ jobs:
   drift-detection:
     name: Check Multi-Cloud Upstream Module Drift
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.27.x'
-          cache: true
+          go-version-file: 'go.mod'
+          check-latest: true
 
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: '1.9.0'
+          terraform_version: '1.16.5'
 
       - name: Run Multi-Cloud Golden Matrix Verification
         run: |
           go test -v ./internal/goldentest/...
-          go test -v -run "TestAKS_|TestGKE_|TestEKS_" ./test/terratest/...
+          go test -v ./test/terratest/...
 
       - name: Verify Drift Baselines
         id: drift_check

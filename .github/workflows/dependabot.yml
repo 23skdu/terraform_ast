@@ -26,7 +26,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: '1.27.2'
+          go-version-file: 'go.mod'
           check-latest: true
 
       - name: Set up Terraform
@@ -39,9 +39,9 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum
 
-      - name: Run Unit & Coverage Tests
+      - name: Run Full Verification Suite & 100% Coverage Gate
         run: |
-          go test -v -cover ./...
+          bash scripts/verify.sh 10
 
       - name: Run Terratest & Golden Image Suite
         run: |

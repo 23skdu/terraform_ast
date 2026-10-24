@@ -1,6 +1,8 @@
 package registry
 
 import (
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -16,6 +18,10 @@ func FuzzIsRegistrySource(f *testing.F) {
 		"git::https://github.com/org/repo.git",
 		"git@github.com:org/repo.git",
 		"https://github.com/org/repo.git",
+		"git://github.com/org/repo.git",
+		"ssh://git@github.com/org/repo",
+		"github.com/org/repo",
+		"bitbucket.org/org/repo",
 		"~/modules/gke/v30",
 		"a//b",
 		"a/b/",
@@ -27,29 +33,33 @@ func FuzzIsRegistrySource(f *testing.F) {
 		f.Add(seed)
 	}
 
-	localPrefixes := []string{".", "/", "~", "git::", "git@", "http://", "https://"}
+	nonRegistryPrefixes := []string{".", "/", "~", "git@", "github.com/", "bitbucket.org/"}
 	f.Fuzz(func(t *testing.T, source string) {
 		got := IsRegistrySource(source)
 
-		for _, prefix := range localPrefixes {
-			if len(source) >= len(prefix) && source[:len(prefix)] == prefix {
-				if got {
-					t.Fatalf("%q must never be treated as a registry source", source)
-				}
-				return
-			}
-		}
-		if len(source) >= 4 && source[len(source)-4:] == ".git" && got {
+		// Any URL scheme -- http, https, git, ssh, file, or a "git::"-prefixed one -- is a VCS or
+		// generic remote source, never a registry address.
+		if got && strings.Contains(source, "://") {
 			t.Fatalf("%q must never be treated as a registry source", source)
 		}
-		if source == "" && got {
+		for _, prefix := range nonRegistryPrefixes {
+			if strings.HasPrefix(source, prefix) && got {
+				t.Fatalf("%q must never be treated as a registry source", source)
+			}
+		}
+		if strings.HasSuffix(source, ".git") && got {
+			t.Fatalf("%q must never be treated as a registry source", source)
+		}
+		if strings.TrimSpace(source) == "" && got {
 			t.Fatal("an empty source is never a registry source")
 		}
 	})
 }
 
 // FuzzParseRegistrySource ensures the registry address parser only accepts well formed sources and
-// never panics on arbitrary input.
+// never panics on arbitrary input, and that it stays in agreement with the classifier: a source the
+// parser accepts must be classified as a registry source unless it names an existing directory,
+// the one probe the pure parser does not perform.
 func FuzzParseRegistrySource(f *testing.F) {
 	for _, seed := range []string{
 		"terraform-google-modules/kubernetes-engine/google",
@@ -59,6 +69,14 @@ func FuzzParseRegistrySource(f *testing.F) {
 		"a/b/c/d/e",
 		"",
 		"/////",
+		"git::a/b/c",
+		"git@github.com/org/repo",
+		"github.com/org/repo",
+		"bitbucket.org/org/repo",
+		"a/b/c.git",
+		"./modules/eks",
+		"hashicorp/consul/aws?ref=1.0.0",
+		"a/../b",
 	} {
 		f.Add(seed)
 	}
@@ -73,6 +91,15 @@ func FuzzParseRegistrySource(f *testing.F) {
 		}
 		if host == "" || namespace == "" || name == "" || provider == "" {
 			t.Fatalf("a successful parse of %q returned an empty component", source)
+		}
+		if IsRegistrySource(source) {
+			return
+		}
+		// The classifier may only be stricter than the parser for sources that resolve to an
+		// existing directory, the filesystem probe ParseRegistrySource deliberately skips.
+		trimmed := strings.TrimSpace(source)
+		if fi, statErr := os.Stat(trimmed); statErr != nil || !fi.IsDir() {
+			t.Fatalf("ParseRegistrySource accepted %q but IsRegistrySource rejected it", source)
 		}
 	})
 }

@@ -1,4 +1,4 @@
-.PHONY: all build test verify fuzz lint clean docker help
+.PHONY: all build test verify fuzz lint clean docker secure accuracy-gate help
 
 BIN := bin/tfastdiff
 FUZZ_TIME ?= 10
@@ -31,12 +31,21 @@ clean:
 docker:
 	docker build -t tfastdiff:latest .
 
+secure:
+	gosec -fmt=sarif ./...
+	govulncheck ./...
+
+accuracy-gate: build
+	bash scripts/validate_upgrade_accuracy.sh
+
 help:
 	@echo "terraform_ast build targets:"
-	@echo "  build   - Compile bin/tfastdiff"
-	@echo "  test    - Run unit tests with coverage"
-	@echo "  verify  - Run full verification suite (fmt, vet, lint, 100% coverage, fuzz)"
-	@echo "  fuzz    - Run extended fuzz smoke suite"
-	@echo "  lint    - Run gofmt, go vet, and golangci-lint"
-	@echo "  clean   - Remove build artifacts and coverage files"
-	@echo "  docker  - Build hardened distroless container"
+	@echo "  build         - Compile bin/tfastdiff"
+	@echo "  test          - Run unit tests with coverage"
+	@echo "  verify        - Run full verification suite (fmt, vet, lint, 100% coverage, fuzz)"
+	@echo "  accuracy-gate - Run upstream EKS/GKE upgrade path accuracy validation & confidence scoring"
+	@echo "  fuzz          - Run extended fuzz smoke suite"
+	@echo "  lint          - Run gofmt, go vet, and golangci-lint"
+	@echo "  secure        - Run gosec and govulncheck security audits"
+	@echo "  clean         - Remove build artifacts and coverage files"
+	@echo "  docker        - Build hardened distroless container"

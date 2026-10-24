@@ -58,6 +58,9 @@ flowchart TD
 - **Engine**: Powered by `github.com/go-git/go-git/v5`.
 - **Capabilities**:
   - Clones remote repositories with shallow clone optimization (`--depth 1`) or inspects local Git checkouts in-place.
+  - Normalises Terraform VCS module sources before cloning: strips the `git::` prefix and expands the `github.com/` and `bitbucket.org/` shorthands into `https://<host>/<path>.git`, so every source the classifier routes here reaches go-git as a cloneable URL.
+  - Parses the module's position inside a repository: `//subdir` selects the directory handed back for inspection and `?ref=` pins the revision when the CLI's version flags are absent (an explicit flag wins), so a module inside a repository is analysed at the revision and location its source names. A missing or escaping subdirectory is an error, never a silent inspection of the repository root.
+  - `IsGitURL` is the single predicate for "this source must be cloned", shared by the CLI and the upgrade planner.
   - A thread-safe in-memory `RepositoryCache` (`gitops.GlobalCache`) keeps one shared clone per repository, so repeated tag evaluations and multi-version upgrade paths re-clone from the local copy instead of re-downloading. Extracted versions are memoised per source and ref, and everything is released by `Clear()` when the run ends.
   - Extracts all semantic version tags from Git references.
   - Checks out specific tags, branches, or commits into isolated staging directories for AST comparison.
@@ -65,8 +68,20 @@ flowchart TD
 ### 4. `pkg/registry` (Terraform Registry Protocol Client)
 - **Capabilities**:
   - `IsRegistrySource` and `ParseRegistrySource` agree on exactly one grammar (`namespace/name/provider`,
-    optionally hostname-prefixed) and reject empty components, so a malformed address can never
-    become a request against a partially empty registry path.
+    optionally hostname-prefixed) and reject empty or URL-metacharacter components, so a malformed address can never
+    become a request against a partially empty, query-extended or path-redirected registry path.
+  - VCS and local sources are never registry addresses: `git::`, `git@`, any URL scheme (`git://`,
+    `ssh://`, `file://`, `http(s)://`), the `github.com/` and `bitbucket.org/` shorthands Terraform
+    expands into git URLs, and the `.git` repository suffix are all rejected by both functions.
+  - A module source can name the host every request goes to, so the client refuses link-local and
+    unspecified addresses (`169.254.0.0/16`, which contains the `169.254.169.254` cloud metadata
+    endpoint, `fe80::/10`, and `0.0.0.0/8`) on every connection, redirect and `X-Terraform-Get`
+    follow-up. The check runs after name resolution as well as on literal addresses, and a refusal
+    is reported immediately instead of being retried as a transient failure; public, RFC1918 and
+    loopback registry hosts stay reachable so private and development registries keep working.
+  - `X-Terraform-Get` may name any module source Terraform understands, but only `http(s)` archive
+    URLs can be downloaded here; a VCS source in the header is rejected with an error naming the
+    value rather than surfacing as an opaque URL parse failure.
   - Native client implementing the official Terraform Registry Service Discovery protocol (`https://registry.terraform.io/v1/modules/...`).
   - Resolves available module versions and downloads release tarballs, retrying transient failures with exponential backoff.
   - Extracts target modules and submodules into sandboxed directories for AST inspection, rejecting archive entries that escape the destination directory.

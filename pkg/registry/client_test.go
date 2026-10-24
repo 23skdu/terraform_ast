@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,11 +58,34 @@ func TestIsRegistrySource(t *testing.T) {
 	assert.False(t, IsRegistrySource("git::https://github.com/org/repo.git"))
 	assert.False(t, IsRegistrySource("git@github.com:org/repo.git"))
 	assert.False(t, IsRegistrySource("https://github.com/org/repo.git"))
+	assert.False(t, IsRegistrySource("git://github.com/org/repo.git"))
+	assert.False(t, IsRegistrySource("ssh://git@github.com/org/repo"))
 	assert.False(t, IsRegistrySource("invalid-source"))
 	assert.False(t, IsRegistrySource(""))
 	assert.False(t, IsRegistrySource("   "))
 	assert.False(t, IsRegistrySource("a//c"))
 	assert.False(t, IsRegistrySource("~/modules/gke/v30"))
+}
+
+// TestIsRegistrySource_GitShorthand pins the Terraform rule that github.com/ and bitbucket.org/
+// sources are git sources, not registry addresses: classifying them as registry sends the CLI to
+// registry.terraform.io for a module that only exists in git.
+func TestIsRegistrySource_GitShorthand(t *testing.T) {
+	for _, source := range []string{
+		"github.com/org/repo",
+		"github.com/org/repo.git",
+		"github.com/org/repo?ref=v1.2.3",
+		"bitbucket.org/org/repo",
+		"bitbucket.org/org/repo//modules/vpc",
+	} {
+		assert.False(t, IsRegistrySource(source), "%q must not be a registry source", source)
+		host, ns, name, prov, err := ParseRegistrySource(source)
+		require.Error(t, err, "%q must not parse as a registry address", source)
+		assert.Empty(t, host)
+		assert.Empty(t, ns)
+		assert.Empty(t, name)
+		assert.Empty(t, prov)
+	}
 }
 
 // TestIsRegistrySource_LocalPathsWithRegistryShape guards against a bare relative path that happens
@@ -81,8 +106,16 @@ func TestIsRegistrySource_LocalPathsWithRegistryShape(t *testing.T) {
 }
 
 func TestParseRegistrySourceRejectsEmptyComponents(t *testing.T) {
-	// ParseRegistrySource must accept exactly the shapes IsRegistrySource recognises.
-	for _, source := range []string{"//", "/a/b", "a//b", "a/b/", "a/", "a/b/c/d/e", ""} {
+	// ParseRegistrySource must accept exactly the shapes IsRegistrySource accepts (modulo the
+	// local-directory probe it deliberately does not perform): malformed addresses, VCS URLs and
+	// sources whose components would smuggle a query string or path segment into the request path.
+	for _, source := range []string{
+		"//", "/a/b", "a//b", "a/b/", "a/", "a/b/c/d/e", "",
+		"git::a/b/c", "git@github.com/org/repo", "./modules/eks", "a/b/c.git",
+		"github.com/org/repo", "bitbucket.org/org/repo", "https://github.com/org/repo.git",
+		"hashicorp/consul/aws?ref=1.0.0", "hashicorp/consul/aws#frag", "hashicorp/consul/a%2Fb",
+		"a/../b", "a/./b", "a/b/c with space",
+	} {
 		host, namespace, name, provider, err := ParseRegistrySource(source)
 		require.Error(t, err, "expected %q to be rejected", source)
 		assert.Empty(t, host)
@@ -100,7 +133,13 @@ func TestParseRegistrySourceRejectsEmptyComponents(t *testing.T) {
 	assert.Equal(t, "aws", provider)
 
 	// Whatever IsRegistrySource accepts, ParseRegistrySource must also accept, and vice versa.
-	for _, source := range []string{"a/b/c", "a/b/c/d", "//", "a//b", "a/b/c/d/e", "", "  a/b/c  "} {
+	// None of these names an existing directory, the single case where IsRegistrySource is
+	// stricter than the pure parser.
+	for _, source := range []string{
+		"a/b/c", "a/b/c/d", "//", "a//b", "a/b/c/d/e", "", "  a/b/c  ",
+		"git::a/b/c", "git@github.com/org/repo", "github.com/org/repo", "bitbucket.org/org/repo",
+		"a/b/c.git", "./modules/eks", "hashicorp/consul/aws?ref=1.0.0", "custom.reg.io/my-org/gke/google",
+	} {
 		_, _, _, _, parseErr := ParseRegistrySource(source)
 		assert.Equal(t, IsRegistrySource(source), parseErr == nil,
 			"classifier and parser disagree for %q", source)
@@ -492,4 +531,132 @@ func TestExtractTarGz_ExactLimitIsAccepted(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(dest, "main.tf"))
 	require.NoError(t, err)
 	assert.Equal(t, payload, data, "an entry well within the limit must be extracted byte for byte")
+}
+
+// TestBlockedAddr pins the address policy of the registry client's guard: cloud metadata
+// (169.254.169.254 lives in 169.254.0.0/16), link-local and unspecified addresses are refused,
+// while loopback, RFC1918 and public addresses stay reachable so private and development
+// registries keep working.
+func TestBlockedAddr(t *testing.T) {
+	for _, addr := range []string{
+		"169.254.169.254", // cloud instance metadata
+		"169.254.0.1",
+		"0.0.0.0", // dialing unspecified resolves to the local host
+		"0.1.2.3", // the rest of 0.0.0.0/8
+		"::",
+		"fe80::1",
+	} {
+		assert.True(t, blockedAddr(net.ParseIP(addr)), "%s must be blocked", addr)
+	}
+	for _, addr := range []string{
+		"127.0.0.1", // loopback: local development registries and the test servers
+		"::1",
+		"10.0.0.1",
+		"172.16.0.1",
+		"192.168.1.1",
+		"8.8.8.8",
+		"2001:db8::1",
+	} {
+		assert.False(t, blockedAddr(net.ParseIP(addr)), "%s must stay reachable", addr)
+	}
+	assert.False(t, blockedAddr(nil), "an unparseable address is not a blocked literal")
+}
+
+// TestRegistryClient_BlockedAddresses verifies the guard end to end: a module source naming a
+// metadata or unspecified address is refused before any connection is made, the refusal surfaces
+// immediately (not retried like a transient registry failure), and it does not consume the
+// retry budget.
+func TestRegistryClient_BlockedAddresses(t *testing.T) {
+	var dials atomic.Int64
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	baseDial := transport.DialContext
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dials.Add(1)
+		return baseDial(ctx, network, addr)
+	}
+
+	client := NewClient(&http.Client{Transport: transport})
+	// Deliberately left at the default two-minute budget: the assertion on elapsed time only
+	// discriminates if a refused connection would otherwise be retried.
+	start := time.Now()
+
+	_, err := client.ListVersions(context.Background(), "169.254.169.254/latest/meta-data/creds")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to connect")
+
+	err = client.DownloadModule(context.Background(), "0.0.0.0/ns/name/prov", "1.0.0", t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to connect")
+
+	assert.Less(t, time.Since(start), time.Second,
+		"a refused connection is a policy error and must not consume the retry budget")
+	assert.Zero(t, dials.Load(), "blocked sources must never reach the transport")
+}
+
+// TestRegistryClient_VCSDownloadURLRejected covers the registry protocol's X-Terraform-Get: the
+// header may name any module source Terraform understands, including VCS sources. This client
+// only downloads archives, so those must be rejected with an error naming the value instead of
+// surfacing as an opaque URL parse failure.
+func TestRegistryClient_VCSDownloadURLRejected(t *testing.T) {
+	for _, header := range []string{
+		"git::https://github.com/org/repo.git",
+		"github.com/org/repo",         // shorthand registry-inaccessible VCS source
+		"git@github.com:org/repo.git", // does not even parse as a URL
+	} {
+		header := header
+		t.Run(header, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Terraform-Get", header)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+
+			client := NewClient(server.Client())
+			client.BaseURL = server.URL
+
+			err := client.DownloadModule(context.Background(), "hashicorp/vcs/aws", "1.0.0", t.TempDir())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "download URL")
+			assert.Contains(t, err.Error(), header)
+			assert.Contains(t, err.Error(), "VCS sources in X-Terraform-Get are not supported")
+		})
+	}
+}
+
+type dummyRoundTripper struct{}
+
+func (d dummyRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestGuardedRegistryTransport_Branches(t *testing.T) {
+	// Custom RoundTripper hits default branch
+	gt := guardedRegistryTransport(dummyRoundTripper{})
+	require.NotNil(t, gt)
+
+	// nil base with non-*http.Transport DefaultTransport
+	origDefault := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = origDefault })
+	http.DefaultTransport = dummyRoundTripper{}
+	gt2 := guardedRegistryTransport(nil)
+	require.NotNil(t, gt2)
+
+	// transport with nil DialContext
+	http.DefaultTransport = origDefault
+	tr := &http.Transport{DialContext: nil}
+	gt3 := guardedRegistryTransport(tr)
+	require.NotNil(t, gt3)
+
+	// Dial time blocked address
+	guard := gt3.(*guardedTransport)
+	wrappedTr := guard.base.(*http.Transport)
+	_, err := wrappedTr.DialContext(context.Background(), "tcp", "169.254.169.254:80")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to connect")
+}
+
+func TestParseRegistrySource_InvalidHostInFourPart(t *testing.T) {
+	_, _, _, _, err := ParseRegistrySource("invalid!host/ns/name/prov")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid registry module source format")
 }

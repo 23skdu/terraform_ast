@@ -180,6 +180,7 @@ Full architectural and technical specifications are available under [`docs/`](do
 - [CLI Reference & CI/CD Guide](docs/CLI_USAGE.md): Complete flag reference, exit codes, and GitHub Actions integration.
 - [Compatibility Rules](docs/COMPATIBILITY_RULES.md): Detailed classification taxonomy for breaking changes, downgrades, and new features.
 - [Testing Methodology](docs/TESTING_METHODOLOGY.md): Unit, fuzz and Terratest validation, golden file verification, and the 100% coverage gate.
+- [Quality & Accuracy Gates](docs/gates.md): Upgrade path accuracy validation, invariant assertions, and the pre-commit quality gate.
 - [Strategic Roadmap](docs/ROADMAP.md): Evolution plan covering pre-commit hooks, codemods, and multi-version planning.
 
 ---

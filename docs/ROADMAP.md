@@ -310,6 +310,8 @@ Three limits are deliberate and documented rather than papered over:
 | #59, #60 | **Fixed** | Added `FilterPrereleases` to filter prereleases in `GetLatestVersion`, and implemented strict weak ordering partitioned sort in `semverutil.Sort`. |
 | #61 | **Fixed** | Persistent L2 cache writes `<sha256>.json` atomically using temporary file rename. |
 | #70 | **Fixed** | Provided working default args `["--wrapper", ".", "--exit-code"]` in `.pre-commit-hooks.yaml`, and set output report file write permissions to `0644`. |
+| #28, #64, #66 | **Fixed** | Aligned workflow action pins and Go/Terraform tooling across `drift-detection.yml`, `dependabot.yml`, `slsa-release.yml` with `ci.yml` (`checkout@v7`, `setup-go@v7`, `setup-terraform@v4`, Terraform `1.16.5`). Bound CI jobs with `timeout-minutes: 30` and explicit package test timeouts. Enforced `scripts/verify.sh` 100% coverage gate in `dependabot.yml` before auto-merging. |
+| #48 | **Fixed** | Reused shared cached clone (`SharedClone`) for `--upgrade-path` planning and tag extraction, eliminating duplicate network downloads and intermediate version drops. |
 
 One defect surfaced while landing this, unrelated to the roadmap items and present since the
 original LSP implementation:

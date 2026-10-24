@@ -2,6 +2,7 @@ package gitops
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -27,6 +28,116 @@ func CloneOrOpen(repoURLOrPath, targetDir string) (*git.Repository, error) {
 	return CloneOrOpenWithOptions(repoURLOrPath, targetDir, CloneConfig{})
 }
 
+// IsGitURL reports whether source must be resolved through git instead of being read from disk or
+// fetched from the registry: the URL schemes go-git can clone (http, https, file, git, ssh), the
+// SSH scp-like form Terraform accepts, and the github.com/ and bitbucket.org/ shorthands that
+// normalizeCloneURL expands into clone URLs.
+func IsGitURL(source string) bool {
+	return strings.HasPrefix(source, "http://") ||
+		strings.HasPrefix(source, "https://") ||
+		strings.HasPrefix(source, "file://") ||
+		strings.HasPrefix(source, "git://") ||
+		strings.HasPrefix(source, "ssh://") ||
+		strings.HasPrefix(source, "git@") ||
+		strings.HasPrefix(source, "git::") ||
+		strings.HasPrefix(source, "github.com/") ||
+		strings.HasPrefix(source, "bitbucket.org/")
+}
+
+// GitSource is a parsed Terraform VCS module source.
+type GitSource struct {
+	// URL is a cloneable URL: the "git::" prefix stripped and the github.com/bitbucket.org
+	// shorthands expanded. Subdirectory and reference syntax is not part of it.
+	URL string
+	// SubDir is the repository subdirectory holding the module, empty when the module sits at
+	// the repository root.
+	SubDir string
+	// Ref is the reference the source pins with "?ref=", empty when the source pins none.
+	Ref string
+}
+
+// ParseGitSource splits a Terraform VCS module source into the URL to clone, the repository
+// subdirectory and the pinned reference, and makes the URL cloneable: the "git::" prefix is
+// stripped and the github.com/ and bitbucket.org/ shorthands Terraform treats as
+// "git::https://<host>/<path>.git" are expanded.
+//
+// Both separator orders Terraform accepts are handled ("repo.git//sub?ref=v1" and
+// "repo.git?ref=v1//sub"), and the syntax is separated before the shorthand is expanded, so a
+// pinned reference is never mistaken for part of the path. Only URL-shaped sources are split: in a
+// local path "//" is an ordinary path character and must never be read as subdirectory syntax.
+func ParseGitSource(source string) GitSource {
+	normalized := strings.TrimPrefix(source, "git::")
+
+	isURLShaped := strings.HasPrefix(normalized, "git@") ||
+		strings.HasPrefix(normalized, "github.com/") ||
+		strings.HasPrefix(normalized, "bitbucket.org/") ||
+		strings.Contains(normalized, "://")
+	if !isURLShaped {
+		return GitSource{URL: normalized}
+	}
+
+	searchFrom := 0
+	if i := strings.Index(normalized, "://"); i >= 0 {
+		searchFrom = i + 3 // skip the scheme's own "//"
+	}
+	head, tail := normalized[:searchFrom], normalized[searchFrom:]
+
+	subDirAt, queryAt := strings.Index(tail, "//"), strings.Index(tail, "?")
+	var urlPart, subDir, query string
+	switch {
+	case subDirAt >= 0 && (queryAt < 0 || subDirAt < queryAt):
+		urlPart = tail[:subDirAt]
+		after := tail[subDirAt+2:]
+		subDir = after
+		if i := strings.Index(after, "?"); i >= 0 {
+			subDir, query = after[:i], after[i+1:]
+		}
+	case queryAt >= 0:
+		urlPart = tail[:queryAt]
+		after := tail[queryAt+1:]
+		query = after
+		if i := strings.Index(after, "//"); i >= 0 {
+			query, subDir = after[:i], after[i+2:]
+		}
+	default:
+		urlPart = tail
+	}
+	return GitSource{
+		URL:    expandGitShorthand(head + urlPart),
+		SubDir: subDir,
+		Ref:    refFromQuery(query),
+	}
+}
+
+// expandGitShorthand rewrites the github.com/ and bitbucket.org/ source shorthands into the
+// "https://<host>/<path>.git" URLs Terraform derives from them. It is only ever handed the URL
+// portion of a source, with subdirectory and reference syntax already separated.
+func expandGitShorthand(urlPart string) string {
+	if !strings.HasPrefix(urlPart, "github.com/") && !strings.HasPrefix(urlPart, "bitbucket.org/") {
+		return urlPart
+	}
+	if !strings.HasSuffix(urlPart, ".git") {
+		urlPart += ".git"
+	}
+	return "https://" + urlPart
+}
+
+// refFromQuery extracts the "ref" parameter from a source's query string, decoding percent
+// escapes so a branch name containing "/" round-trips.
+func refFromQuery(query string) string {
+	for _, param := range strings.Split(query, "&") {
+		key, value, ok := strings.Cut(param, "=")
+		if !ok || key != "ref" {
+			continue
+		}
+		if decoded, err := url.QueryUnescape(value); err == nil {
+			return decoded
+		}
+		return value
+	}
+	return ""
+}
+
 // CloneOrOpenWithOptions opens or clones a repository with optional shallow cloning.
 func CloneOrOpenWithOptions(repoURLOrPath, targetDir string, cfg CloneConfig) (*git.Repository, error) {
 	if targetDir == "" || targetDir == repoURLOrPath {
@@ -47,7 +158,7 @@ func CloneOrOpenWithOptions(repoURLOrPath, targetDir string, cfg CloneConfig) (*
 	}
 
 	cloneOpts := &git.CloneOptions{
-		URL: repoURLOrPath,
+		URL: ParseGitSource(repoURLOrPath).URL,
 	}
 
 	if cfg.Shallow {
@@ -70,7 +181,7 @@ func CloneOrOpenWithOptions(repoURLOrPath, targetDir string, cfg CloneConfig) (*
 	if err != nil && cfg.Shallow {
 		// Fallback to full clone if shallow clone failed on specific ref
 		repo, err = git.PlainClone(targetDir, false, &git.CloneOptions{
-			URL: repoURLOrPath,
+			URL: ParseGitSource(repoURLOrPath).URL,
 		})
 	}
 	if err != nil {
@@ -139,7 +250,10 @@ func CheckoutRef(repo *git.Repository, refName string) error {
 }
 
 // ExtractVersionToDirShallow clones or copies a repository using shallow cloning if possible.
+// Subdirectory and reference syntax is stripped from the source first: the ref is selected by the
+// caller (see GetOrExtract) and the subdirectory belongs to the returned checkout, not the clone.
 func ExtractVersionToDirShallow(repoURLOrPath, refName, destDir string) error {
+	repoURLOrPath = ParseGitSource(repoURLOrPath).URL
 	if fi, err := os.Stat(repoURLOrPath); err == nil && fi.IsDir() && !isGitRepo(repoURLOrPath) {
 		return copyDir(repoURLOrPath, destDir)
 	}
@@ -231,7 +345,9 @@ var GlobalCache = NewRepositoryCache()
 
 // SharedClone returns a local Git working tree for repoURLOrPath that can be reused to extract
 // many refs without re-downloading the repository. Local repositories are returned unchanged
-// because there is nothing to download; remote repositories are cloned once and cached.
+// because there is nothing to download; remote repositories are cloned once and cached. The cache
+// is keyed on the repository alone: subdirectory and reference syntax belongs to a module source,
+// not to the repository behind it, so every source addressing the same repository shares one clone.
 func (c *RepositoryCache) SharedClone(repoURLOrPath string) (string, error) {
 	if fi, err := os.Stat(repoURLOrPath); err == nil && fi.IsDir() {
 		if !isGitRepo(repoURLOrPath) {
@@ -239,12 +355,13 @@ func (c *RepositoryCache) SharedClone(repoURLOrPath string) (string, error) {
 		}
 		return repoURLOrPath, nil
 	}
-	return c.resolve("repo\x00"+repoURLOrPath, func() (string, error) {
+	cloneURL := ParseGitSource(repoURLOrPath).URL
+	return c.resolve("repo\x00"+cloneURL, func() (string, error) {
 		dir, err := mkdirTemp("", "tf_git_repo_*")
 		if err != nil {
 			return "", err
 		}
-		if _, err := CloneOrOpenWithOptions(repoURLOrPath, dir, CloneConfig{
+		if _, err := CloneOrOpenWithOptions(cloneURL, dir, CloneConfig{
 			Shallow: true,
 			Depth:   1,
 		}); err != nil {
@@ -256,20 +373,63 @@ func (c *RepositoryCache) SharedClone(repoURLOrPath string) (string, error) {
 }
 
 // GetOrExtract returns a directory holding repoURLOrPath checked out at refName, creating it with
-// newDir on a cache miss. The returned directory is owned by the cache and stays valid until Clear
-// is called; callers must not delete it themselves.
+// newDir on a cache miss. A reference the source pins itself ("?ref=") is used when refName is
+// empty, and a source naming a repository subdirectory ("//subdir") yields that subdirectory, so
+// a module inside a repository is inspected at the revision and location its source names. An
+// explicit refName wins over the source's pin. The returned directory is owned by the cache and
+// stays valid until Clear is called; callers must not delete it themselves.
 func (c *RepositoryCache) GetOrExtract(repoURLOrPath, refName string, newDir DirFactory) (string, error) {
-	return c.resolve(fmt.Sprintf("ref\x00%s\x00%s", repoURLOrPath, refName), func() (string, error) {
+	parts := ParseGitSource(repoURLOrPath)
+	effectiveRef := refName
+	if effectiveRef == "" {
+		effectiveRef = parts.Ref
+	}
+	root, err := c.resolve(fmt.Sprintf("ref\x00%s\x00%s", repoURLOrPath, effectiveRef), func() (string, error) {
 		dir, err := newDir()
 		if err != nil {
 			return "", err
 		}
-		if err := c.extractCached(repoURLOrPath, refName, dir); err != nil {
+		if err := c.extractCached(parts.URL, effectiveRef, dir); err != nil {
 			_ = os.RemoveAll(dir)
 			return "", err
 		}
 		return dir, nil
 	})
+	if err != nil {
+		return "", err
+	}
+	if parts.SubDir == "" {
+		return root, nil
+	}
+	// The checkout stays cached as a whole; only the module's directory inside it is handed out.
+	sub, err := resolveSubDir(root, parts.SubDir)
+	if err != nil {
+		return "", fmt.Errorf("module source %s: %w", repoURLOrPath, err)
+	}
+	return sub, nil
+}
+
+// resolveSubDir returns the directory of subDir inside the checkout rooted at dir, rejecting a
+// subdirectory that escapes the checkout or does not exist: the module must be read from where
+// the source says it is, or not at all.
+func resolveSubDir(dir, subDir string) (string, error) {
+	cleanRoot := filepath.Clean(dir)
+	cleanSub := filepath.Clean(subDir)
+	if cleanSub == "." || cleanSub == "" {
+		return cleanRoot, nil
+	}
+	target := filepath.Join(cleanRoot, cleanSub)
+	if !strings.HasPrefix(target, cleanRoot+string(filepath.Separator)) {
+		return "", fmt.Errorf("subdirectory %q escapes the repository checkout", subDir)
+	}
+	fi, err := os.Stat(target)
+	if err != nil {
+		return "", fmt.Errorf("subdirectory %q not found in the repository", subDir)
+	}
+	if !fi.IsDir() {
+		return "", fmt.Errorf("subdirectory %q in the repository is not a directory", subDir)
+	}
+	return target, nil
 }
 
 // extractCached prefers the shared local clone over a fresh remote download. When the shared clone

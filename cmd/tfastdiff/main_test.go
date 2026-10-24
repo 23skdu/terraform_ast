@@ -469,6 +469,10 @@ func TestHelpers(t *testing.T) {
 	assert.True(t, isGitURL("git@github.com:org/repo.git"))
 	assert.True(t, isGitURL("git::https://github.com/org/repo.git"))
 	assert.True(t, isGitURL("file:///srv/modules/repo"))
+	assert.True(t, isGitURL("github.com/org/repo"))
+	assert.True(t, isGitURL("bitbucket.org/org/repo"))
+	assert.True(t, isGitURL("git://github.com/org/repo.git"))
+	assert.True(t, isGitURL("ssh://git@github.com/org/repo"))
 	assert.False(t, isGitURL("/local/path"))
 
 	tmpDir := t.TempDir()
@@ -1110,6 +1114,76 @@ func TestExecute_GitFileURLSources(t *testing.T) {
 	assert.Contains(t, stdout.String(), "SAFE_TO_PIN")
 
 	// The cached clones must not outlive the run.
+	assert.Empty(t, gitops.CachedRepositoryDirs(), "cached repositories must be released when Execute returns")
+}
+
+// TestExecute_GitSubdirAndPinnedRef runs the documented Terraform shape end to end: a module in a
+// repository subdirectory, pinned by the source itself, analysed with no version flags at all.
+// Inspecting the repository root instead of the subdirectory, or the head instead of the pin,
+// would both change the verdict, so both are asserted against.
+func TestExecute_GitSubdirAndPinnedRef(t *testing.T) {
+	repoDir := t.TempDir()
+	repo, err := git.PlainInit(repoDir, false)
+	require.NoError(t, err)
+	w, err := repo.Worktree()
+	require.NoError(t, err)
+	sig := &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()}
+	gkeDir := filepath.Join(repoDir, "modules", "gke")
+	require.NoError(t, os.MkdirAll(gkeDir, 0750))
+
+	commitRelease := func(tag, gkeContent string) {
+		require.NoError(t, os.WriteFile(filepath.Join(repoDir, "main.tf"), []byte(`variable "from_root" {}`), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(gkeDir, "main.tf"), []byte(gkeContent), 0644))
+		_, err := w.Add("main.tf")
+		require.NoError(t, err)
+		_, err = w.Add("modules/gke/main.tf")
+		require.NoError(t, err)
+		commit, err := w.Commit("release "+tag, &git.CommitOptions{Author: sig, Committer: sig})
+		require.NoError(t, err)
+		_, err = repo.CreateTag(tag, commit, nil)
+		require.NoError(t, err)
+	}
+	// The wrapper only passes cluster_name, so the verdict differs between v1.0.0 and v2.0.0.
+	commitRelease("v1.0.0", `variable "cluster_name" { type = string }`)
+	commitRelease("v2.0.0", `variable "other_name" { type = string }`)
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`module "gke" {
+  cluster_name = "test"
+}`), 0600))
+
+	source := "git::file://" + repoDir + "//modules/gke?ref=v1.0.0"
+	var stdout, stderr bytes.Buffer
+
+	// No version flags: the source's ?ref= pin selects v1.0.0 and //modules/gke the module.
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", source}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "SAFE_TO_PIN")
+	assert.Empty(t, gitops.CachedRepositoryDirs(), "cached repositories must be released when Execute returns")
+
+	// Control: pinning the incompatible head explicitly must not yield the same verdict, which is
+	// what makes the assertion above discriminate between the pinned revision and the head.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir, "--upstream", source, "--new-version", "v2.0.0",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.NotContains(t, stdout.String(), "SAFE_TO_PIN")
+
+	// The same source in direct comparison mode, still with the revision pinned by the source.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", source, "--new", source}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "TERRAFORM AST COMPATIBILITY DIFF REPORT")
+
+	// A subdirectory that is not in the repository is an error, never a silent root inspection.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--wrapper", wrapperDir, "--upstream", "git::file://" + repoDir + "//missing"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "subdirectory")
 	assert.Empty(t, gitops.CachedRepositoryDirs(), "cached repositories must be released when Execute returns")
 }
 

@@ -96,9 +96,5 @@ func isGitSource(source string) bool {
 }
 
 func isGitURL(source string) bool {
-	return strings.HasPrefix(source, "https://") ||
-		strings.HasPrefix(source, "http://") ||
-		strings.HasPrefix(source, "file://") ||
-		strings.HasPrefix(source, "git@") ||
-		strings.HasPrefix(source, "git::")
+	return gitops.IsGitURL(source)
 }
