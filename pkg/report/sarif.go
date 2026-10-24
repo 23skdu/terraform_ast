@@ -90,12 +90,13 @@ const (
 	toolVer     = "0.9.0"
 	toolURI     = "https://github.com/23skdu/terraform_ast"
 
-	ruleBreaking         = "TF-DIFF-BREAKING-CHANGE"
-	ruleWarning          = "TF-DIFF-WARNING"
-	ruleNewFeature       = "TF-DIFF-NEW-FEATURE"
-	rulePolicy           = "TF-POLICY-VIOLATION"
-	ruleRecreationHazard = "TF-RECREATION-HAZARD"
-	ruleBlastRadius      = "TF-BLAST-RADIUS-CONSUMER"
+	ruleBreaking             = "TF-DIFF-BREAKING-CHANGE"
+	ruleWarning              = "TF-DIFF-WARNING"
+	ruleNewFeature           = "TF-DIFF-NEW-FEATURE"
+	rulePolicy               = "TF-POLICY-VIOLATION"
+	ruleRecreationHazard     = "TF-RECREATION-HAZARD"
+	ruleBlastRadius          = "TF-BLAST-RADIUS-CONSUMER"
+	rulePlanRecreationHazard = "TF-GOLDEN-PLAN-RECREATION-HAZARD"
 )
 
 // defaultRules is the SARIF rule catalogue. Each document only advertises the subset of rules for
@@ -135,6 +136,12 @@ var defaultRules = []SARIFRule{
 		ID:               ruleBlastRadius,
 		ShortDescription: SARIFMessageText{Text: "Downstream consumer module cannot be safely updated"},
 		FullDescription:  SARIFMessageText{Text: "A root module calling the audited wrapper passes removed inputs, misses newly required inputs, or consumes removed outputs."},
+		DefaultConfig:    SARIFRuleConfig{Level: "error"},
+	},
+	{
+		ID:               rulePlanRecreationHazard,
+		ShortDescription: SARIFMessageText{Text: "Terraform plan recreation hazard detected"},
+		FullDescription:  SARIFMessageText{Text: "The execution plan contains resources subject to ForceNew destruction/recreation or unmigrated address shifts upon version upgrade."},
 		DefaultConfig:    SARIFRuleConfig{Level: "error"},
 	},
 }
@@ -228,6 +235,7 @@ func RenderSARIF(r *diff.DiffReport, findings Findings) []byte {
 	results = appendHazardResults(results, artifact, findings.RecreationHazards)
 	results = appendBlastResults(results, findings.BlastRadius)
 	results = appendPolicyResults(results, r.PolicyViolations, artifact)
+	results = appendGoldenPlanResults(results, findings.GoldenPlan)
 
 	return renderSARIF(results)
 }
@@ -254,6 +262,7 @@ func RenderWrapperSARIF(res *wrapper.WrapperCompatibilityReport, findings Findin
 	results = appendHazardResults(results, artifact, findings.RecreationHazards)
 	results = appendBlastResults(results, findings.BlastRadius)
 	results = appendPolicyResults(results, res.PolicyViolations, artifact)
+	results = appendGoldenPlanResults(results, findings.GoldenPlan)
 
 	return renderSARIF(results)
 }
@@ -310,6 +319,18 @@ func appendPolicyResults(results []SARIFResult, violations []policy.Violation, a
 	for _, violation := range violations {
 		results = append(results, sarifResult(rulePolicy, "error", artifact,
 			fmt.Sprintf("[%s] %s", violation.Rule, violation.Message)))
+	}
+	return results
+}
+
+func appendGoldenPlanResults(results []SARIFResult, v *recreation.GoldenPlanVerification) []SARIFResult {
+	if v == nil {
+		return results
+	}
+	artifact := artifactOrDefault(v.PlanPath)
+	for _, h := range v.ConfirmedHazards {
+		results = append(results, sarifResult(rulePlanRecreationHazard, "error", artifact,
+			fmt.Sprintf("[%s] %s (%s): %s", h.Severity, h.ResourceAddress, h.HazardType, h.Detail)))
 	}
 	return results
 }

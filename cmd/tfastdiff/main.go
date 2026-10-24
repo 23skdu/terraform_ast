@@ -80,6 +80,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		format             string
 		outputFile         string
 		blastRadiusDir     string
+		goldenPlanPath     string
 		checkRecreation    bool
 		enforceExit1       bool
 		policyPath         string
@@ -106,6 +107,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&newVersion, "new-version", "", "Version or Git ref for the new upstream module")
 	fs.StringVar(&format, "format", "text", "Output format: text, markdown, json, sarif")
 	fs.StringVar(&outputFile, "output", "", "Optional file path to write the output report")
+	fs.StringVar(&goldenPlanPath, "golden-plan", "", "Optional path to Terraform golden plan JSON to verify for recreation hazards upon version upgrade (autodiscovered if omitted in wrapper mode)")
 	// --blast-radius is optional and is frequently passed by wrapper manifests (including
 	// action.yml) with an unset value. An empty value means "not requested", and a value that
 	// looks like another flag is rejected with an actionable message instead of being treated as
@@ -171,6 +173,10 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		// them would be dropped without a trace. Refuse rather than imply it was honoured.
 		if blastRadiusDir != "" {
 			_, _ = fmt.Fprintln(stderr, "Error: --blast-radius is not supported with --fix or --fix-preview; run the audit separately")
+			return 2
+		}
+		if goldenPlanPath != "" {
+			_, _ = fmt.Fprintln(stderr, "Error: --golden-plan is not supported with --fix or --fix-preview; run the audit separately")
 			return 2
 		}
 		if providerSchemaPath != "" {
@@ -253,11 +259,15 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stderr, "Error: --upgrade-path is only available in direct comparison mode")
 			return 2
 		}
-		return runWrapperMode(ctx, registryTimeout, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir, checkRecreation, enforceExit1, fixPreview, fixMode, policyConfig, regoPolicy, taintVar, verbose, dynamicRegistry, stdout, stderr)
+		return runWrapperMode(ctx, registryTimeout, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir, goldenPlanPath, checkRecreation, enforceExit1, fixPreview, fixMode, policyConfig, regoPolicy, taintVar, verbose, dynamicRegistry, stdout, stderr)
 	}
 
 	// Mode 2: Direct Upstream Comparison Mode
 	if oldPath != "" || newPath != "" {
+		if goldenPlanPath != "" {
+			_, _ = fmt.Fprintln(stderr, "Error: --golden-plan is only available in wrapper audit mode")
+			return 2
+		}
 		if taintVar != "" {
 			_, _ = fmt.Fprintln(stderr, "Error: --taint is only available in wrapper audit mode")
 			return 2
@@ -298,7 +308,7 @@ func registryContext(ctx context.Context, timeout time.Duration) (context.Contex
 	return context.WithTimeout(ctx, timeout)
 }
 
-func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir string, checkRecreation, enforceExit1, fixPreview, fixMode bool, policyConfig *policy.Policy, regoPolicy *policy.RegoPolicy, taintVar string, verbose bool, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
+func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir, goldenPlanPath string, checkRecreation, enforceExit1, fixPreview, fixMode bool, policyConfig *policy.Policy, regoPolicy *policy.RegoPolicy, taintVar string, verbose bool, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
 	vlog := func(format string, a ...any) {
 		if verbose {
 			_, _ = fmt.Fprintf(stderr, "[verbose] "+format+"\n", a...)
@@ -569,6 +579,29 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		findings.BlastRadius = blastReport
 	}
 
+	var planVer *recreation.GoldenPlanVerification
+	if goldenPlanPath != "" {
+		vlog("Verifying golden plan %s", goldenPlanPath)
+		var err error
+		planVer, err = recreation.VerifyGoldenPlanFile(goldenPlanPath, false, res, findings.RecreationHazards, findings.AddressShifts)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error verifying golden plan %s: %v\n", goldenPlanPath, err)
+			return 2
+		}
+	} else {
+		autoPlan, _ := recreation.AutodiscoverGoldenPlan(wrapperPath)
+		if autoPlan != "" {
+			vlog("Autodiscovered golden plan %s", autoPlan)
+			planVer, _ = recreation.VerifyGoldenPlanFile(autoPlan, true, res, findings.RecreationHazards, findings.AddressShifts)
+		}
+	}
+	if planVer != nil {
+		findings.GoldenPlan = planVer
+		if planVer.HasRecreationHazards {
+			canSafelyUpdate = false
+		}
+	}
+
 	outContent := renderWrapperOutput(format, res, findings)
 
 	if err := writeOutput(outputFile, outContent, stdout); err != nil {
@@ -826,6 +859,9 @@ func renderWrapperOutput(format string, res *wrapper.WrapperCompatibilityReport,
 		}
 		if findings.Taint != nil {
 			out += "\n" + report.FormatTaintMarkdown(findings.Taint)
+		}
+		if findings.GoldenPlan != nil {
+			out += "\n" + recreation.FormatGoldenPlanMarkdown(findings.GoldenPlan)
 		}
 		return out
 	default:

@@ -18,10 +18,11 @@ import (
 // machine-readable documents so that text, Markdown, JSON and SARIF output all describe the same
 // set of findings instead of silently dropping the ones a given format cannot express inline.
 type Findings struct {
-	RecreationHazards []recreation.RecreationHazard  `json:"recreation_hazards,omitempty"`
-	BlastRadius       *blastradius.BlastRadiusReport `json:"blast_radius,omitempty"`
-	Taint             *eval.TaintReport              `json:"taint,omitempty"`
-	AddressShifts     []ast.ResourceAddressShift     `json:"address_shifts,omitempty"`
+	RecreationHazards []recreation.RecreationHazard      `json:"recreation_hazards,omitempty"`
+	BlastRadius       *blastradius.BlastRadiusReport     `json:"blast_radius,omitempty"`
+	Taint             *eval.TaintReport                  `json:"taint,omitempty"`
+	AddressShifts     []ast.ResourceAddressShift         `json:"address_shifts,omitempty"`
+	GoldenPlan        *recreation.GoldenPlanVerification `json:"golden_plan,omitempty"`
 }
 
 // RenderText formats a DiffReport into human-readable text.
@@ -246,6 +247,9 @@ func RenderWrapperText(w *wrapper.WrapperCompatibilityReport, findings Findings)
 			}
 		}
 	}
+	if findings.GoldenPlan != nil {
+		sb.WriteString(recreation.FormatGoldenPlanText(findings.GoldenPlan))
+	}
 	writePolicyViolations(&sb, w.PolicyViolations)
 
 	sb.WriteString("======================================================================\n")
@@ -253,7 +257,7 @@ func RenderWrapperText(w *wrapper.WrapperCompatibilityReport, findings Findings)
 }
 
 // RenderWrapperMarkdown formats a WrapperCompatibilityReport into Markdown.
-func RenderWrapperMarkdown(w *wrapper.WrapperCompatibilityReport) string {
+func RenderWrapperMarkdown(w *wrapper.WrapperCompatibilityReport, findings ...Findings) string {
 	if w == nil {
 		return ""
 	}
@@ -294,6 +298,16 @@ func RenderWrapperMarkdown(w *wrapper.WrapperCompatibilityReport) string {
 		sb.WriteString("\n")
 	}
 	writePolicyViolations(&sb, w.PolicyViolations)
+
+	if len(findings) > 0 {
+		f := findings[0]
+		if len(f.RecreationHazards) > 0 {
+			sb.WriteString(recreation.FormatHazardsMarkdown(f.RecreationHazards))
+		}
+		if f.GoldenPlan != nil {
+			sb.WriteString(recreation.FormatGoldenPlanMarkdown(f.GoldenPlan))
+		}
+	}
 
 	return sb.String()
 }

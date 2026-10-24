@@ -379,6 +379,88 @@ func TestSARIF_EdgeCases(t *testing.T) {
 	assert.True(t, foundWarning)
 }
 
+func TestGoldenPlanReporting(t *testing.T) {
+	planVer := &recreation.GoldenPlanVerification{
+		PlanPath:              "tfplan.json",
+		Autodiscovered:        true,
+		TotalPlannedResources: 3,
+		HasRecreationHazards:  true,
+		Summary:               "1 hazard found",
+		ConfirmedHazards: []recreation.PlanRecreationHazard{
+			{
+				ResourceAddress: "google_container_cluster.primary",
+				ResourceType:    "google_container_cluster",
+				HazardType:      "ForceNew",
+				Severity:        "CRITICAL_HAZARD",
+				Detail:          "IP range changed",
+				Remediation:     "Do not modify IP range",
+			},
+		},
+	}
+
+	w := sampleWrapperReport()
+	hazards := []recreation.RecreationHazard{
+		{
+			Variable:    "ip_range_pods",
+			Resource:    "google_container_cluster",
+			HazardType:  "ForceNew",
+			Severity:    "CRITICAL_HAZARD",
+			Description: "ForceNew cluster recreation",
+			Impact:      "Destroys cluster",
+			Remediation: "Keep pinned",
+		},
+	}
+	findings := Findings{
+		RecreationHazards: hazards,
+		GoldenPlan:        planVer,
+	}
+
+	// 1. Text rendering
+	text := RenderWrapperText(w, findings)
+	assert.Contains(t, text, "GOLDEN PLAN STATE RECREATION VERIFICATION")
+	assert.Contains(t, text, "google_container_cluster.primary")
+
+	// 2. Markdown rendering with findings
+	md := RenderWrapperMarkdown(w, findings)
+	assert.Contains(t, md, "Golden Plan State Recreation Verification")
+	assert.Contains(t, md, "google_container_cluster.primary")
+	assert.Contains(t, md, "Recreation Hazards")
+
+	// 3. Markdown rendering without findings
+	mdNoFindings := RenderWrapperMarkdown(w)
+	assert.NotContains(t, mdNoFindings, "Golden Plan State Recreation Verification")
+
+	// 4. Wrapper JSON rendering
+	jsonBytes := RenderWrapperJSON(w, findings)
+	assert.Contains(t, string(jsonBytes), `"golden_plan"`)
+
+	// 5. Wrapper SARIF rendering
+	sarifWrapperBytes := RenderWrapperSARIF(w, findings)
+	logWrapper := unmarshalSARIF(t, sarifWrapperBytes)
+	var foundPlanHazard bool
+	for _, res := range logWrapper.Runs[0].Results {
+		if res.RuleID == rulePlanRecreationHazard {
+			foundPlanHazard = true
+			assert.Equal(t, "error", res.Level)
+			assert.Contains(t, res.Message.Text, "google_container_cluster.primary")
+		}
+	}
+	assert.True(t, foundPlanHazard)
+
+	// 6. Diff SARIF rendering
+	diffSARIFBytes := RenderSARIF(sampleDiffReport(), findings)
+	logDiff := unmarshalSARIF(t, diffSARIFBytes)
+	var foundPlanDiffHazard bool
+	for _, res := range logDiff.Runs[0].Results {
+		if res.RuleID == rulePlanRecreationHazard {
+			foundPlanDiffHazard = true
+			assert.Equal(t, "error", res.Level)
+			assert.Contains(t, res.Message.Text, "google_container_cluster.primary")
+		}
+	}
+	assert.True(t, foundPlanDiffHazard)
+}
+
 func unmarshalSARIF(t *testing.T, data []byte) SARIFLog {
 	t.Helper()
 	var log SARIFLog

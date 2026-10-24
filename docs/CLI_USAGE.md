@@ -54,6 +54,7 @@ Audits a local wrapper module (such as a Google GKE or AWS EKS wrapper) against 
 - `--exit-code`: Returns non-zero exit code (1) if breaking changes or policy violations are detected.
 - `--fix-preview`: Emit a preview-only unified patch for removed arguments passed by the wrapper. Currently supports removal of direct module-call arguments; it does not change files or apply other remediation types.
 - `--fix`: Apply fixes in-place to remove wrapper arguments no longer accepted upstream. Uses `hclwrite` to preserve comments and formatting. Mutually exclusive with `--fix-preview`.
+- `--golden-plan <file>`: Optional path to a Terraform plan JSON file (`terraform show -json <planfile>`). Correlates planned resource changes against detected `ForceNew` recreation hazards, address shifts, and replacement actions (`["delete", "create"]`). If omitted, automatically discovers candidate plans (`golden-plan.json`, `golden_plan.json`, `tfplan.json`, `plan.json`, `.terraform/tfplan.json`) in the wrapper directory.
 - `--provider-schema <file>`: Optional path to a provider schema JSON file (`terraform providers schema -json`). Dynamically extracts `requires_replace` metadata across resources and nested blocks to detect ForceNew recreation hazards across any cloud provider.
 - `--cache-dir <dir>`: Optional path to an on-disk directory for persistent L2 AST caching, accelerating monorepo traversals and pre-commit checks.
 - `--clear-cache`: Clears only cache files matching `<sha256>.json` in the `--cache-dir`.
@@ -83,6 +84,33 @@ it:
 - `json`: the wrapper audit fields stay at the top level and a `blast_radius` object is added.
 - `sarif`: consumer modules that cannot be safely updated are added as `TF-BLAST-RADIUS-CONSUMER`
   results pointing at the consuming directory. Only rules that back an emitted result are advertised.
+
+---
+
+### Golden Plan State Recreation Verification (`--golden-plan`)
+
+When upgrading module version pins in enterprise wrappers, subtle input changes may trigger unexpected recreation of existing state resources (e.g. databases, VPCs, Kubernetes clusters). `tfastdiff` bridges static AST analysis with Terraform execution plans by inspecting a golden plan or image to verify that upgrading module version pins does not introduce breaking recreation hazards:
+
+```bash
+# Verify wrapper upgrade against an explicit golden plan JSON
+./bin/tfastdiff \
+  --wrapper ./my-gke-wrapper \
+  --upstream terraform-google-modules/kubernetes-engine/google \
+  --new-version 30.0.0 \
+  --golden-plan ./golden-plan.json \
+  --exit-code
+```
+
+#### Autodiscovery:
+If `--golden-plan` is omitted in wrapper mode, `tfastdiff` automatically searches the wrapper directory for:
+1. `golden-plan.json`
+2. `golden_plan.json`
+3. `tfplan.json`
+4. `plan.json`
+5. `.terraform/golden-plan.json`
+6. `.terraform/tfplan.json`
+
+If a valid Terraform plan JSON is discovered, verification runs automatically. If any planned resource matches a `ForceNew` immutable attribute, an unmigrated address shift, or an explicit replacement action (`["delete", "create"]`), the safety verdict is revoked and the command exits with code 1 when `--exit-code` is supplied.
 
 ---
 

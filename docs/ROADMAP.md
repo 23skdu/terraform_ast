@@ -11,7 +11,7 @@ flowchart TD
     A["v0.1.0 - v0.2.0 Core analysis and trust<br/>v0.3.0 - v0.4.0 Remediation and automation<br/>v0.5.0 - v0.6.0 Codemods and scaling"] --> B["v0.7.0 Deep semantic taint and language evolution"]
     B --> C["v0.8.0 Enterprise DevSecOps and governance"]
     C --> D["v0.9.0 Continuous quality and cloud emulation"]
-    D --> E["Gap analysis backlog<br/>Pass 1 (#1-#36): Closed<br/>Pass 2 (#37-#70): Closed<br/>Pass 3 (#71-#76): Closed<br/>Pass 4 (#77-#89): Closed"]
+    D --> E["Gap analysis backlog<br/>Pass 1 (#1-#36): Closed<br/>Pass 2 (#37-#70): Closed<br/>Pass 3 (#71-#76): Closed<br/>Pass 4 (#77-#90): Closed"]
 ```
 
 ---
@@ -407,3 +407,4 @@ The same binary reports three different versions to its consumers:
 | #87 | **Fixed** | Modernized Rego parser and evaluation in `pkg/policy/rego.go` with `selectRegoVersion` supporting Rego v0 and v1. Flattened report attributes and relaxed `parseCondition` to allow arbitrary Rego expressions. |
 | #88 | **Fixed** | Extended `computeDiagnostics` in `pkg/lsp/server.go` to report missing module call sources (Error, Severity 1), unpinned registry module calls (Warning, Severity 2), and removed blocks with `destroy = true` (Warning, Severity 2). |
 | #89 | **Fixed** | Pre-populated quick fix code actions in `pkg/lsp/server.go` (`codeActionsFor`) with valid `ApplyMovedBlocksArgs` and `AddMissingInputsArgs` containing directory and target module name extracted from document URI. |
+| #90 | **Fixed** | Golden Plan & State Recreation Hazard Verification Engine implemented in `pkg/recreation/plan.go`. Ingests Terraform plan JSON (`terraform show -json <planfile>`) via `--golden-plan <file>` or autodiscovery (`golden-plan.json`, `golden_plan.json`, `tfplan.json`, `plan.json`, `.terraform/golden-plan.json`, `.terraform/tfplan.json`). Correlates planned resources against `ForceNew` immutable attributes, unmigrated address shifts, and plan replacement actions (`["delete", "create"]`). Wired into `cmd/tfastdiff/main.go` and `pkg/report`. |

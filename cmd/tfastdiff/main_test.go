@@ -1944,6 +1944,13 @@ func TestExecute_BlastRadiusFlagGuards(t *testing.T) {
 	code = Execute([]string{"--old", dir, "--new", dir, "--blast-radius", "--exit-code=true"}, &stdout, &stderr)
 	assert.Equal(t, 2, code)
 	assert.Contains(t, stderr.String(), "--blast-radius requires a directory path")
+
+	// --golden-plan is also rejected in comparison mode.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", dir, "--new", dir, "--golden-plan", "plan.json"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--golden-plan is only available in wrapper audit mode")
 }
 
 // TestExecute_FixModeRejectsDroppedAnalysisFlags covers roadmap #56. The codemod paths return
@@ -1965,6 +1972,7 @@ func TestExecute_FixModeRejectsDroppedAnalysisFlags(t *testing.T) {
 			want string
 		}{
 			{"blast-radius", []string{"--blast-radius", wrapperDir}, "--blast-radius is not supported"},
+			{"golden-plan", []string{"--golden-plan", "plan.json"}, "--golden-plan is not supported"},
 			{"provider-schema", []string{"--provider-schema", schemaFile}, "--provider-schema is not supported"},
 			{"check-recreation", []string{"--check-recreation=false"}, "--check-recreation is not supported"},
 			{"format", []string{"--format", "json"}, "--format json is not supported"},
@@ -2562,4 +2570,126 @@ module "upstream" {
 	}, &stdout, &stderr)
 	assert.Equal(t, 1, code)
 	assert.Contains(t, stderr.String(), "Error writing moved blocks")
+}
+
+func TestExecute_GoldenPlanVerification(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`
+variable "cluster_name" {
+  type    = string
+  default = "my-cluster"
+}
+resource "google_container_cluster" "primary" {
+  name     = var.cluster_name
+  location = "us-central1"
+}
+`), 0600))
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "gke" {
+  source       = "`+upstreamDir+`"
+  cluster_name = "prod-cluster"
+}
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+
+	// 1. Invalid / missing golden plan path -> returns 2 with error
+	code := Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", upstreamDir,
+		"--golden-plan", filepath.Join(t.TempDir(), "nonexistent.json"),
+	}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "Error verifying golden plan")
+
+	// 2. Explicit golden plan with replacement action and recreation hazard -> exit code 1 with --exit-code
+	planWithHazard := filepath.Join(t.TempDir(), "hazard-plan.json")
+	require.NoError(t, os.WriteFile(planWithHazard, []byte(`{
+		"format_version": "1.0",
+		"resource_changes": [
+			{
+				"address": "module.gke.google_container_cluster.primary",
+				"type": "google_container_cluster",
+				"name": "primary",
+				"change": {
+					"actions": ["delete", "create"]
+				}
+			}
+		]
+	}`), 0600))
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", upstreamDir,
+		"--golden-plan", planWithHazard,
+		"--exit-code",
+		"-v",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stdout.String(), "GOLDEN PLAN STATE RECREATION VERIFICATION")
+	assert.Contains(t, stdout.String(), "module.gke.google_container_cluster.primary")
+
+	// 3. Clean golden plan in markdown format -> exit code 0
+	cleanPlan := filepath.Join(t.TempDir(), "clean-plan.json")
+	require.NoError(t, os.WriteFile(cleanPlan, []byte(`{
+		"format_version": "1.0",
+		"resource_changes": [
+			{
+				"address": "aws_s3_bucket.b",
+				"type": "aws_s3_bucket",
+				"name": "b",
+				"change": {
+					"actions": ["no-op"]
+				}
+			}
+		]
+	}`), 0600))
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", upstreamDir,
+		"--golden-plan", cleanPlan,
+		"--format", "markdown",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "### Golden Plan State Recreation Verification")
+	assert.Contains(t, stdout.String(), "Plan Verification Passed")
+
+	// 4. Autodiscovery of golden-plan.json in wrapper directory
+	autoWrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(autoWrapperDir, "main.tf"), []byte(`
+module "gke" {
+  source = "`+upstreamDir+`"
+}
+`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(autoWrapperDir, "golden-plan.json"), []byte(`{
+		"format_version": "1.0",
+		"resource_changes": [
+			{
+				"address": "aws_s3_bucket.data",
+				"type": "aws_s3_bucket",
+				"name": "data",
+				"change": {
+					"actions": ["update"]
+				}
+			}
+		]
+	}`), 0600))
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", autoWrapperDir,
+		"--upstream", upstreamDir,
+		"-v",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stderr.String(), "Autodiscovered golden plan")
+	assert.Contains(t, stdout.String(), "(autodiscovered)")
 }

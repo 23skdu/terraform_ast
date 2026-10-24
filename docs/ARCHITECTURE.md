@@ -95,10 +95,15 @@ flowchart TD
     - **Warnings**: Widened types (e.g., `list(string)` to `set(string)`), sensitive flags added, deprecation notices, provider constraint updates.
   - Computes high-level safety verdict: `SAFE`, `BREAKING_CHANGES`, `WARNINGS_ONLY`, or `DOWNGRADE`.
 
-### 6. `pkg/recreation` (ForceNew Destruction & Hazard Analysis)
+### 6. `pkg/recreation` (ForceNew Destruction & Golden Plan Verification Engine)
 - **Capabilities**:
   - Encodes infrastructure destruction heuristics for immutable cloud resources (GKE cluster name, project ID, location, region, network, subnetwork and secondary subnet CIDR blocks; AWS EKS cluster name, VPC ID and cluster IP family).
-  - Flags breaking input shifts that trigger provider `ForceNew` destruction/recreation cycles, preventing catastrophic data loss and downtime during module upgrades.
+  - Dynamically inspects Terraform Provider Schemas (`terraform providers schema -json`) to extract `requires_replace` constraints across root and nested blocks.
+  - **Golden Plan & Execution Plan Verification**:
+    - Ingests Terraform plan JSON (`terraform show -json <planfile>`) via `--golden-plan` or automated autodiscovery (`golden-plan.json`, `golden_plan.json`, `tfplan.json`, `plan.json`, `.terraform/tfplan.json`).
+    - Flattens and normalizes planned resources across `resource_changes`, top-level `resources`, and hierarchical `planned_values.root_module`.
+    - Correlates planned resources against `ForceNew` immutable arguments, unmigrated address shifts, and direct replacement actions (`["delete", "create"]`).
+    - Surfaces confirmed hazards in all reporting formats and automatically revokes safe update status if hazards are confirmed.
 
 ### 7. `pkg/blastradius` (Downstream Consumer & Environment Scanner)
 - **Capabilities**:
