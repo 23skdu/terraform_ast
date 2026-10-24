@@ -44,3 +44,13 @@ crash.*.log
 *.tfplan
 *.*.tfplan
 .terraform.lock.hcl
+
+# Python virtual environment and execution artifacts
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+oracle_report.json
+

@@ -157,3 +157,90 @@ flowchart TD
    - Executes smoke fuzzing across all 19 native Go fuzz targets across AST parsing, semver calculation, Terragrunt evaluation, LSP message framing, and codemod replacements.
 6. **Pre-Commit Hook (`.pre-commit-hooks.yaml`)**:
    - Executes `tfastdiff --wrapper . --exit-code` on wrapper directories to catch backward-incompatible changes before code is staged or pushed.
+
+---
+
+## 3. Independent Python Verification Oracle
+
+The Independent Python Verification Oracle ([`scripts/oracle_verify.py`](file:///home/rsd/REPOS/terraform_ast/scripts/oracle_verify.py)) executes within an isolated, reproducible virtual environment (`.venv`) to perform decoupled verification of detection accuracy, confidence score distributions, and safety score calibration theorems.
+
+### Architecture & Calibration Flow
+
+```mermaid
+flowchart TD
+    subgraph ORACLE_ENV["1. Environment & Dependencies"]
+        VENV[".venv Virtual Environment (make venv)"]
+        REQ["requirements.txt (Standard Library Base)"]
+        VENV --- REQ
+    end
+
+    subgraph SUITES["2. Dual-Track Oracle Verification Suites"]
+        VENV --> FIXTURES["Suite 1: Local Golden Fixtures Oracle"]
+        VENV --> UPSTREAM["Suite 2: Upstream Module Upgrade Oracle"]
+        FIXTURES --> GKE_F["GKE v1 vs v2 (5 breaking, 2 warn, 2 feats, 2 hazards)"]
+        FIXTURES --> EKS_F["EKS v19 vs v20 (4 breaking, 2 warn, 2 feats)"]
+        FIXTURES --> AKS_F["AKS v1 vs v2 (4 breaking, 1 warn, 2 feats, 1 hazard)"]
+        FIXTURES --> ID_F["Identity Zero-Diff (0 breaking, 0 warn => 100% Safety)"]
+        FIXTURES --> WRAP_F["GKE Wrapper Analysis (0 issues => SAFE_TO_PIN)"]
+        UPSTREAM --> EKS_LIVE["AWS EKS Upstream Paths (Patch, Minor, Major)"]
+        UPSTREAM --> GKE_LIVE["Google GKE Upstream Paths (Patch, Minor, Major)"]
+    end
+
+    subgraph THEOREMS["3. Independent Scoring & Calibration Theorems"]
+        GKE_F --> EVAL_S["Independent Safety Score Calculation: S"]
+        EKS_F --> EVAL_S
+        AKS_F --> EVAL_S
+        ID_F --> EVAL_S
+        WRAP_F --> EVAL_S
+        EKS_LIVE --> EVAL_S
+        GKE_LIVE --> EVAL_S
+        EVAL_S --> TH1["Theorem 1 (Soundness): N_breaking == 0 <=> can_safely_update <=> S >= 70%"]
+        EVAL_S --> TH2["Theorem 2 (Safety Bounds): Breaking >= 1 => S <= 65% < 70%"]
+        EVAL_S --> TH3["Theorem 3 (Verdict Agreement): S = 100% <=> SAFE; S in [75%, 95%] <=> WARNINGS_ONLY"]
+        EVAL_S --> TH4["Theorem 4 (Path Composition): S_path = min(S_i); can_safely_all <=> S_path >= 70%"]
+        EVAL_S --> CONF_AUDIT["Confidence Calibration: 1 <= c_i <= 10; Breaking c_i >= 7; Mean >= 8.0"]
+    end
+
+    subgraph DECISION["4. Oracle Gate Verdict & Reporting"]
+        TH1 --> REPORT["Comprehensive Evaluation Report"]
+        TH2 --> REPORT
+        TH3 --> REPORT
+        TH4 --> REPORT
+        CONF_AUDIT --> REPORT
+        REPORT --> DECIDE{"All Invariants & Theorems Hold?"}
+        DECIDE -->|Yes| PASS_ORACLE["GATE PASS: Exit 0 (Export oracle_report.json)"]
+        DECIDE -->|No| FAIL_ORACLE["GATE FAIL: Exit 1 (Violations Logged)"]
+    end
+```
+
+### Safety Score Formulation & Calibration Rules
+
+The oracle computes an independent safety score $S \in [0.0, 100.0\%]$ for each transition:
+
+$$S = \max\left(0.0, 100.0 - 35.0 \cdot N_{\text{breaking}} - \min(25.0, 5.0 \cdot N_{\text{warnings}}) - 15.0 \cdot N_{\text{hazards}}\right)$$
+
+Where the scoring guarantees the following calibration theorems:
+1. **Safety Soundness**: $N_{\text{breaking}} = 0 \iff \text{can\_safely\_update} = \text{true} \iff S \ge 70.0\%$.
+2. **Definitive Breaking Penalty**: Any transition with $N_{\text{breaking}} \ge 1$ satisfies $S \le 65.0\% < 70.0\%$.
+3. **Pure Backward Compatibility**: $N_{\text{breaking}} = 0 \land N_{\text{warnings}} = 0 \iff S = 100.0\% \iff \text{verdict} = \text{"SAFE"}$.
+4. **Non-Breaking Warnings**: $N_{\text{breaking}} = 0 \land N_{\text{warnings}} > 0 \iff S \in [75.0\%, 95.0\%] \iff \text{verdict} = \text{"WARNINGS\_ONLY"}$.
+5. **Multi-Step Upgrade Path Composition**: For an upgrade path composed of steps $(s_1, s_2, \dots, s_k)$, the composite path safety score is $S_{\text{path}} = \min_{1 \le i \le k} S(s_i)$, and $\text{can\_safely\_update\_all} = \text{true} \iff S_{\text{path}} \ge 70.0\%$.
+
+### Execution Targets
+
+```bash
+# Set up shared Python virtual environment (.venv)
+make venv
+
+# Execute full independent oracle suite (builds binary, invokes oracle, exports JSON report)
+make oracle
+
+# Run oracle directly with custom parameters
+.venv/bin/python3 scripts/oracle_verify.py \
+  --samples 3 \
+  --min-accuracy 100.0 \
+  --min-confidence 8.0 \
+  --min-safety 70.0 \
+  --output oracle_report.json
+```
+

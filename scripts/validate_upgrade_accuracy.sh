@@ -141,16 +141,21 @@ MODULE_SPECS = [
 ]
 
 def semver_parse(v):
-    clean = v.lstrip("v")
+    clean = v.lstrip("v").strip()
+    prerelease = ""
+    if "-" in clean:
+        clean, prerelease = clean.split("-", 1)
     parts = []
-    for x in clean.split("-")[0].split("."):
+    for x in clean.split("."):
         try:
             parts.append(int(x))
         except ValueError:
             parts.append(0)
     while len(parts) < 3:
         parts.append(0)
-    return tuple(parts)
+    is_release = 0 if prerelease else 1
+    return (parts[0], parts[1], parts[2], is_release, prerelease)
+
 
 def fetch_remote_tags(repo_url):
     try:
