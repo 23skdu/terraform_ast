@@ -54,7 +54,6 @@ func TestTerratest_ValidateFixtures(t *testing.T) {
 			}
 			t.Cleanup(func() {
 				_ = os.RemoveAll(filepath.Join(dir, ".terraform"))
-				_ = os.Remove(filepath.Join(dir, ".terraform.lock.hcl"))
 			})
 			terraform.InitAndValidateContext(t, context.Background(), opts)
 		})
@@ -816,96 +815,239 @@ func TestTerratest_CodemodAndProviderSchema(t *testing.T) {
 }
 
 // TestTerratest_PlanStateSafeUpdate verifies that when tfastdiff determines an update
-// is safe (SAFE / 0 breaking changes), native Terraform plan confirms Plan: 0 to destroy.
+// is safe (SAFE / 0 breaking changes), native Terraform plan confirms Plan: 0 to destroy
+// via structured plan JSON inspection.
 func TestTerratest_PlanStateSafeUpdate(t *testing.T) {
 	dir := t.TempDir()
+	v1Dir := filepath.Join(dir, "v1")
+	v2Dir := filepath.Join(dir, "v2")
+	require.NoError(t, os.MkdirAll(v1Dir, 0o750))
+	require.NoError(t, os.MkdirAll(v2Dir, 0o750))
 
 	// Initial configuration: terraform_data resource with initial value
-	initialConfig := `resource "terraform_data" "node" {
-  input = "initial_v1"
+	initialConfig := `variable "node_input" {
+  type    = string
+  default = "initial_v1"
+}
+
+resource "terraform_data" "node" {
+  input = var.node_input
 }
 `
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(initialConfig), 0o600))
-
-	opts := &terraform.Options{
-		TerraformDir: dir,
-		NoColor:      true,
-	}
-	t.Cleanup(func() {
-		_ = os.RemoveAll(filepath.Join(dir, ".terraform"))
-		_ = os.Remove(filepath.Join(dir, ".terraform.lock.hcl"))
-	})
-
-	// Initial Apply
-	terraform.InitAndApplyContext(t, context.Background(), opts)
+	require.NoError(t, os.WriteFile(filepath.Join(v1Dir, "main.tf"), []byte(initialConfig), 0o600))
 
 	// Safe Update: in-place update of input + adding an output
-	updatedConfig := `resource "terraform_data" "node" {
-  input = "updated_v2"
+	updatedConfig := `variable "node_input" {
+  type    = string
+  default = "updated_v2"
+}
+
+resource "terraform_data" "node" {
+  input = var.node_input
 }
 
 output "node_id" {
   value = terraform_data.node.id
 }
 `
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(updatedConfig), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(v2Dir, "main.tf"), []byte(updatedConfig), 0o600))
 
-	// Verify with tfastdiff AST inspection
-	mod, err := ast.Inspect(dir)
+	// 1. Verify with tfastdiff AST inspection & diff.Compare
+	oldMod, err := ast.Inspect(v1Dir)
 	require.NoError(t, err)
-	require.Contains(t, mod.Outputs, "node_id")
+	newMod, err := ast.Inspect(v2Dir)
+	require.NoError(t, err)
 
-	// Execute native Terraform Plan
-	planOutput := terraform.PlanContext(t, context.Background(), opts)
+	diffReport := diff.Compare(oldMod, newMod, "1.0.0", "1.1.0")
+	assert.True(t, diffReport.CanSafelyUpdate, "Safe update must allow CanSafelyUpdate")
+	assert.Equal(t, 0, diffReport.TotalBreaking, "Safe update must produce 0 breaking changes")
 
-	// Formally verify runtime safety guarantees:
-	// When tfastdiff issues a SAFE verdict, Terratest runs terraform plan
-	// against emulated state and confirms Plan: 0 to destroy.
-	assert.Contains(t, planOutput, "0 to destroy", "Safe update plan must destroy 0 resources")
-	assert.NotContains(t, planOutput, "must be replaced", "Safe update plan must not trigger resource replacement")
-	assert.NotContains(t, planOutput, "forces replacement", "Safe update plan must not trigger forces replacement")
-}
+	hazards := recreation.AnalyzeHazards(diffReport)
+	assert.Empty(t, hazards, "Safe update must yield 0 recreation hazards")
 
-// TestTerratest_PlanStateForceNewHazard verifies that when a recreation hazard occurs,
-// native Terraform plan explicitly flags (forces replacement) or must be replaced.
-func TestTerratest_PlanStateForceNewHazard(t *testing.T) {
-	dir := t.TempDir()
-
-	// Initial configuration with triggers_replace attribute
-	initialConfig := `resource "terraform_data" "database" {
-  input            = "db_v1"
-  triggers_replace = "cluster-alpha"
-}
-`
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(initialConfig), 0o600))
+	// 2. Execute native Terraform workflow on working directory
+	workDir := filepath.Join(dir, "work")
+	require.NoError(t, os.MkdirAll(workDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "main.tf"), []byte(initialConfig), 0o600))
 
 	opts := &terraform.Options{
-		TerraformDir: dir,
+		TerraformDir: workDir,
 		NoColor:      true,
 	}
 	t.Cleanup(func() {
-		_ = os.RemoveAll(filepath.Join(dir, ".terraform"))
-		_ = os.Remove(filepath.Join(dir, ".terraform.lock.hcl"))
+		_ = os.RemoveAll(filepath.Join(workDir, ".terraform"))
+		_ = os.Remove(filepath.Join(workDir, ".terraform.lock.hcl"))
 	})
 
 	// Initial Apply
 	terraform.InitAndApplyContext(t, context.Background(), opts)
 
-	// ForceNew modification: changing triggers_replace forces complete replacement
-	modifiedConfig := `resource "terraform_data" "database" {
-  input            = "db_v1"
-  triggers_replace = "cluster-beta"
-}
-`
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(modifiedConfig), 0o600))
+	// Apply updated config
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "main.tf"), []byte(updatedConfig), 0o600))
 
-	// Execute native Terraform Plan
+	// Generate structured binary plan
+	planFile := filepath.Join(workDir, "tfplan.binary")
+	opts.PlanFilePath = planFile
 	planOutput := terraform.PlanContext(t, context.Background(), opts)
 
-	// Formally verify runtime replacement guarantees:
-	// When a ForceNew hazard occurs, native Terraform plan explicitly flags
-	// (forces replacement) / must be replaced on the targeted resource address.
-	assert.True(t, strings.Contains(planOutput, "must be replaced") || strings.Contains(planOutput, "forces replacement") || strings.Contains(planOutput, "1 to destroy"),
-		"ForceNew plan must flag replacement: %s", planOutput)
+	assert.Contains(t, planOutput, "0 to destroy", "Safe update plan text must destroy 0 resources")
+
+	// Inspect structured plan JSON
+	showJSON := terraform.RunTerraformCommandContext(t, context.Background(), opts, "show", "-json", planFile)
+	var planData struct {
+		ResourceChanges []struct {
+			Address string `json:"address"`
+			Change  struct {
+				Actions      []string `json:"actions"`
+				ActionReason string   `json:"action_reason"`
+			} `json:"change"`
+		} `json:"resource_changes"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(showJSON), &planData))
+
+	for _, rc := range planData.ResourceChanges {
+		assert.NotContains(t, rc.Change.Actions, "delete", "Safe update resource %s must not have delete action", rc.Address)
+	}
+}
+
+// TestTerratest_PlanStateForceNewHazard verifies that when a recreation hazard occurs,
+// tfastdiff's recreation.AnalyzeHazards reports the hazard and native Terraform structured plan
+// explicitly confirms resource replacement (forces replacement / delete+create).
+func TestTerratest_PlanStateForceNewHazard(t *testing.T) {
+	dir := t.TempDir()
+	v1Dir := filepath.Join(dir, "v1")
+	v2Dir := filepath.Join(dir, "v2")
+	require.NoError(t, os.MkdirAll(v1Dir, 0o750))
+	require.NoError(t, os.MkdirAll(v2Dir, 0o750))
+
+	// Initial configuration with triggers_replace variable
+	initialConfig := `variable "cluster_name" {
+  type    = string
+  default = "cluster-alpha"
+}
+
+resource "terraform_data" "database" {
+  input            = "db_v1"
+  triggers_replace = var.cluster_name
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(v1Dir, "main.tf"), []byte(initialConfig), 0o600))
+
+	// ForceNew modification: cluster_name type shifts incompatibly to number
+	modifiedConfig := `variable "cluster_name" {
+  type = number
+}
+
+resource "terraform_data" "database" {
+  input            = "db_v1"
+  triggers_replace = var.cluster_name
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(v2Dir, "main.tf"), []byte(modifiedConfig), 0o600))
+
+	// 1. Verify with tfastdiff AST inspection & diff.Compare
+	oldMod, err := ast.Inspect(v1Dir)
+	require.NoError(t, err)
+	newMod, err := ast.Inspect(v2Dir)
+	require.NoError(t, err)
+
+	diffReport := diff.Compare(oldMod, newMod, "1.0.0", "2.0.0")
+	assert.False(t, diffReport.CanSafelyUpdate, "ForceNew modification must not be safe to update")
+	assert.NotEmpty(t, diffReport.BreakingChanges, "ForceNew modification must produce breaking changes")
+
+	// Register cluster_name ForceNew descriptor in DynamicHazardRegistry
+	ps := &recreation.ProviderSchemas{
+		ProviderSchemas: map[string]recreation.ProviderSchema{
+			"terraform_data": {
+				ResourceSchemas: map[string]recreation.ResourceSchema{
+					"terraform_data": {
+						Block: recreation.BlockSchema{
+							Attributes: map[string]recreation.AttributeSchema{
+								"cluster_name": {
+									Description:     "Cluster name is immutable; changing or removing it triggers complete recreation.",
+									RequiresReplace: true,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	reg := recreation.NewDynamicHazardRegistry(ps)
+
+	hazards := recreation.AnalyzeHazardsWithRegistry(diffReport, reg)
+	require.NotEmpty(t, hazards, "Recreation hazards must be detected for immutable attribute cluster_name")
+	assert.Equal(t, "CRITICAL_HAZARD", hazards[0].Severity)
+	assert.Equal(t, "terraform_data", hazards[0].Resource)
+
+	// 2. Execute native Terraform workflow and assert structured plan JSON confirms replacement
+	workDir := filepath.Join(dir, "work")
+	require.NoError(t, os.MkdirAll(workDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "main.tf"), []byte(initialConfig), 0o600))
+
+	opts := &terraform.Options{
+		TerraformDir: workDir,
+		NoColor:      true,
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(filepath.Join(workDir, ".terraform"))
+		_ = os.Remove(filepath.Join(workDir, ".terraform.lock.hcl"))
+	})
+
+	// Initial Apply
+	terraform.InitAndApplyContext(t, context.Background(), opts)
+
+	// Update working config with new triggers_replace value forcing replacement
+	replaceConfig := `variable "cluster_name" {
+  type    = string
+  default = "cluster-beta"
+}
+
+resource "terraform_data" "database" {
+  input            = "db_v1"
+  triggers_replace = var.cluster_name
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "main.tf"), []byte(replaceConfig), 0o600))
+
+	// Generate structured binary plan
+	planFile := filepath.Join(workDir, "tfplan.binary")
+	opts.PlanFilePath = planFile
+	planOutput := terraform.PlanContext(t, context.Background(), opts)
+
 	assert.Contains(t, planOutput, "1 to destroy", "ForceNew hazard must produce 1 to destroy in plan output")
+
+	// Inspect structured plan JSON
+	showJSON := terraform.RunTerraformCommandContext(t, context.Background(), opts, "show", "-json", planFile)
+	var planData struct {
+		ResourceChanges []struct {
+			Address string `json:"address"`
+			Change  struct {
+				Actions      []string `json:"actions"`
+				ActionReason string   `json:"action_reason"`
+			} `json:"change"`
+		} `json:"resource_changes"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(showJSON), &planData))
+
+	foundReplacement := false
+	for _, rc := range planData.ResourceChanges {
+		if rc.Address == "terraform_data.database" {
+			hasDelete := false
+			hasCreate := false
+			for _, act := range rc.Change.Actions {
+				if act == "delete" {
+					hasDelete = true
+				}
+				if act == "create" {
+					hasCreate = true
+				}
+			}
+			if hasDelete && hasCreate {
+				foundReplacement = true
+			}
+		}
+	}
+	assert.True(t, foundReplacement, "Native Terraform plan JSON must confirm resource replacement (delete + create) on terraform_data.database")
 }

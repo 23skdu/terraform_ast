@@ -47,9 +47,11 @@ func TestDockerfile_DevSecOpsStaticAnalysis(t *testing.T) {
 	assert.Contains(t, dockerfileContent, `ENTRYPOINT ["/usr/local/bin/tfastdiff"]`, "Must define a secure direct entrypoint")
 
 	// 6. OCI metadata annotations
+	assert.Contains(t, dockerfileContent, "TARGETARCH")
 	assert.Contains(t, dockerfileContent, "org.opencontainers.image.title")
 	assert.Contains(t, dockerfileContent, "org.opencontainers.image.source")
 	assert.Contains(t, dockerfileContent, "org.opencontainers.image.licenses")
+	assert.Contains(t, dockerfileContent, `org.opencontainers.image.version="0.9.0"`)
 
 	// 7. .dockerignore validation
 	dockerignoreBytes, err := os.ReadFile(dockerignorePath)
@@ -107,6 +109,8 @@ func TestDeveloperWorkflowManifests(t *testing.T) {
 	assert.Contains(t, slsaContent, "format: 'cyclonedx-json'")
 	assert.Contains(t, slsaContent, "format: 'spdx-json'")
 	assert.Contains(t, slsaContent, "trivy-action")
+	assert.Contains(t, slsaContent, "build-push-action")
+	assert.Contains(t, slsaContent, "ghcr.io")
 }
 
 // TestDockerfile_BuildAndRuntimeSecurity builds the container and validates runtime security constraints.

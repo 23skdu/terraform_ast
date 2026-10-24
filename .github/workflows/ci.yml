@@ -27,12 +27,17 @@ jobs:
       - name: Lint (govet, errcheck, staticcheck, unused, gosec)
         uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v1.64.5
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: '1.16.5'
+
+      - name: Setup Terraform Plugin Cache
+        run: |
+          mkdir -p "$HOME/.terraform.d/plugin-cache"
+          echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >> $GITHUB_ENV
 
       - name: Verify Module Cleanliness
         run: |
@@ -53,6 +58,13 @@ jobs:
             grep -v '100.0%' coverage.txt >&2
             exit 1
           fi
+          for pkg in $(go list ./...); do
+            pkg_cov=$(go test -covermode=atomic "$pkg" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+%' | tail -1 || true)
+            if [ -n "$pkg_cov" ] && [ "$pkg_cov" != "100.0%" ]; then
+              echo "ERROR: package $pkg coverage is $pkg_cov, expected 100.0%" >&2
+              exit 1
+            fi
+          done
 
       - name: Run Terratest Suite
         run: |

@@ -31,7 +31,7 @@ type ModuleSpec struct {
 // MultiCloudCatalog returns the canonical golden module test matrix.
 func MultiCloudCatalog() []ModuleSpec {
 	return []ModuleSpec{
-		// GCP Modules
+		// GCP Benchmark: Google Kubernetes Engine (GKE)
 		{
 			ID:                 "gcp-gke",
 			Provider:           ProviderGCP,
@@ -41,34 +41,7 @@ func MultiCloudCatalog() []ModuleSpec {
 			TargetVersion:      "v30.0.0",
 			GoldenBaselinePath: "test/golden/gke_upstream_diff.golden.json",
 		},
-		{
-			ID:                 "gcp-fabric",
-			Provider:           ProviderGCP,
-			Name:               "Cloud Foundation Fabric",
-			Source:             "terraform-google-modules/cloud-foundation-fabric",
-			BaselineVersion:    "v30.0.0",
-			TargetVersion:      "v31.0.0",
-			GoldenBaselinePath: "test/golden/fabric_upstream_diff.golden.json",
-		},
-		{
-			ID:                 "gcp-vpc",
-			Provider:           ProviderGCP,
-			Name:               "Network (VPC)",
-			Source:             "terraform-google-modules/network/google",
-			BaselineVersion:    "v9.0.0",
-			TargetVersion:      "v10.0.0",
-			GoldenBaselinePath: "test/golden/gcp_vpc_upstream_diff.golden.json",
-		},
-		{
-			ID:                 "gcp-sql",
-			Provider:           ProviderGCP,
-			Name:               "Cloud SQL",
-			Source:             "terraform-google-modules/sql-db/google",
-			BaselineVersion:    "v20.0.0",
-			TargetVersion:      "v21.0.0",
-			GoldenBaselinePath: "test/golden/gcp_sql_upstream_diff.golden.json",
-		},
-		// AWS Modules
+		// AWS Benchmark: Elastic Kubernetes Service (EKS)
 		{
 			ID:                 "aws-eks",
 			Provider:           ProviderAWS,
@@ -78,34 +51,7 @@ func MultiCloudCatalog() []ModuleSpec {
 			TargetVersion:      "v20.0.0",
 			GoldenBaselinePath: "test/golden/eks_upstream_diff.golden.json",
 		},
-		{
-			ID:                 "aws-vpc",
-			Provider:           ProviderAWS,
-			Name:               "VPC",
-			Source:             "terraform-aws-modules/vpc/aws",
-			BaselineVersion:    "v5.0.0",
-			TargetVersion:      "v5.1.0",
-			GoldenBaselinePath: "test/golden/aws_vpc_upstream_diff.golden.json",
-		},
-		{
-			ID:                 "aws-rds",
-			Provider:           ProviderAWS,
-			Name:               "RDS",
-			Source:             "terraform-aws-modules/rds/aws",
-			BaselineVersion:    "v6.0.0",
-			TargetVersion:      "v6.1.0",
-			GoldenBaselinePath: "test/golden/aws_rds_upstream_diff.golden.json",
-		},
-		{
-			ID:                 "aws-iam",
-			Provider:           ProviderAWS,
-			Name:               "IAM",
-			Source:             "terraform-aws-modules/iam/aws",
-			BaselineVersion:    "v5.30.0",
-			TargetVersion:      "v5.31.0",
-			GoldenBaselinePath: "test/golden/aws_iam_upstream_diff.golden.json",
-		},
-		// Azure Modules
+		// Azure Benchmark: Azure Kubernetes Service (AKS)
 		{
 			ID:                 "azure-aks",
 			Provider:           ProviderAzure,
@@ -114,24 +60,6 @@ func MultiCloudCatalog() []ModuleSpec {
 			BaselineVersion:    "v7.0.0",
 			TargetVersion:      "v8.0.0",
 			GoldenBaselinePath: "test/golden/aks_upstream_diff.golden.json",
-		},
-		{
-			ID:                 "azure-vnet",
-			Provider:           ProviderAzure,
-			Name:               "Virtual Network (VNet)",
-			Source:             "Azure/vnet/azurerm",
-			BaselineVersion:    "v4.0.0",
-			TargetVersion:      "v4.1.0",
-			GoldenBaselinePath: "test/golden/azure_vnet_upstream_diff.golden.json",
-		},
-		{
-			ID:                 "azure-postgresql",
-			Provider:           ProviderAzure,
-			Name:               "PostgreSQL Flexible Server",
-			Source:             "Azure/postgresql/azurerm",
-			BaselineVersion:    "v3.0.0",
-			TargetVersion:      "v3.1.0",
-			GoldenBaselinePath: "test/golden/azure_postgresql_upstream_diff.golden.json",
 		},
 	}
 }

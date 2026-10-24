@@ -30,12 +30,51 @@ jobs:
         with:
           terraform_version: '1.16.5'
 
+      - name: Setup Terraform Plugin Cache
+        run: |
+          mkdir -p "$HOME/.terraform.d/plugin-cache"
+          echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >> $GITHUB_ENV
+
       - name: Run Multi-Cloud Golden Matrix Verification
         run: |
           go test -v ./internal/goldentest/...
           go test -v ./test/terratest/...
 
-      - name: Verify Drift Baselines
+      - name: Verify Drift Baselines & Generate Status Report
         id: drift_check
         run: |
-          echo "Multi-cloud golden test matrix verified against canonical baselines."
+          go test -v -run TestMultiCloudCatalog_DetectDriftAgainstBaselines ./internal/goldentest/...
+
+      - name: File Upstream Drift Issue
+        if: failure()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const issueTitle = 'Upstream Multi-Cloud Module Drift Detected';
+            const issueBody = `### Automated Daily Multi-Cloud Drift Detection Failure\n\n` +
+              `Discrepancies detected between canonical golden baselines and current upstream module definitions.\n\n` +
+              `Please inspect the CI job logs and run \`UPDATE_GOLDEN=true go test ./test/terratest/...\` if changes are intentional.`;
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              creator: 'github-actions[bot]'
+            });
+            const existing = issues.find(i => i.title === issueTitle);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: issueBody
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issueTitle,
+                body: issueBody,
+                labels: ['drift', 'automated']
+              });
+            }
+

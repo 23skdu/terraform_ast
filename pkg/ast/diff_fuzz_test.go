@@ -95,6 +95,26 @@ output "app_id" {
 			}
 		}
 
+		// Cross-validate against HashiCorp terraform-config-inspect reference engine
+		refMod, diags := tfconfig.LoadModule(dir)
+		if !diags.HasErrors() && refMod != nil {
+			if len(info.Variables) != len(refMod.Variables) {
+				t.Fatalf("variable count mismatch: ast=%d, tfconfig=%d for:\n%s", len(info.Variables), len(refMod.Variables), snippet)
+			}
+			for vName, refVar := range refMod.Variables {
+				astVar, exists := info.Variables[vName]
+				if !exists {
+					t.Fatalf("variable %q missing in ast.Inspect for:\n%s", vName, snippet)
+				}
+				if astVar.Required != refVar.Required {
+					t.Fatalf("variable %q required mismatch: ast=%v, tfconfig=%v", vName, astVar.Required, refVar.Required)
+				}
+			}
+			if len(info.Outputs) != len(refMod.Outputs) {
+				t.Fatalf("output count mismatch: ast=%d, tfconfig=%d for:\n%s", len(info.Outputs), len(refMod.Outputs), snippet)
+			}
+		}
+
 		// If native compiler is present, execute differential verification
 		if hasCompiler && !testing.Short() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -107,9 +127,12 @@ output "app_id" {
 				var valOut tfValidationOutput
 				if jErr := json.Unmarshal(out, &valOut); jErr == nil && valOut.Valid {
 					// Compiler confirmed valid Terraform syntax.
-					// Verify AST inspect preserved the module path.
+					// Verify AST inspect preserved the module path and error count is 0.
 					if info.Path != dir {
 						t.Fatalf("Compiler accepted module but AST inspect path mismatch:\n%s", snippet)
+					}
+					if valOut.ErrorCount > 0 {
+						t.Fatalf("Compiler reported error count > 0 for valid config")
 					}
 				}
 			}

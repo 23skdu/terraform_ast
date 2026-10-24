@@ -23,7 +23,9 @@ COPY internal/ internal/
 # - CGO_ENABLED=0: Statically linked binary without glibc dependencies
 # - -trimpath: Strip host file paths from executable to prevent info leakage
 # - -ldflags="-s -w -extldflags '-static'": Strip symbol tables & debug information
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -trimpath \
     -ldflags="-s -w -extldflags '-static'" \
     -o /out/tfastdiff ./cmd/tfastdiff
@@ -45,7 +47,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 # Open Containers Initiative (OCI) image metadata labels
 LABEL org.opencontainers.image.title="terraform-ast-diff" \
     org.opencontainers.image.description="AST-level semantic difference engine & wrapper compatibility auditor for Terraform modules" \
-    org.opencontainers.image.version="0.1.0" \
+    org.opencontainers.image.version="0.9.0" \
     org.opencontainers.image.vendor="23skdu" \
     org.opencontainers.image.source="https://github.com/23skdu/terraform_ast" \
     org.opencontainers.image.licenses="Unlicense"

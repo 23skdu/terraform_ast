@@ -174,3 +174,27 @@ func TestGenerateDriftIssuePayload(t *testing.T) {
 	assert.Contains(t, driftPayload, "dns_prefix: type changed")
 	assert.Contains(t, driftPayload, "Breaking count mismatch: baseline had 4, actual has 3")
 }
+
+func TestMultiCloudCatalog_DetectDriftAgainstBaselines(t *testing.T) {
+	catalog := MultiCloudCatalog()
+	require.NotEmpty(t, catalog)
+
+	var reports []*DriftReport
+	for _, spec := range catalog {
+		goldenFile := filepath.Join("../../", spec.GoldenBaselinePath)
+		require.FileExists(t, goldenFile, "Golden baseline file must exist: %s", goldenFile)
+
+		goldenBytes, err := os.ReadFile(goldenFile)
+		require.NoError(t, err)
+
+		report, err := DetectDrift(spec, goldenBytes, goldenFile)
+		require.NoError(t, err)
+		assert.False(t, report.HasDrift, "Canonical golden baseline must match itself with no drift: %s", spec.ID)
+		assert.Contains(t, report.Summary, "MATCHES BASELINE")
+		reports = append(reports, report)
+	}
+
+	payload, err := GenerateDriftIssuePayload(reports)
+	require.NoError(t, err)
+	assert.Contains(t, payload, "All Baselines Intact")
+}

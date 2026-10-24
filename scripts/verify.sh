@@ -46,6 +46,16 @@ if [ "$total" != "100.0%" ]; then
 fi
 echo "total statement coverage: $total"
 
+echo "==> per-package coverage verification (100% per package)"
+for pkg in $(go list ./...); do
+  pkg_cov=$(go test -covermode=atomic "$pkg" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+%' | tail -1 || true)
+  if [ -n "$pkg_cov" ] && [ "$pkg_cov" != "100.0%" ]; then
+    echo "ERROR: package $pkg coverage is $pkg_cov, expected 100.0%" >&2
+    exit 1
+  fi
+done
+echo "all packages verified at 100.0% statement coverage"
+
 if [ "${RACE:-0}" = "1" ]; then
   echo "==> race detector"
   go test -race ./...
