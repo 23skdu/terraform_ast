@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/23skdu/terraform_ast/pkg/blastradius"
 	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/eval"
@@ -20,6 +21,7 @@ type Findings struct {
 	RecreationHazards []recreation.RecreationHazard  `json:"recreation_hazards,omitempty"`
 	BlastRadius       *blastradius.BlastRadiusReport `json:"blast_radius,omitempty"`
 	Taint             *eval.TaintReport              `json:"taint,omitempty"`
+	AddressShifts     []ast.ResourceAddressShift     `json:"address_shifts,omitempty"`
 }
 
 // RenderText formats a DiffReport into human-readable text.
@@ -71,6 +73,13 @@ func RenderText(r *diff.DiffReport, findings Findings) string {
 	}
 	if len(findings.RecreationHazards) > 0 {
 		sb.WriteString(recreation.FormatHazardsText(findings.RecreationHazards))
+	}
+	if len(findings.AddressShifts) > 0 {
+		sb.WriteString(fmt.Sprintf("RESOURCE ADDRESS SHIFTS (%d):\n", len(findings.AddressShifts)))
+		for _, s := range findings.AddressShifts {
+			sb.WriteString(fmt.Sprintf("  • %s -> %s (%s)\n", s.OldAddress.FullAddress(), s.NewAddress.FullAddress(), s.Reason))
+		}
+		sb.WriteString("\n")
 	}
 	writePolicyViolations(&sb, r.PolicyViolations)
 
@@ -210,6 +219,13 @@ func RenderWrapperText(w *wrapper.WrapperCompatibilityReport, findings Findings)
 	}
 	if len(findings.RecreationHazards) > 0 {
 		sb.WriteString(recreation.FormatHazardsText(findings.RecreationHazards))
+	}
+	if len(findings.AddressShifts) > 0 {
+		sb.WriteString(fmt.Sprintf("RESOURCE ADDRESS SHIFTS (%d):\n", len(findings.AddressShifts)))
+		for _, s := range findings.AddressShifts {
+			sb.WriteString(fmt.Sprintf("  • %s -> %s (%s)\n", s.OldAddress.FullAddress(), s.NewAddress.FullAddress(), s.Reason))
+		}
+		sb.WriteString("\n")
 	}
 	if findings.BlastRadius != nil {
 		sb.WriteString("\n")

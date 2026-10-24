@@ -191,21 +191,38 @@ func IsRegistrySource(source string) bool {
 	return err == nil
 }
 
-// ParseRegistrySource parses a registry source into hostname, namespace, name, and provider.
-// It accepts the shapes IsRegistrySource accepts, minus the local-directory probe only
-// IsRegistrySource performs: the source must not be a VCS URL, local path or github.com /
-// bitbucket.org shorthand, and its 3 or 4 components must be non-empty and free of URL
-// metacharacters, so a malformed address can never be turned into a request against a
-// partially empty or query-extended registry path.
-func ParseRegistrySource(source string) (host, namespace, name, provider string, err error) {
+// ParseRegistrySourceWithSubmodule parses a registry source, extracting any submodule path specified via '//'.
+// It returns host, namespace, name, provider, and the relative submodule path.
+func ParseRegistrySourceWithSubmodule(source string) (host, namespace, name, provider, submodule string, err error) {
 	trimmed := strings.TrimSpace(source)
-	invalid := func() (string, string, string, string, error) {
-		return "", "", "", "", fmt.Errorf("invalid registry module source format: %s", source)
+	invalid := func() (string, string, string, string, string, error) {
+		return "", "", "", "", "", fmt.Errorf("invalid registry module source format: %s", source)
 	}
 	if trimmed == "" || isVCSOrLocalSource(trimmed) {
 		return invalid()
 	}
-	parts := strings.Split(trimmed, "/")
+
+	base := trimmed
+	if idx := strings.Index(trimmed, "//"); idx != -1 {
+		base = trimmed[:idx]
+		sub := trimmed[idx+2:]
+		if sub == "" || strings.HasPrefix(sub, "/") || strings.Contains(sub, "\\") {
+			return invalid()
+		}
+		cleanSub := filepath.Clean(sub)
+		if cleanSub == "." || strings.HasPrefix(cleanSub, "..") {
+			return invalid()
+		}
+		subParts := strings.Split(cleanSub, "/")
+		for _, part := range subParts {
+			if !registryComponentPattern.MatchString(part) {
+				return invalid()
+			}
+		}
+		submodule = cleanSub
+	}
+
+	parts := strings.Split(base, "/")
 	if len(parts) != 3 && len(parts) != 4 {
 		return invalid()
 	}
@@ -224,9 +241,30 @@ func ParseRegistrySource(source string) (host, namespace, name, provider string,
 		}
 	}
 	if len(parts) == 3 {
-		return "registry.terraform.io", parts[0], parts[1], parts[2], nil
+		return "registry.terraform.io", parts[0], parts[1], parts[2], submodule, nil
 	}
-	return parts[0], parts[1], parts[2], parts[3], nil
+	return parts[0], parts[1], parts[2], parts[3], submodule, nil
+}
+
+// SubmodulePath extracts any submodule path specified via '//' in a registry source,
+// returning empty string if no submodule is present or if the source is invalid.
+func SubmodulePath(source string) string {
+	_, _, _, _, sub, err := ParseRegistrySourceWithSubmodule(source)
+	if err != nil {
+		return ""
+	}
+	return sub
+}
+
+// ParseRegistrySource parses a registry source into hostname, namespace, name, and provider.
+// It accepts the shapes IsRegistrySource accepts, minus the local-directory probe only
+// IsRegistrySource performs: the source must not be a VCS URL, local path or github.com /
+// bitbucket.org shorthand, and its 3 or 4 components must be non-empty and free of URL
+// metacharacters, so a malformed address can never be turned into a request against a
+// partially empty or query-extended registry path.
+func ParseRegistrySource(source string) (host, namespace, name, provider string, err error) {
+	h, ns, n, p, _, err := ParseRegistrySourceWithSubmodule(source)
+	return h, ns, n, p, err
 }
 
 func (c *Client) doRequestWithBackoff(req *http.Request) (*http.Response, error) {
@@ -319,8 +357,10 @@ func (c *Client) GetLatestVersion(ctx context.Context, source string) (string, e
 }
 
 // DownloadModule downloads and extracts a module version archive into destDir.
+// If the source specifies a submodule via '//', the archive is extracted into destDir
+// and the submodule directory is confirmed to exist.
 func (c *Client) DownloadModule(ctx context.Context, source, version, destDir string) error {
-	host, namespace, name, provider, err := ParseRegistrySource(source)
+	host, namespace, name, provider, submodule, err := ParseRegistrySourceWithSubmodule(source)
 	if err != nil {
 		return err
 	}
@@ -378,7 +418,17 @@ func (c *Client) DownloadModule(ctx context.Context, source, version, destDir st
 	}
 
 	// Extract tar.gz into destDir
-	return extractTarGz(bodyReader, destDir)
+	if err := extractTarGz(bodyReader, destDir); err != nil {
+		return err
+	}
+	if submodule != "" {
+		subDir := filepath.Join(destDir, submodule)
+		info, err := os.Stat(subDir)
+		if err != nil || !info.IsDir() {
+			return fmt.Errorf("registry module archive %s does not contain submodule directory %s", source, submodule)
+		}
+	}
+	return nil
 }
 
 func (c *Client) buildBaseURL(host string) string {

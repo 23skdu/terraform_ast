@@ -598,6 +598,15 @@ func setupMockRegistryServer(t *testing.T) (*httptest.Server, func()) {
 		Typeflag: tar.TypeReg,
 	})
 	_, _ = tw.Write(content)
+
+	contentSub := []byte(`variable "sub_var" { type = string }`)
+	_ = tw.WriteHeader(&tar.Header{
+		Name:     "modules/sub/main.tf",
+		Mode:     0600,
+		Size:     int64(len(contentSub)),
+		Typeflag: tar.TypeReg,
+	})
+	_, _ = tw.Write(contentSub)
 	_ = tw.Close()
 	_ = gw.Close()
 	tarData := buf.Bytes()
@@ -2419,4 +2428,138 @@ module "child" {
 	}, &stdout, &stderr)
 	assert.Equal(t, 1, code)
 	assert.Contains(t, stdout.String(), "Major version bumps are disallowed by company policy")
+}
+
+func TestExecute_RegistrySubmodules_WrapperAndCompare(t *testing.T) {
+	_, cleanup := setupMockRegistryServer(t)
+	defer cleanup()
+
+	// 1. Direct comparison with submodule
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--old", "hashicorp/consul/aws//modules/sub",
+		"--new", "hashicorp/consul/aws//modules/sub",
+		"--old-version", "0.9.0",
+		"--new-version", "1.0.0",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+
+	// 2. Wrapper mode with submodule
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "submod" {
+  source  = "hashicorp/consul/aws//modules/sub"
+  version = "0.9.0"
+  sub_var = "foo"
+}
+`), 0600))
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", "hashicorp/consul/aws//modules/sub",
+		"--old-version", "0.9.0",
+		"--new-version", "1.0.0",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+}
+
+func TestExecute_FixAndFixPreview_AddressShifts(t *testing.T) {
+	repoDir := createTestTFRepoWithTags(t, []struct{ tag, content string }{
+		{tag: "v1.0.0", content: "resource \"aws_s3_bucket\" \"b\" {\n  bucket = \"my-bucket\"\n}\nvariable \"removed_input\" { type = string }\n"},
+		{tag: "v2.0.0", content: "resource \"aws_s3_bucket\" \"buckets\" {\n  for_each = toset([\"my-bucket\"])\n  bucket = each.key\n}\n"},
+	})
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "upstream" {
+  source        = "`+repoDir+`"
+  removed_input = "bar"
+}
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+
+	// 1. --fix-preview with both removed input patch AND moved blocks preview
+	code := Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", repoDir,
+		"--old-version", "v1.0.0",
+		"--new-version", "v2.0.0",
+		"--fix-preview",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "moved.tf")
+	assert.Contains(t, stdout.String(), "aws_s3_bucket.b")
+
+	// 2. --fix-preview with only moved blocks (no removed inputs)
+	wrapperNoRemoved := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperNoRemoved, "main.tf"), []byte(`
+module "upstream" {
+  source = "`+repoDir+`"
+}
+`), 0600))
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperNoRemoved,
+		"--upstream", repoDir,
+		"--old-version", "v1.0.0",
+		"--new-version", "v2.0.0",
+		"--fix-preview",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "moved.tf")
+
+	// 3. --fix-preview with policy violation
+	policyFile := filepath.Join(t.TempDir(), "policy.json")
+	require.NoError(t, os.WriteFile(policyFile, []byte(`{"block_breaking":true}`), 0600))
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", repoDir,
+		"--old-version", "v1.0.0",
+		"--new-version", "v2.0.0",
+		"--fix-preview",
+		"--policy", policyFile,
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+
+	// 4. --fix applies removed inputs and creates moved.tf
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", repoDir,
+		"--old-version", "v1.0.0",
+		"--new-version", "v2.0.0",
+		"--fix",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "Applied fixes to 2 file(s)")
+	movedContent, err := os.ReadFile(filepath.Join(wrapperDir, "moved.tf"))
+	require.NoError(t, err)
+	assert.Contains(t, string(movedContent), "from = aws_s3_bucket.b")
+
+	// 5. --fix error writing moved.tf (directory collision)
+	errWrapper := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(errWrapper, "main.tf"), []byte(`
+module "upstream" {
+  source = "`+repoDir+`"
+}
+`), 0600))
+	require.NoError(t, os.Mkdir(filepath.Join(errWrapper, "moved.tf"), 0755))
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", errWrapper,
+		"--upstream", repoDir,
+		"--old-version", "v1.0.0",
+		"--new-version", "v2.0.0",
+		"--fix",
+	}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error writing moved blocks")
 }

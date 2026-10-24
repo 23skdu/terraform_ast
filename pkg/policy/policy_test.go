@@ -292,3 +292,47 @@ deny = true if { false }
 	require.NoError(t, err)
 	assert.Nil(t, violationsEmpty)
 }
+
+func TestEvaluateRego_WithReportAndPureOPA(t *testing.T) {
+	regoSrc := `package terraform_ast.policy
+import rego.v1
+
+deny contains msg if {
+	some item in input.report_items
+	item.level == "critical"
+	msg := sprintf("Critical item: %s", [item.name])
+}
+`
+	pol, err := ParseRego(regoSrc)
+	require.NoError(t, err)
+
+	report := map[string]any{
+		"report_items": []map[string]any{
+			{"name": "vuln1", "level": "critical"},
+		},
+	}
+	violations := EvaluateRego(pol, Input{Report: report})
+	require.Len(t, violations, 1)
+	assert.Contains(t, violations[0].Message, "Critical item: vuln1")
+}
+
+func TestEvaluateRego_CoverMissingPackageAndEmptyConditions(t *testing.T) {
+	// Policy without package evaluated via EvaluateRegoArbitrary
+	polNoPkg := &RegoPolicy{
+		Package: "terraform_ast.policy",
+		Source:  "deny = true",
+	}
+	v, err := EvaluateRegoArbitrary(context.Background(), polNoPkg, map[string]any{})
+	require.NoError(t, err)
+	assert.NotEmpty(t, v)
+
+	// Policy rule with no conditions in fallback evaluation
+	polEmptyRule := &RegoPolicy{
+		Package: "terraform_ast.policy",
+		Rules: []RegoRule{
+			{Name: "empty", Conditions: nil},
+		},
+	}
+	vEmpty := EvaluateRego(polEmptyRule, Input{BreakingChanges: 0})
+	assert.Empty(t, vEmpty)
+}

@@ -596,7 +596,7 @@ func TestTerragruntInputKey(t *testing.T) {
 			require.True(t, ok)
 
 			key, resolved := terragruntInputKey(inputs.Items[0].KeyExpr)
-			if tc.name == "bare identifier key" {
+			if tc.name == "bare identifier key" || tc.name == "quoted key" {
 				assert.True(t, resolved, "expected a resolvable key")
 				assert.Equal(t, "key", key)
 				return
@@ -605,6 +605,38 @@ func TestTerragruntInputKey(t *testing.T) {
 			assert.Empty(t, key)
 		})
 	}
+}
+
+func TestIsMatchingSource_SuffixCollision(t *testing.T) {
+	// Subpath suffix should NOT collide across different directory names
+	callerFile := "/repo/live/prod/terragrunt.hcl"
+	target := "modules/vpc"
+
+	// Colliding suffix (submodules/vpc ends with modules/vpc string-wise, but not path-wise)
+	assert.False(t, isMatchingSource(callerFile, "../../submodules/vpc", target))
+
+	// Exact directory match
+	assert.True(t, isMatchingSource(callerFile, "../../modules/vpc", target))
+}
+
+func TestTerragruntInputKey_Branches(t *testing.T) {
+	// LiteralValueExpr with string
+	k, ok := terragruntInputKey(&hclsyntax.LiteralValueExpr{Val: cty.StringVal("lit")})
+	assert.True(t, ok)
+	assert.Equal(t, "lit", k)
+
+	// LiteralValueExpr with non-string
+	k, ok = terragruntInputKey(&hclsyntax.LiteralValueExpr{Val: cty.NumberIntVal(123)})
+	assert.False(t, ok)
+	assert.Empty(t, k)
+
+	// Template with interpolation
+	file, diags := hclsyntax.ParseConfig([]byte(`inputs = { "${var.dyn}" = "val" }`), "t.hcl", hcl.Pos{Line: 1, Column: 1})
+	require.False(t, diags.HasErrors())
+	inputs := file.Body.(*hclsyntax.Body).Attributes["inputs"].Expr.(*hclsyntax.ObjectConsExpr)
+	k, ok = terragruntInputKey(inputs.Items[0].KeyExpr)
+	assert.False(t, ok)
+	assert.Empty(t, k)
 }
 
 func TestExtractModuleReferencesHandlesInvalidSource(t *testing.T) {

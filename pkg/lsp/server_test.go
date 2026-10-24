@@ -715,3 +715,85 @@ func TestLSP_ContentLengthAtTheLimitIsAccepted(t *testing.T) {
 	assert.Contains(t, out.String(), `"id":1`)
 	assert.Equal(t, 64<<20, maxMessageBytes)
 }
+
+func TestLSPServer_ExtendedDiagnosticsAndCodeActions(t *testing.T) {
+	server := NewServer(&bytes.Buffer{})
+
+	// 1. Direct codeActions() call
+	ca := server.codeActions()
+	require.Len(t, ca, 2)
+	assert.Equal(t, ".", ca[0].Command.Arguments[0].(ApplyMovedBlocksArgs).Dir)
+
+	// 2. codeActionsFor with invalid file path
+	caBad := server.codeActionsFor(CodeActionParams{
+		TextDocument: struct {
+			URI string `json:"uri"`
+		}{URI: "file:///does/not/exist/main.tf"},
+	})
+	require.Len(t, caBad, 2)
+	assert.Equal(t, "/does/not/exist", caBad[0].Command.Arguments[0].(ApplyMovedBlocksArgs).Dir)
+
+	// 3. Single module call pre-populates targetMod even if cursor is on different line
+	dirSingle := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dirSingle, "main.tf"), []byte(`
+module "cluster" {
+  source = "./cluster"
+}
+`), 0600))
+	caSingle := server.codeActionsFor(CodeActionParams{
+		TextDocument: struct {
+			URI string `json:"uri"`
+		}{URI: "file://" + filepath.Join(dirSingle, "main.tf")},
+		Range: Range{Start: Position{Line: 10, Character: 0}},
+	})
+	require.Len(t, caSingle, 2)
+	assert.Equal(t, "cluster", caSingle[1].Command.Arguments[0].(AddMissingInputsArgs).Module)
+
+	// 4. Extended diagnostics: missing source, unpinned registry, and removed block destroy
+	dirExt := t.TempDir()
+	extTF := filepath.Join(dirExt, "main.tf")
+	require.NoError(t, os.WriteFile(extTF, []byte(`
+module "broken" {
+}
+
+module "unpinned" {
+  source = "hashicorp/consul/aws"
+}
+
+removed {
+  from = aws_s3_bucket.old
+  lifecycle {
+    destroy = true
+  }
+}
+`), 0600))
+
+	diags := server.computeDiagnostics("file://" + extTF)
+	require.Len(t, diags, 3)
+
+	var hasMissingSource, hasUnpinned, hasDestroy bool
+	for _, d := range diags {
+		if d.Severity == 1 && strings.Contains(d.Message, "missing a source attribute") {
+			hasMissingSource = true
+		}
+		if d.Severity == 2 && strings.Contains(d.Message, "unpinned registry source") {
+			hasUnpinned = true
+		}
+		if d.Severity == 2 && strings.Contains(d.Message, "destroy = true") {
+			hasDestroy = true
+		}
+	}
+	assert.True(t, hasMissingSource, "expected missing source diagnostic")
+	assert.True(t, hasUnpinned, "expected unpinned registry source diagnostic")
+	assert.True(t, hasDestroy, "expected removed block destroy diagnostic")
+
+	// 5. Cursor on unpinned module line targets "unpinned" module
+	caExt := server.codeActionsFor(CodeActionParams{
+		TextDocument: struct {
+			URI string `json:"uri"`
+		}{URI: "file://" + extTF},
+		Range: Range{Start: Position{Line: 4, Character: 0}},
+	})
+	require.Len(t, caExt, 2)
+	assert.Equal(t, "unpinned", caExt[1].Command.Arguments[0].(AddMissingInputsArgs).Module)
+}

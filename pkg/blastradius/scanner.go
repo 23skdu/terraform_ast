@@ -16,6 +16,7 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclparse"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
+	"github.com/zclconf/go-cty/cty"
 )
 
 // CallSite represents a root module consumer calling the wrapper module.
@@ -431,10 +432,7 @@ func parseTerragruntCallSite(src []byte, path, targetIdentifier string) (CallSit
 }
 
 // terragruntInputKey resolves a Terragrunt `inputs` object key to a static input name.
-//
-// HCL always wraps object keys in an ObjectConsKeyExpr; bare identifiers parse as a scope
-// traversal, while quoted keys and parenthesised expressions are reported as unresolvable so the
-// caller can flag the inputs as dynamically composed.
+// It supports bare identifiers, quoted string literals, and template expressions.
 func terragruntInputKey(expr hclsyntax.Expression) (string, bool) {
 	switch keyExpr := expr.(type) {
 	case *hclsyntax.ObjectConsKeyExpr:
@@ -442,6 +440,19 @@ func terragruntInputKey(expr hclsyntax.Expression) (string, bool) {
 			return "", false
 		}
 		return terragruntInputKey(keyExpr.Wrapped)
+	case *hclsyntax.TemplateWrapExpr:
+		return terragruntInputKey(keyExpr.Wrapped)
+	case *hclsyntax.TemplateExpr:
+		if keyExpr.IsStringLiteral() {
+			val, diags := keyExpr.Value(nil)
+			if !diags.HasErrors() && val.Type() == cty.String {
+				return val.AsString(), true
+			}
+		}
+	case *hclsyntax.LiteralValueExpr:
+		if keyExpr.Val.Type() == cty.String {
+			return keyExpr.Val.AsString(), true
+		}
 	case *hclsyntax.ScopeTraversalExpr:
 		if len(keyExpr.Traversal) == 1 {
 			if root, ok := keyExpr.Traversal[0].(hcl.TraverseRoot); ok {
@@ -485,8 +496,11 @@ func isMatchingSource(callerFilePath, sourceVal, targetIdentifier string) bool {
 			return true
 		}
 	}
-	if sourceHasSlash && strings.HasSuffix(resolved, cleanTarget) {
-		return true
+	if sourceHasSlash {
+		sepTarget := string(filepath.Separator) + strings.TrimPrefix(cleanTarget, string(filepath.Separator))
+		if strings.HasSuffix(resolved, sepTarget) {
+			return true
+		}
 	}
 	return false
 }

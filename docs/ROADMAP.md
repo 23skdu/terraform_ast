@@ -11,7 +11,7 @@ flowchart TD
     A["v0.1.0 - v0.2.0 Core analysis and trust<br/>v0.3.0 - v0.4.0 Remediation and automation<br/>v0.5.0 - v0.6.0 Codemods and scaling"] --> B["v0.7.0 Deep semantic taint and language evolution"]
     B --> C["v0.8.0 Enterprise DevSecOps and governance"]
     C --> D["v0.9.0 Continuous quality and cloud emulation"]
-    D --> E["Gap analysis backlog (100% delivered)<br/>Pass 1: items 1 to 36 closed<br/>Pass 2: items 37 to 70 closed<br/>Pass 3: items 71 to 76 closed"]
+    D --> E["Gap analysis backlog<br/>Pass 1 (#1-#36): Closed<br/>Pass 2 (#37-#70): Closed<br/>Pass 3 (#71-#76): Closed<br/>Pass 4 (#77-#89): Closed"]
 ```
 
 ---
@@ -382,4 +382,28 @@ The same binary reports three different versions to its consumers:
 | #75 | **Fixed** | Cross-module inter-procedural taint reachability wired into blast radius in `pkg/blastradius/scanner.go` (`ScanDirectoryWithTaint` and `FilterTaintedCallSites`). Consumers that neither pass tainted variables nor reference tainted outputs are filtered from downstream risk reports. |
 | #76 | **Fixed** | Deep differential compiler verification implemented in `pkg/ast/diff_fuzz_test.go` (`TestDifferentialStructuralEquivalence`). Asserts strict structural invariants comparing `ast.Inspect` against `terraform-config-inspect` across variables, outputs, providers, module calls, and managed/data resources. |
 
+---
 
+# Pass 4 — Enterprise Production Hardening & Ecosystem Gaps (#77 – #89)
+
+> **Status:** 100% Closed & Delivered. **Scope:** Closing critical real-world registry subpaths, monorepo tag discovery, intermediate representation (IR) CLI integration, automated moved block code actions, blast radius Terragrunt dependencies, full-fidelity OPA evaluations, and LSP diagnostic completeness.
+>
+> All 13 findings (#77 through #89) across P0 (Shipping & Accuracy Blockers), P1 (Wiring, Robustness & Policy Fidelity), and P2 (Developer Ergonomics & LSP Completeness) have been fully resolved, verified with regression tests, and delivered with 100.0% statement test coverage across all packages.
+
+### Resolution log — Pass 4 Production Hardening batch (closed)
+
+| Item | Status | What changed |
+| :--- | :--- | :--- |
+| #77 | **Fixed** | Added `ParseRegistrySourceWithSubmodule` and `SubmodulePath` in `pkg/registry/client.go`. Enhanced `DownloadModule` to download root archive and verify submodule existence. Wired submodule extraction path in CLI (`cmd/tfastdiff/main.go`) for direct comparison and wrapper audits. |
+| #78 | **Fixed** | Added loop over `newMod.RequiredProviders` in `compareRequirements` in `pkg/diff/diff.go`. Newly added provider constraints are flagged as warnings and newly required provider configuration aliases are flagged as breaking changes. |
+| #79 | **Fixed** | Implemented `ParseScopedTag`, `ListScopedSemverTags`, and directory-scoped tag parsing in `pkg/gitops/git.go`. Enhanced `CheckoutRef` to support monorepo component prefixes (`modules/vpc/v1.2.0`, `vpc-v1.2.0`). |
+| #80 | **Fixed** | Implemented `pruneToSafeHarbor` and `extractGitBaseAndSubpath` in `pkg/planner/planner.go`. Traversal plans prune intermediate patch releases to safe-harbor boundaries (latest patch per minor version and major hops), and filter out prereleases (`-rc`, `-beta`) via `semverutil.FilterPrereleases`. |
+| #81 | **Fixed** | Wired `ast.DetectAddressShifts` in `cmd/tfastdiff/main.go` for both `runCompareMode` and `runWrapperMode`. Added `AddressShifts` to `report.Findings` and formatted human-readable output in `RenderText` and `RenderWrapperText`. |
+| #82 | **Fixed** | Wired `codemod.SynthesizeMovedBlocksForShifts` into `runWrapperMode` `--fix-preview` (rendering `moved.tf` diff patch) and `codemod.SynthesizeAndWriteMovedBlocks` into `--fix` (generating idempotent `moved.tf` file). |
+| #83 | **Fixed** | Updated `terragruntInputKey` in `pkg/blastradius/scanner.go` to unwrap `*hclsyntax.TemplateWrapExpr`, `*hclsyntax.TemplateExpr` (string literals), and `*hclsyntax.LiteralValueExpr` so quoted keys in Terragrunt inputs evaluate correctly. |
+| #84 | **Fixed** | Resolved subpath suffix collision in `isMatchingSource` in `pkg/blastradius/scanner.go` by prefixing a path separator before checking caller target suffix. |
+| #85 | **Fixed** | Added Terragrunt `dependency` block modeling in `pkg/eval/terragrunt.go` (`terragruntDependencies`), extracting `mock_outputs` and generating fallback placeholder outputs for inter-module reference resolution. |
+| #86 | **Fixed** | Extended `policy.Input` with `Report any` in `pkg/policy/policy.go`, passing the full structured report findings to `EvaluateRego` and `EvaluateRegoArbitrary` for deep policy inspection. |
+| #87 | **Fixed** | Modernized Rego parser and evaluation in `pkg/policy/rego.go` with `selectRegoVersion` supporting Rego v0 and v1. Flattened report attributes and relaxed `parseCondition` to allow arbitrary Rego expressions. |
+| #88 | **Fixed** | Extended `computeDiagnostics` in `pkg/lsp/server.go` to report missing module call sources (Error, Severity 1), unpinned registry module calls (Warning, Severity 2), and removed blocks with `destroy = true` (Warning, Severity 2). |
+| #89 | **Fixed** | Pre-populated quick fix code actions in `pkg/lsp/server.go` (`codeActionsFor`) with valid `ApplyMovedBlocksArgs` and `AddMissingInputsArgs` containing directory and target module name extracted from document URI. |

@@ -478,6 +478,35 @@ func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			}
 		}
 	}
+
+	// Newly added required providers
+	var newProviderNames []string
+	for name := range newMod.RequiredProviders {
+		if _, exists := oldMod.RequiredProviders[name]; !exists {
+			newProviderNames = append(newProviderNames, name)
+		}
+	}
+	sort.Strings(newProviderNames)
+	for _, name := range newProviderNames {
+		newReq := newMod.RequiredProviders[name]
+		report.Warnings = append(report.Warnings, DifferenceItem{
+			Category:    "ProviderRequirement",
+			Name:        name,
+			Severity:    SeverityWarning,
+			Description: fmt.Sprintf("Provider requirement '%s' was added in upstream", name),
+			NewValue:    strings.Join(newReq.VersionConstraints, ", "),
+			Remediation: fmt.Sprintf("Ensure root module supplies provider '%s' matching constraints '%s'", name, strings.Join(newReq.VersionConstraints, ", ")),
+		})
+		for _, alias := range newReq.ConfigurationAliases {
+			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				Category:    "ProviderConfigurationAlias",
+				Name:        alias,
+				Severity:    SeverityBreaking,
+				Description: fmt.Sprintf("Provider configuration alias '%s' is newly required by upstream", alias),
+				Remediation: fmt.Sprintf("Pass a provider configuration for alias '%s' to the module call", alias),
+			})
+		}
+	}
 }
 
 func computeVerdict(report *DiffReport) {

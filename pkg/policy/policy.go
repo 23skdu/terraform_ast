@@ -27,10 +27,11 @@ type Violation struct {
 
 // Input is the compatibility summary evaluated against a policy.
 type Input struct {
-	BreakingChanges int
-	Warnings        int
-	IsDowngrade     bool
-	BumpType        string
+	BreakingChanges int    `json:"breaking_changes"`
+	Warnings        int    `json:"warnings"`
+	IsDowngrade     bool   `json:"is_downgrade"`
+	BumpType        string `json:"bump_type"`
+	Report          any    `json:"report,omitempty"`
 }
 
 // Load reads and validates a JSON policy from path. The path is supplied directly by the operator

@@ -914,3 +914,35 @@ func TestTerragruntFindInParentFoldersUnresolvableStart(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot resolve relative/only")
 }
+
+func TestTerragruntDependencies(t *testing.T) {
+	dir := t.TempDir()
+	src := `
+dependency "vpc" {
+  config_path = "../vpc"
+  mock_outputs = {
+    vpc_id = "vpc-12345"
+  }
+}
+
+dependency "eks" {
+  config_path = "../eks"
+}
+
+dependency {
+  # label-less block
+}
+
+inputs = {
+  vpc_id = dependency.vpc.outputs.vpc_id
+  eks_id = dependency.eks.outputs.id
+}
+`
+	path := writeTerragrunt(t, dir, "terragrunt.hcl", src)
+	body, rawSrc := parseTerragruntBody(t, path)
+
+	inputs, err := ReadTerragruntInputsWithContext(body, rawSrc, path, TerragruntOptions{ConfigDir: dir})
+	require.NoError(t, err)
+	assert.Equal(t, `"vpc-12345"`, inputs["vpc_id"])
+	assert.Equal(t, `"mock-id"`, inputs["eks_id"])
+}

@@ -82,7 +82,7 @@ func TestPlanUpgradeIncludesIntermediateGitTags(t *testing.T) {
 
 	plan, err := NewUpgradePlanner(nil).PlanUpgrade(context.Background(), dir, "1.0.0", "2.0.0")
 	require.NoError(t, err)
-	require.Equal(t, []string{"1.0.0", "v1.2.0-rc.1", "v1.2.0", "2.0.0"}, plan)
+	require.Equal(t, []string{"1.0.0", "v1.2.0", "2.0.0"}, plan)
 }
 
 func TestPlanUpgradeClonesGitURLThroughSharedCache(t *testing.T) {
@@ -190,4 +190,52 @@ func TestPlanUpgradeClampsToEndpointVersions(t *testing.T) {
 	plan, err = planner.PlanUpgrade(context.Background(), "./local/module", "1.0.0", "2.0.0")
 	require.NoError(t, err)
 	require.Equal(t, []string{"1.0.0", "2.0.0"}, plan)
+}
+
+func TestPlanUpgrade_PruneToSafeHarbor(t *testing.T) {
+	// <= 2 candidates returns candidates directly
+	assert.Equal(t, []string{"1.0.1"}, pruneToSafeHarbor([]string{"1.0.1"}))
+
+	// Multi-patch and major boundaries
+	candidates := []string{
+		"1.0.1", "1.0.2", "1.0.3",
+		"1.1.0", "1.1.1",
+		"2.0.0", "2.0.1",
+		"single",
+	}
+	pruned := pruneToSafeHarbor(candidates)
+	// Should select latest per minor: 1.0.3, 1.1.1, 2.0.0 and 2.0.1 (major.0.0 boundary), and single
+	assert.Contains(t, pruned, "1.0.3")
+	assert.NotContains(t, pruned, "1.0.1")
+	assert.NotContains(t, pruned, "1.0.2")
+	assert.Contains(t, pruned, "1.1.1")
+	assert.NotContains(t, pruned, "1.1.0")
+	assert.Contains(t, pruned, "2.0.0")
+	assert.Contains(t, pruned, "2.0.1")
+}
+
+func TestPlanUpgrade_MonorepoScopedTag(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+	worktree, err := repo.Worktree()
+	require.NoError(t, err)
+	sig := &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()}
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# test"), 0600))
+	_, err = worktree.Add("README.md")
+	require.NoError(t, err)
+	commit, err := worktree.Commit("initial", &git.CommitOptions{Author: sig, Committer: sig})
+	require.NoError(t, err)
+
+	_, err = repo.CreateTag("modules/vpc/v1.0.0", commit, nil)
+	require.NoError(t, err)
+	_, err = repo.CreateTag("modules/vpc/v1.1.0", commit, nil)
+	require.NoError(t, err)
+	_, err = repo.CreateTag("modules/vpc/v2.0.0", commit, nil)
+	require.NoError(t, err)
+
+	plan, err := NewUpgradePlanner(nil).PlanUpgrade(context.Background(), dir+"//modules/vpc", "1.0.0", "2.0.0")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"1.0.0", "v1.1.0", "2.0.0"}, plan)
 }

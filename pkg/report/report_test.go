@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/23skdu/terraform_ast/pkg/blastradius"
 	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/eval"
@@ -198,6 +199,13 @@ func TestFindingsAreRenderedInEveryFormat(t *testing.T) {
 				Remediation: "Keep location unchanged",
 			},
 		},
+		AddressShifts: []ast.ResourceAddressShift{
+			{
+				OldAddress: ast.ResourceAddress{Type: "aws_s3_bucket", Name: "b1"},
+				NewAddress: ast.ResourceAddress{Type: "aws_s3_bucket", Name: "b2"},
+				Reason:     "renamed",
+			},
+		},
 		BlastRadius: &blastradius.BlastRadiusReport{
 			SearchDir:             "/app",
 			WrapperIdentifier:     "mod",
@@ -214,11 +222,13 @@ func TestFindingsAreRenderedInEveryFormat(t *testing.T) {
 	d := sampleDiffReport()
 	text := RenderText(d, findings)
 	assert.Contains(t, text, "STATE DESTRUCTION & RECREATION HAZARDS")
+	assert.Contains(t, text, "RESOURCE ADDRESS SHIFTS (1):")
 	assert.NotContains(t, text, "recreation_hazards")
 
 	w := sampleWrapperReport()
 	wrapped := RenderWrapperText(w, findings)
 	assert.Contains(t, wrapped, "STATE DESTRUCTION & RECREATION HAZARDS")
+	assert.Contains(t, wrapped, "RESOURCE ADDRESS SHIFTS (1):")
 	assert.Contains(t, wrapped, "BLAST-RADIUS DOWNSTREAM CONSUMER ANALYSIS")
 
 	dJSON := RenderJSON(d, findings)

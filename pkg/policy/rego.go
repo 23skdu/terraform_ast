@@ -2,12 +2,14 @@ package policy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	opaast "github.com/open-policy-agent/opa/v1/ast"
 	"github.com/open-policy-agent/opa/v1/rego"
 )
 
@@ -104,7 +106,10 @@ func ParseRego(src string) (*RegoPolicy, error) {
 
 			cond, err := parseCondition(trimmed)
 			if err != nil {
-				return nil, fmt.Errorf("line %d: %w", lineNum+1, err)
+				if strings.Contains(err.Error(), "unrecognized policy field") || (!strings.Contains(trimmed, " ") && !strings.Contains(trimmed, "(")) {
+					return nil, fmt.Errorf("line %d: %w", lineNum+1, err)
+				}
+				continue
 			}
 			currentRule.Conditions = append(currentRule.Conditions, cond)
 		}
@@ -114,11 +119,32 @@ func ParseRego(src string) (*RegoPolicy, error) {
 		policy.Rules = append(policy.Rules, *currentRule)
 	}
 
+	prepSrc := policy.Source
+	if !strings.Contains(prepSrc, "package ") {
+		prepSrc = "package " + policy.Package + "\n" + prepSrc
+	}
+	ver := selectRegoVersion(prepSrc)
+	_, err := rego.New(
+		rego.Query("data."+policy.Package),
+		rego.Module("policy.rego", prepSrc),
+		rego.SetRegoVersion(ver),
+	).PrepareForEval(context.Background())
+	if err != nil && len(policy.Rules) == 0 {
+		return nil, fmt.Errorf("invalid rego policy: %w", err)
+	}
+
 	if len(policy.Rules) == 0 {
 		return nil, fmt.Errorf("no valid rules found in Rego policy")
 	}
 
 	return policy, nil
+}
+
+func selectRegoVersion(src string) opaast.RegoVersion {
+	if strings.Contains(src, "import rego.v1") || strings.Contains(src, "contains") || strings.Contains(src, " if ") || strings.Contains(src, " if{") {
+		return opaast.RegoV1
+	}
+	return opaast.RegoV0
 }
 
 func parseCondition(condStr string) (RegoCondition, error) {
@@ -127,9 +153,12 @@ func parseCondition(condStr string) (RegoCondition, error) {
 	for _, op := range ops {
 		if strings.Contains(condStr, op) {
 			parts := strings.SplitN(condStr, op, 2)
-			field := strings.TrimSpace(parts[0])
+			rawField := strings.TrimSpace(parts[0])
 			val := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
-			field = strings.TrimPrefix(field, "input.")
+			if !strings.HasPrefix(rawField, "input.") {
+				return RegoCondition{}, fmt.Errorf("non-input condition expression: %s", condStr)
+			}
+			field := strings.TrimPrefix(rawField, "input.")
 
 			validFields := map[string]struct{}{
 				"breaking_changes": {},
@@ -162,6 +191,19 @@ func EvaluateRego(policy *RegoPolicy, input Input) []Violation {
 		"is_downgrade":     input.IsDowngrade,
 		"bump_type":        input.BumpType,
 	}
+	if input.Report != nil {
+		inputMap["report"] = input.Report
+		if reportBytes, err := json.Marshal(input.Report); err == nil {
+			var reportMap map[string]any
+			if err := json.Unmarshal(reportBytes, &reportMap); err == nil {
+				for k, v := range reportMap {
+					if _, exists := inputMap[k]; !exists {
+						inputMap[k] = v
+					}
+				}
+			}
+		}
+	}
 
 	violations, err := EvaluateRegoArbitrary(context.Background(), policy, inputMap)
 	if err == nil && len(violations) > 0 {
@@ -169,6 +211,9 @@ func EvaluateRego(policy *RegoPolicy, input Input) []Violation {
 	}
 
 	for _, rule := range policy.Rules {
+		if len(rule.Conditions) == 0 {
+			continue
+		}
 		matched := true
 		for _, cond := range rule.Conditions {
 			if !matchesCondition(cond, input) {
@@ -195,18 +240,17 @@ func EvaluateRegoArbitrary(ctx context.Context, policy *RegoPolicy, input any) (
 	if policy == nil || policy.Source == "" {
 		return nil, nil
 	}
-	src := policy.Source
-	if !strings.Contains(src, "import rego.v1") && !strings.Contains(src, "import future.keywords") {
-		if strings.Contains(src, "contains") || strings.Contains(src, " if ") || strings.Contains(src, " if{") {
-			pkgHeader := "package " + policy.Package
-			src = strings.Replace(src, pkgHeader, pkgHeader+"\nimport rego.v1\n", 1)
-		}
+	prepSrc := policy.Source
+	if !strings.Contains(prepSrc, "package ") {
+		prepSrc = "package " + policy.Package + "\n" + prepSrc
 	}
+	ver := selectRegoVersion(prepSrc)
 	queryStr := fmt.Sprintf("data.%s", policy.Package)
 	r := rego.New(
 		rego.Query(queryStr),
-		rego.Module("policy.rego", src),
+		rego.Module("policy.rego", prepSrc),
 		rego.Input(input),
+		rego.SetRegoVersion(ver),
 	)
 	rs, err := r.Eval(ctx)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/23skdu/terraform_ast/pkg/codemod"
+	"github.com/23skdu/terraform_ast/pkg/registry"
 )
 
 // Request represents a JSON-RPC 2.0 request or notification.
@@ -245,7 +247,9 @@ func (s *Server) HandleRequest(req Request) (*Response, *Notification) {
 		if !isRequest {
 			return nil, nil
 		}
-		return &Response{JSONRPC: "2.0", ID: req.ID, Result: s.codeActions()}, nil
+		var params CodeActionParams
+		_ = json.Unmarshal(req.Params, &params)
+		return &Response{JSONRPC: "2.0", ID: req.ID, Result: s.codeActionsFor(params)}, nil
 
 	case "workspace/executeCommand":
 		if !isRequest {
@@ -296,33 +300,67 @@ func (s *Server) publish(uri string) *Notification {
 	}
 }
 
-// codeActions builds the quick fixes the server can actually perform. Each command is
-// registered in executeCommandProvider, so a client can run it.
+// codeActions builds the quick fixes the server can actually perform.
 func (s *Server) codeActions() []CodeAction {
-	actions := []CodeAction{}
-	for _, def := range []struct{ title, description, command string }{
+	return s.codeActionsFor(CodeActionParams{})
+}
+
+// codeActionsFor builds the quick fixes pre-populated with context from params.
+func (s *Server) codeActionsFor(params CodeActionParams) []CodeAction {
+	dir := "."
+	targetMod := ""
+	if params.TextDocument.URI != "" {
+		filePath := strings.TrimPrefix(params.TextDocument.URI, "file://")
+		if d := filepath.Dir(filePath); d != "" {
+			dir = d
+		}
+		info, err := s.inspect(filePath, dir)
+		if err == nil && info != nil {
+			for name, mc := range info.ModuleCalls {
+				if mc.Pos.Line > 0 && clampLine(mc.Pos.Line) == params.Range.Start.Line {
+					targetMod = name
+					break
+				}
+			}
+			if targetMod == "" && len(info.ModuleCalls) == 1 {
+				for name := range info.ModuleCalls {
+					targetMod = name
+				}
+			}
+		}
+	}
+
+	actions := []CodeAction{
 		{
-			title:       "Apply Terraform moved {} block migrations",
-			description: "Write a moved {} block file for the selected state addresses",
-			command:     CommandApplyMovedBlocks,
-		},
-		{
-			title:       "Inject missing required module inputs",
-			description: "Add the required upstream inputs that this module call does not pass",
-			command:     CommandAddMissingInputs,
-		},
-	} {
-		// Arguments stay empty: the editor must fill in the state addresses, module name, and
-		// input names it knows about. A server that guessed them would write to the wrong place.
-		actions = append(actions, CodeAction{
-			Title: def.title,
+			Title: "Apply Terraform moved {} block migrations",
 			Kind:  "quickfix",
 			Command: &Command{
-				Title:     def.description,
-				Command:   def.command,
-				Arguments: []interface{}{},
+				Title:   "Write a moved {} block file for the selected state addresses",
+				Command: CommandApplyMovedBlocks,
+				Arguments: []interface{}{
+					ApplyMovedBlocksArgs{
+						From: "",
+						To:   "",
+						Dir:  dir,
+					},
+				},
 			},
-		})
+		},
+		{
+			Title: "Inject missing required module inputs",
+			Kind:  "quickfix",
+			Command: &Command{
+				Title:   "Add the required upstream inputs that this module call does not pass",
+				Command: CommandAddMissingInputs,
+				Arguments: []interface{}{
+					AddMissingInputsArgs{
+						Module: targetMod,
+						Dir:    dir,
+						Inputs: []string{},
+					},
+				},
+			},
+		},
 	}
 	return actions
 }
@@ -344,7 +382,15 @@ func (s *Server) computeDiagnostics(uri string) []Diagnostic {
 	}
 
 	var diags []Diagnostic
-	for name, v := range info.Variables {
+
+	// 1. Variable deprecations (Warning, Severity 2)
+	var varNames []string
+	for name := range info.Variables {
+		varNames = append(varNames, name)
+	}
+	sort.Strings(varNames)
+	for _, name := range varNames {
+		v := info.Variables[name]
 		if v.Deprecated != "" {
 			line := clampLine(v.Pos.Line)
 			diags = append(diags, Diagnostic{
@@ -355,6 +401,46 @@ func (s *Server) computeDiagnostics(uri string) []Diagnostic {
 			})
 		}
 	}
+
+	// 2. ModuleCalls missing source (Error, Severity 1) and unpinned registry sources (Warning, Severity 2)
+	var modNames []string
+	for name := range info.ModuleCalls {
+		modNames = append(modNames, name)
+	}
+	sort.Strings(modNames)
+	for _, name := range modNames {
+		mc := info.ModuleCalls[name]
+		line := clampLine(mc.Pos.Line)
+		if mc.Source == "" {
+			diags = append(diags, Diagnostic{
+				Range:    Range{Start: Position{Line: line, Character: 0}, End: Position{Line: line, Character: 10}},
+				Severity: 1, // Error
+				Source:   "tfastdiff",
+				Message:  fmt.Sprintf("Module call '%s' is missing a source attribute", name),
+			})
+		} else if registry.IsRegistrySource(mc.Source) && strings.TrimSpace(mc.Version) == "" {
+			diags = append(diags, Diagnostic{
+				Range:    Range{Start: Position{Line: line, Character: 0}, End: Position{Line: line, Character: 10}},
+				Severity: 2, // Warning
+				Source:   "tfastdiff",
+				Message:  fmt.Sprintf("Module call '%s' uses an unpinned registry source '%s'", name, mc.Source),
+			})
+		}
+	}
+
+	// 3. Removed blocks with destroy hazard (Warning, Severity 2)
+	for _, rem := range info.RemovedBlocks {
+		if rem.Destroy {
+			line := clampLine(rem.Pos.Line)
+			diags = append(diags, Diagnostic{
+				Range:    Range{Start: Position{Line: line, Character: 0}, End: Position{Line: line, Character: 10}},
+				Severity: 2, // Warning
+				Source:   "tfastdiff",
+				Message:  fmt.Sprintf("Removed block '%s' specifies destroy = true, which will destroy real infrastructure", rem.From),
+			})
+		}
+	}
+
 	return diags
 }
 

@@ -567,3 +567,27 @@ func TestCompareModernBlocks_EncryptionBackendSwap(t *testing.T) {
 	assert.Equal(t, "EncryptionConfigured", report.NewFeatures[0].Category)
 	assert.Equal(t, "aes_gcm", report.NewFeatures[0].Name)
 }
+
+func TestCompare_NewlyAddedRequiredProvider(t *testing.T) {
+	oldMod := &ast.ModuleInfo{
+		RequiredProviders: map[string]ast.ProviderRequirement{},
+	}
+	newMod := &ast.ModuleInfo{
+		RequiredProviders: map[string]ast.ProviderRequirement{
+			"helm": {
+				Source:             "hashicorp/helm",
+				VersionConstraints: []string{">= 2.0.0"},
+			},
+			"aws": {
+				Source:               "hashicorp/aws",
+				VersionConstraints:   []string{">= 5.0.0"},
+				ConfigurationAliases: []string{"aws.west"},
+			},
+		},
+	}
+	report := Compare(oldMod, newMod, "1.0.0", "1.1.0")
+	require.Len(t, report.Warnings, 2)
+	require.Len(t, report.BreakingChanges, 1)
+	assert.Equal(t, "ProviderConfigurationAlias", report.BreakingChanges[0].Category)
+	assert.Equal(t, "aws.west", report.BreakingChanges[0].Name)
+}

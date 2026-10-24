@@ -191,8 +191,34 @@ func CloneOrOpenWithOptions(repoURLOrPath, targetDir string, cfg CloneConfig) (*
 	return repo, nil
 }
 
-// ListSemverTags extracts all semver-compatible tags from a git repository, sorted ascending.
-func ListSemverTags(repo *git.Repository) ([]string, error) {
+// ParseScopedTag extracts a valid semver string and prefix from a tag name,
+// handling monorepo tag formats like "modules/vpc/v1.2.0" or "vpc-v1.2.0".
+func ParseScopedTag(tag string) (version string, prefix string, ok bool) {
+	trimmed := strings.TrimSpace(tag)
+	if semverutil.IsValid(trimmed) {
+		return trimmed, "", true
+	}
+	// Try splitting by '/' (e.g. "modules/vpc/v1.2.0")
+	if idx := strings.LastIndex(trimmed, "/"); idx != -1 {
+		candidate := trimmed[idx+1:]
+		if semverutil.IsValid(candidate) {
+			return candidate, trimmed[:idx], true
+		}
+	}
+	// Try splitting by '-' (e.g. "vpc-v1.2.0")
+	if idx := strings.LastIndex(trimmed, "-"); idx != -1 {
+		candidate := trimmed[idx+1:]
+		if semverutil.IsValid(candidate) {
+			return candidate, trimmed[:idx], true
+		}
+	}
+	return "", "", false
+}
+
+// ListScopedSemverTags extracts semver tags from repo, optionally filtered by scope prefix.
+// If scope is non-empty, tags whose prefix matches scope (e.g. "modules/vpc" or "vpc")
+// are returned. If no tags match the scope, all valid semver tags in the repository are returned.
+func ListScopedSemverTags(repo *git.Repository, scope string) ([]string, error) {
 	if repo == nil {
 		return nil, fmt.Errorf("git repository cannot be nil")
 	}
@@ -207,31 +233,77 @@ func ListSemverTags(repo *git.Repository) ([]string, error) {
 		})
 	}
 
-	valid := semverutil.FilterValid(rawTags)
-	return semverutil.Sort(valid), nil
+	cleanScope := strings.Trim(strings.TrimSpace(scope), "/")
+	var scopedVersions []string
+	var allVersions []string
+
+	for _, tag := range rawTags {
+		ver, prefix, ok := ParseScopedTag(tag)
+		if !ok {
+			continue
+		}
+		allVersions = append(allVersions, ver)
+		if cleanScope != "" {
+			trimmedPrefix := strings.Trim(prefix, "/")
+			if trimmedPrefix == cleanScope || strings.HasSuffix(trimmedPrefix, "/"+cleanScope) || trimmedPrefix == strings.ReplaceAll(cleanScope, "/", "-") {
+				scopedVersions = append(scopedVersions, ver)
+			}
+		}
+	}
+
+	if cleanScope != "" && len(scopedVersions) > 0 {
+		return semverutil.Sort(semverutil.FilterValid(scopedVersions)), nil
+	}
+	return semverutil.Sort(semverutil.FilterValid(allVersions)), nil
+}
+
+// ListSemverTags extracts all semver-compatible tags from a git repository, sorted ascending.
+// It supports both standard semver tags and monorepo component-scoped tags.
+func ListSemverTags(repo *git.Repository) ([]string, error) {
+	return ListScopedSemverTags(repo, "")
+}
+
+func checkoutTag(repo *git.Repository, w *git.Worktree, tagRef *plumbing.Reference) error {
+	tagObj, err := repo.TagObject(tagRef.Hash())
+	var targetHash plumbing.Hash
+	if err == nil && tagObj != nil {
+		targetHash = tagObj.Target
+	} else {
+		targetHash = tagRef.Hash()
+	}
+	return w.Checkout(&git.CheckoutOptions{
+		Hash: targetHash,
+	})
 }
 
 // CheckoutRef checks out a specific tag, branch, or commit hash in the worktree.
+// It also checks out monorepo scoped tags matching the requested semver.
 func CheckoutRef(repo *git.Repository, refName string) error {
 	w, err := repo.Worktree()
 	if err != nil {
 		return fmt.Errorf("failed to obtain worktree: %w", err)
 	}
 
-	// 1. Try checking out by Tag
+	// 1. Try checking out by direct tag name
 	tagRef, err := repo.Tag(refName)
 	if err == nil && tagRef != nil {
-		// Annotated tag vs lightweight tag
-		tagObj, err := repo.TagObject(tagRef.Hash())
-		var targetHash plumbing.Hash
-		if err == nil && tagObj != nil {
-			targetHash = tagObj.Target
-		} else {
-			targetHash = tagRef.Hash()
-		}
-		return w.Checkout(&git.CheckoutOptions{
-			Hash: targetHash,
+		return checkoutTag(repo, w, tagRef)
+	}
+
+	// 1b. Check if any tag matches refName as a scoped semver tag
+	if tagRefs, err := repo.Tags(); err == nil && tagRefs != nil {
+		var matchedRef *plumbing.Reference
+		_ = tagRefs.ForEach(func(ref *plumbing.Reference) error {
+			short := ref.Name().Short()
+			ver, _, ok := ParseScopedTag(short)
+			if ok && semverutil.Compare(ver, refName) == 0 {
+				matchedRef = ref
+			}
+			return nil
 		})
+		if matchedRef != nil {
+			return checkoutTag(repo, w, matchedRef)
+		}
 	}
 
 	// 2. Try checking out by commit Hash

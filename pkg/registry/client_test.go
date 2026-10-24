@@ -660,3 +660,87 @@ func TestParseRegistrySource_InvalidHostInFourPart(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid registry module source format")
 }
+
+func TestParseRegistrySourceWithSubmodule(t *testing.T) {
+	// Standard submodule
+	host, ns, name, prov, sub, err := ParseRegistrySourceWithSubmodule("terraform-aws-modules/eks/aws//modules/karpenter")
+	require.NoError(t, err)
+	assert.Equal(t, "registry.terraform.io", host)
+	assert.Equal(t, "terraform-aws-modules", ns)
+	assert.Equal(t, "eks", name)
+	assert.Equal(t, "aws", prov)
+	assert.Equal(t, "modules/karpenter", sub)
+	assert.Equal(t, "modules/karpenter", SubmodulePath("terraform-aws-modules/eks/aws//modules/karpenter"))
+
+	// Custom host with submodule
+	host, ns, name, prov, sub, err = ParseRegistrySourceWithSubmodule("custom.io/org/mod/cloud//subdir")
+	require.NoError(t, err)
+	assert.Equal(t, "custom.io", host)
+	assert.Equal(t, "org", ns)
+	assert.Equal(t, "mod", name)
+	assert.Equal(t, "cloud", prov)
+	assert.Equal(t, "subdir", sub)
+
+	// SubmodulePath invalid or empty
+	assert.Equal(t, "", SubmodulePath("invalid-format"))
+	assert.Equal(t, "", SubmodulePath("terraform-aws-modules/eks/aws"))
+
+	// Invalid submodules
+	invalid := []string{
+		"terraform-aws-modules/eks/aws//",
+		"terraform-aws-modules/eks/aws///leading-slash",
+		"terraform-aws-modules/eks/aws//sub\\backslash",
+		"terraform-aws-modules/eks/aws//.",
+		"terraform-aws-modules/eks/aws//../escape",
+		"terraform-aws-modules/eks/aws//invalid@char",
+	}
+	for _, inv := range invalid {
+		_, _, _, _, _, err := ParseRegistrySourceWithSubmodule(inv)
+		require.Error(t, err, "expected error for %s", inv)
+	}
+}
+
+func TestDownloadModule_SubmoduleExtraction(t *testing.T) {
+	tarGzBytes := createTestTarGz(t, map[string]string{
+		"main.tf":                   "# root module\n",
+		"modules/karpenter/main.tf": "# karpenter submodule\n",
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/gzip")
+		_, _ = w.Write(tarGzBytes)
+	}))
+	defer server.Close()
+
+	client := NewClient(nil)
+	client.BaseURL = server.URL
+
+	destDir := t.TempDir()
+	// Submodule exists in archive
+	err := client.DownloadModule(context.Background(), "hashicorp/vault/aws//modules/karpenter", "1.0.0", destDir)
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(destDir, "modules/karpenter/main.tf"))
+
+	// Submodule does NOT exist in archive
+	destDir2 := t.TempDir()
+	err = client.DownloadModule(context.Background(), "hashicorp/vault/aws//modules/nonexistent", "1.0.0", destDir2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not contain submodule directory")
+
+	// Submodule exists but is a file, not a directory
+	destDir3 := t.TempDir()
+	err = client.DownloadModule(context.Background(), "hashicorp/vault/aws//main.tf", "1.0.0", destDir3)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not contain submodule directory")
+
+	// Corrupt archive body in DownloadModule triggers extractTarGz error
+	badTarServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/gzip")
+		_, _ = w.Write([]byte("not a valid gzip archive"))
+	}))
+	defer badTarServer.Close()
+	badTarClient := NewClient(nil)
+	badTarClient.BaseURL = badTarServer.URL
+	err = badTarClient.DownloadModule(context.Background(), "hashicorp/vault/aws", "1.0.0", t.TempDir())
+	require.Error(t, err)
+}

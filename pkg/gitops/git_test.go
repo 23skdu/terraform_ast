@@ -303,6 +303,73 @@ func TestListSemverTags(t *testing.T) {
 	assert.Empty(t, emptyTags)
 }
 
+func TestParseScopedTag(t *testing.T) {
+	v, p, ok := ParseScopedTag("v1.2.3")
+	assert.True(t, ok)
+	assert.Equal(t, "v1.2.3", v)
+	assert.Equal(t, "", p)
+
+	v, p, ok = ParseScopedTag("modules/vpc/v2.1.0")
+	assert.True(t, ok)
+	assert.Equal(t, "v2.1.0", v)
+	assert.Equal(t, "modules/vpc", p)
+
+	v, p, ok = ParseScopedTag("vpc-v3.0.0")
+	assert.True(t, ok)
+	assert.Equal(t, "v3.0.0", v)
+	assert.Equal(t, "vpc", p)
+
+	_, _, ok = ParseScopedTag("invalid-non-semver")
+	assert.False(t, ok)
+
+	_, _, ok = ParseScopedTag("modules/vpc/not-semver")
+	assert.False(t, ok)
+}
+
+func TestListScopedSemverTags_Monorepo(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	require.NoError(t, err)
+	worktree, err := repo.Worktree()
+	require.NoError(t, err)
+	sig := &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()}
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("# test"), 0600))
+	_, err = worktree.Add("README.md")
+	require.NoError(t, err)
+	commit, err := worktree.Commit("initial", &git.CommitOptions{Author: sig, Committer: sig})
+	require.NoError(t, err)
+
+	// Create scoped tags
+	_, err = repo.CreateTag("modules/vpc/v1.0.0", commit, nil)
+	require.NoError(t, err)
+	_, err = repo.CreateTag("modules/vpc/v1.1.0", commit, nil)
+	require.NoError(t, err)
+	_, err = repo.CreateTag("eks-v2.0.0", commit, nil)
+	require.NoError(t, err)
+	_, err = repo.CreateTag("not-a-tag", commit, nil)
+	require.NoError(t, err)
+
+	// Scoped to modules/vpc
+	vpcTags, err := ListScopedSemverTags(repo, "modules/vpc")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"v1.0.0", "v1.1.0"}, vpcTags)
+
+	// Scoped to eks
+	eksTags, err := ListScopedSemverTags(repo, "eks")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"v2.0.0"}, eksTags)
+
+	// Scope with no matching tags falls back to all
+	allTags, err := ListScopedSemverTags(repo, "nonexistent")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"v1.0.0", "v1.1.0", "v2.0.0"}, allTags)
+
+	// Checkout scoped tag by semver
+	err = CheckoutRef(repo, "v1.1.0")
+	require.NoError(t, err)
+}
+
 func TestCheckoutRef(t *testing.T) {
 	repoDir, repo := createTestRepoWithTags(t)
 

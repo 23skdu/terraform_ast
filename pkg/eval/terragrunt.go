@@ -377,7 +377,10 @@ func resolveLocalAttributes(body *hclsyntax.Body, inherited map[string]cty.Value
 			attr := attrs[name]
 			ctx := &hcl.EvalContext{
 				Functions: functions,
-				Variables: map[string]cty.Value{"local": localsObject(resolved)},
+				Variables: map[string]cty.Value{
+					"local":      localsObject(resolved),
+					"dependency": terragruntDependencies(body),
+				},
 			}
 			value, diags := attr.Expr.Value(ctx)
 			if diags.HasErrors() || value.IsNull() || !value.IsKnown() {
@@ -396,6 +399,40 @@ func resolveLocalAttributes(body *hclsyntax.Body, inherited map[string]cty.Value
 	return resolved, incomplete
 }
 
+// terragruntDependencies builds a cty object representing declared dependency blocks,
+// populating outputs with declared mock_outputs or fallback mock values.
+func terragruntDependencies(body *hclsyntax.Body) cty.Value {
+	deps := make(map[string]cty.Value)
+	for _, block := range body.Blocks {
+		if block.Type != "dependency" || len(block.Labels) == 0 {
+			continue
+		}
+		depName := block.Labels[0]
+		if mockAttr, exists := block.Body.Attributes["mock_outputs"]; exists {
+			val, diags := mockAttr.Expr.Value(&hcl.EvalContext{
+				Functions: StandardFunctions(),
+			})
+			if !diags.HasErrors() && val.IsKnown() && !val.IsNull() && val.Type().IsObjectType() {
+				deps[depName] = cty.ObjectVal(map[string]cty.Value{
+					"outputs": val,
+				})
+				continue
+			}
+		}
+		deps[depName] = cty.ObjectVal(map[string]cty.Value{
+			"outputs": cty.ObjectVal(map[string]cty.Value{
+				"id":   cty.StringVal("mock-id"),
+				"name": cty.StringVal("mock-name"),
+				"arn":  cty.StringVal("mock-arn"),
+			}),
+		})
+	}
+	if len(deps) == 0 {
+		return cty.EmptyObjectVal
+	}
+	return cty.ObjectVal(deps)
+}
+
 // terragruntLocalAttributes collects the attributes of every locals block in a config.
 func terragruntLocalAttributes(body *hclsyntax.Body) map[string]*hclsyntax.Attribute {
 	attrs := make(map[string]*hclsyntax.Attribute)
@@ -411,7 +448,7 @@ func terragruntLocalAttributes(body *hclsyntax.Body) map[string]*hclsyntax.Attri
 }
 
 // ReadTerragruntInputsWithContext resolves the inputs of a Terragrunt config using a context built
-// from that config's own locals and its include chain.
+// from that config's own locals, dependency blocks, and its include chain.
 func ReadTerragruntInputsWithContext(body *hclsyntax.Body, src []byte, configPath string, opts TerragruntOptions) (map[string]string, error) {
 	opts.ConfigDir = filepath.Dir(configPath)
 
@@ -423,7 +460,10 @@ func ReadTerragruntInputsWithContext(body *hclsyntax.Body, src []byte, configPat
 
 	ctx := &hcl.EvalContext{
 		Functions: mergeFunctions(StandardFunctions(), TerragruntFunctions(opts)),
-		Variables: map[string]cty.Value{"local": localsObject(TerragruntLocals(body, src, opts))},
+		Variables: map[string]cty.Value{
+			"local":      localsObject(TerragruntLocals(body, src, opts)),
+			"dependency": terragruntDependencies(body),
+		},
 	}
 
 	attr, exists := body.Attributes["inputs"]

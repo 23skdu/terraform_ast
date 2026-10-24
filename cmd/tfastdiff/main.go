@@ -363,6 +363,9 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 			return 1
 		}
 		targetDir = tmpTarget
+		if sub := registry.SubmodulePath(upstreamPath); sub != "" {
+			targetDir = filepath.Join(tmpTarget, sub)
+		}
 	} else if isGitURL(upstreamPath) || (newVersion != "" && isGitRepo(upstreamPath)) {
 		vlog("Checking out target upstream version %s from %s", newVersion, upstreamPath)
 		tmpTarget, err := gitops.GlobalCache.GetOrExtract(upstreamPath, newVersion, newCachedDir("tf_upstream_target_*"))
@@ -402,6 +405,9 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 				return 1
 			}
 			pinnedDir = tmpPinned
+			if sub := registry.SubmodulePath(upstreamPath); sub != "" {
+				pinnedDir = filepath.Join(tmpPinned, sub)
+			}
 		} else if isGitURL(upstreamPath) || isGitRepo(upstreamPath) {
 			vlog("Checking out pinned upstream version %s from %s", oldVersion, upstreamPath)
 			tmpPinned, err := gitops.GlobalCache.GetOrExtract(upstreamPath, oldVersion, newCachedDir("tf_upstream_pinned_*"))
@@ -426,6 +432,7 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		policyInput := policy.Input{
 			BreakingChanges: res.TotalBreaking,
 			Warnings:        res.TotalWarnings,
+			Report:          res,
 		}
 		if res.UpstreamDiff != nil {
 			policyInput.BreakingChanges += res.UpstreamDiff.TotalBreaking
@@ -452,7 +459,23 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 			_, _ = fmt.Fprintf(stderr, "Error generating fix preview: %v\n", err)
 			return 1
 		}
-		if preview == "" {
+		var movedBlocksPreview string
+		if pinnedInfo != nil && targetInfo != nil {
+			shifts := ast.DetectAddressShifts(pinnedInfo, targetInfo)
+			if len(shifts) > 0 {
+				blocks := codemod.SynthesizeMovedBlocksForShifts(shifts)
+				if len(blocks) > 0 {
+					movedTf := filepath.Join(wrapperPath, "moved.tf")
+					movedBlocksPreview = fmt.Sprintf("--- %s\n+++ %s\n%s",
+						movedTf, movedTf, codemod.FormatMovedBlocks(blocks))
+				}
+			}
+		}
+		if preview != "" && movedBlocksPreview != "" {
+			preview = preview + "\n" + movedBlocksPreview
+		} else if preview == "" && movedBlocksPreview != "" {
+			preview = movedBlocksPreview
+		} else if preview == "" {
 			preview = "No automatic patch can be generated for the detected findings.\n" +
 				"Only removed arguments in the wrapper's Terraform module block are currently patchable; no files were changed.\n"
 		}
@@ -480,6 +503,17 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 			_, _ = fmt.Fprintf(stderr, "Error applying fixes: %v\n", err)
 			return 1
 		}
+		if pinnedInfo != nil && targetInfo != nil {
+			shifts := ast.DetectAddressShifts(pinnedInfo, targetInfo)
+			if len(shifts) > 0 {
+				movedFile := filepath.Join(wrapperPath, "moved.tf")
+				if err := codemod.SynthesizeAndWriteMovedBlocks(movedFile, shifts); err != nil {
+					_, _ = fmt.Fprintf(stderr, "Error writing moved blocks: %v\n", err)
+					return 1
+				}
+				modified = append(modified, movedFile)
+			}
+		}
 		var msg string
 		if len(modified) == 0 {
 			msg = "No fixes were applied; no patchable arguments found.\n"
@@ -502,6 +536,9 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 	canSafelyUpdate := res.CanSafelyUpdate
 
 	findings := report.Findings{}
+	if pinnedInfo != nil && targetInfo != nil {
+		findings.AddressShifts = ast.DetectAddressShifts(pinnedInfo, targetInfo)
+	}
 	if checkRecreation {
 		if dynamicRegistry == nil {
 			dynamicRegistry, _ = recreation.AutoDiscoverSchemas(wInfo, ast.GetPersistentCacheDir())
@@ -604,6 +641,9 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 			return 1
 		}
 		actualOld = tmpOld
+		if sub := registry.SubmodulePath(oldPath); sub != "" {
+			actualOld = filepath.Join(tmpOld, sub)
+		}
 	} else if isGitURL(oldPath) || (oldVersion != "" && isGitRepo(oldPath)) {
 		vlog("Checking out old repository version %s from %s", oldVersion, oldPath)
 		tmpOld, err := gitops.GlobalCache.GetOrExtract(oldPath, oldVersion, newCachedDir("tf_old_*"))
@@ -642,6 +682,9 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 			return 1
 		}
 		actualNew = tmpNew
+		if sub := registry.SubmodulePath(newPath); sub != "" {
+			actualNew = filepath.Join(tmpNew, sub)
+		}
 	} else if isGitURL(newPath) || (newVersion != "" && isGitRepo(newPath)) {
 		vlog("Checking out new repository version %s from %s", newVersion, newPath)
 		tmpNew, err := gitops.GlobalCache.GetOrExtract(newPath, newVersion, newCachedDir("tf_new_*"))
@@ -693,6 +736,7 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 					Warnings:        step.Diff.TotalWarnings,
 					IsDowngrade:     step.Diff.IsDowngrade,
 					BumpType:        string(step.Diff.BumpType),
+					Report:          step.Diff,
 				})...)
 			}
 		}
@@ -703,6 +747,7 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 					Warnings:        step.Diff.TotalWarnings,
 					IsDowngrade:     step.Diff.IsDowngrade,
 					BumpType:        string(step.Diff.BumpType),
+					Report:          step.Diff,
 				})...)
 			}
 		}
@@ -730,6 +775,7 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 			Warnings:        diffReport.TotalWarnings,
 			IsDowngrade:     diffReport.IsDowngrade,
 			BumpType:        string(diffReport.BumpType),
+			Report:          diffReport,
 		}
 		if policyConfig != nil {
 			diffReport.PolicyViolations = append(diffReport.PolicyViolations, policy.Evaluate(policyConfig, input)...)
@@ -739,7 +785,9 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		}
 	}
 
-	findings := report.Findings{}
+	findings := report.Findings{
+		AddressShifts: ast.DetectAddressShifts(oldInfo, newInfo),
+	}
 	if checkRecreation {
 		if dynamicRegistry == nil {
 			dynamicRegistry, _ = recreation.AutoDiscoverSchemas(newInfo, ast.GetPersistentCacheDir())
