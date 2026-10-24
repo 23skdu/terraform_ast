@@ -117,18 +117,32 @@ flowchart TD
 
     subgraph FUZZ["4. Differential & Property Fuzzing"]
         COV_GATE -->|Yes| SMOKE["Fuzz Smoke Run (10s per target)"]
-        SMOKE --> F_AST["pkg/ast (FuzzInspect, FuzzCheckTypeCompatibility, FuzzParseModernHCLBlocks)"]
+        SMOKE --> F_CMD["cmd/tfastdiff (FuzzCLI)"]
+        SMOKE --> F_AST["pkg/ast (FuzzInspect, FuzzCheckTypeCompatibility, FuzzParseModernHCLBlocks...)"]
+        SMOKE --> F_DIFF["pkg/diff (FuzzCompare)"]
+        SMOKE --> F_GITOPS["pkg/gitops (FuzzParseGitSource, FuzzResolveSubDir)"]
+        SMOKE --> F_PLAN["pkg/planner (FuzzAnalyzeUpgradePath)"]
+        SMOKE --> F_POL["pkg/policy (FuzzPolicyDecode, FuzzParseRego)"]
+        SMOKE --> F_REP["pkg/report (FuzzRenderReports)"]
+        SMOKE --> F_WRAP["pkg/wrapper (FuzzAnalyzeWrapper)"]
         SMOKE --> F_REG["pkg/registry (FuzzIsRegistrySource, FuzzParseRegistrySource)"]
         SMOKE --> F_LSP["pkg/lsp (FuzzLSPServe)"]
-        SMOKE --> F_BLAST["pkg/blastradius (FuzzDiscoverCallSites, FuzzTerragruntInputKey)"]
-        SMOKE --> F_CODE["pkg/codemod (FuzzFormatMovedBlocks, FuzzUnifiedReplacement)"]
-        SMOKE --> F_SEM["pkg/semverutil (FuzzDetermineBumpType, FuzzSort)"]
+        SMOKE --> F_BLAST["pkg/blastradius (FuzzDiscoverCallSites, FuzzTerragruntInputKey...)"]
+        SMOKE --> F_CODE["pkg/codemod (FuzzFormatMovedBlocks, FuzzUnifiedReplacement...)"]
+        SMOKE --> F_SEM["pkg/semverutil (FuzzDetermineBumpType, FuzzSort, FuzzNormalize...)"]
         SMOKE --> F_REC["pkg/recreation (FuzzParseProviderSchema)"]
         SMOKE --> F_EVAL["pkg/eval (FuzzEvaluateExpression)"]
     end
 
     subgraph MERGE["5. Gate Verdict & CI Release"]
-        F_AST --> PASS_ALL["All 19 Fuzz Targets Clean"]
+        F_CMD --> PASS_ALL["All 28 Fuzz Targets Clean"]
+        F_AST --> PASS_ALL
+        F_DIFF --> PASS_ALL
+        F_GITOPS --> PASS_ALL
+        F_PLAN --> PASS_ALL
+        F_POL --> PASS_ALL
+        F_REP --> PASS_ALL
+        F_WRAP --> PASS_ALL
         F_REG --> PASS_ALL
         F_LSP --> PASS_ALL
         F_BLAST --> PASS_ALL
@@ -153,8 +167,9 @@ flowchart TD
 4. **100.0% Statement Coverage Gate**:
    - Evaluated atomically via `go test -covermode=atomic -coverprofile=... ./...`.
    - Rejects the build if a single statement across all packages remains uncovered.
-5. **Differential & Property Fuzzing**:
-   - Executes smoke fuzzing across all 19 native Go fuzz targets across AST parsing, semver calculation, Terragrunt evaluation, LSP message framing, and codemod replacements.
+5. **Universal Fuzz Testing Across All Packages**:
+   - Executes fuzz testing across all 28 native Go fuzz targets spanning every package in the repository (`cmd/tfastdiff`, `pkg/ast`, `pkg/blastradius`, `pkg/codemod`, `pkg/diff`, `pkg/eval`, `pkg/gitops`, `pkg/lsp`, `pkg/planner`, `pkg/policy`, `pkg/recreation`, `pkg/registry`, `pkg/report`, `pkg/semverutil`, `pkg/wrapper`).
+
 6. **Pre-Commit Hook (`.pre-commit-hooks.yaml`)**:
    - Executes `tfastdiff --wrapper . --exit-code` on wrapper directories to catch backward-incompatible changes before code is staged or pushed.
 
