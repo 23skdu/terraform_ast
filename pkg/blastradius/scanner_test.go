@@ -808,13 +808,17 @@ func TestEvaluateCallSiteImpact_HazardSurvivesWithoutMatchingWrapperIssue(t *tes
 		},
 	}
 
+	registry := recreation.NewDynamicHazardRegistry(nil)
+	registry.Register("name", recreation.HazardDescriptor{Impact: "Resource names are immutable and force replacement"})
+	registry.Register("project_id", recreation.HazardDescriptor{Impact: "Project ID is immutable and force replacement"})
+
 	impact := evaluateCallSiteImpact(callSite, nil, &wrapper.WrapperCompatibilityReport{
 		TargetModuleName: "gke",
 		// A clean audit: the upstream still accepts every input the consumer passes.
 		Issues:        []wrapper.WrapperIssue{},
 		TotalBreaking: 0,
 		Verdict:       "SAFE_TO_PIN",
-	}, nil)
+	}, registry)
 
 	assert.Len(t, impact.RecreationHazards, 2,
 		"project_id and name are immutable GKE attributes and must be reported")
@@ -826,6 +830,42 @@ func TestEvaluateCallSiteImpact_HazardSurvivesWithoutMatchingWrapperIssue(t *tes
 
 // TestEvaluateCallSiteImpact_HazardReportedOncePerInput confirms a single hazard entry per
 // input, which the removed issue-matching loop could duplicate.
+func TestEvaluateCallSiteImpact_MissingRequiredNotAttributedWhenUnexposed(t *testing.T) {
+	callSite := CallSite{
+		Dir:          "/consumers/prod",
+		File:         "/consumers/prod/main.tf",
+		ModuleName:   "primary_cluster",
+		PassedInputs: map[string]string{},
+	}
+	audit := &wrapper.WrapperCompatibilityReport{
+		TargetModuleName: "gke",
+		Issues: []wrapper.WrapperIssue{
+			{Category: "MissingRequiredInput", Target: "secret_input", Severity: diff.SeverityBreaking},
+		},
+	}
+	wrapperMod := &ast.ModuleInfo{Variables: map[string]ast.VariableDef{}}
+	impact := evaluateCallSiteImpact(callSite, wrapperMod, audit, nil)
+	assert.NotContains(t, impact.MissingRequiredInputs, "secret_input")
+}
+
+func TestEvaluateCallSiteImpact_AttributeChangedInAudit(t *testing.T) {
+	audit := &wrapper.WrapperCompatibilityReport{
+		TargetModuleName: "gke",
+		Issues:           []wrapper.WrapperIssue{{Target: "foo"}},
+		UpstreamDiff: &diff.DiffReport{
+			BreakingChanges: []diff.DifferenceItem{{Name: "bar"}},
+			Warnings:        []diff.DifferenceItem{{Name: "baz"}},
+			NewFeatures:     []diff.DifferenceItem{{Name: "qux"}},
+		},
+	}
+	assert.True(t, attributeChangedInAudit(audit, "foo"))
+	assert.True(t, attributeChangedInAudit(audit, "bar"))
+	assert.True(t, attributeChangedInAudit(audit, "baz"))
+	assert.True(t, attributeChangedInAudit(audit, "qux"))
+	assert.False(t, attributeChangedInAudit(audit, "nope"))
+	assert.False(t, attributeChangedInAudit(nil, "foo"))
+}
+
 func TestEvaluateCallSiteImpact_HazardReportedOncePerInput(t *testing.T) {
 	impact := evaluateCallSiteImpact(CallSite{
 		PassedInputs: map[string]string{"name": "prod"},

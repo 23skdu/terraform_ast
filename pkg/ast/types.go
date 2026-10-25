@@ -30,6 +30,7 @@ type OutputDef struct {
 	Sensitive   bool               `json:"sensitive"`
 	Type        string             `json:"type,omitempty"`
 	Deprecated  string             `json:"deprecated,omitempty"`
+	Value       string             `json:"value,omitempty"`
 	Pos         tfconfig.SourcePos `json:"pos"`
 }
 

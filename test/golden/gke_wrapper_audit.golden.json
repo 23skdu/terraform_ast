@@ -180,7 +180,9 @@
     "Remove argument 'ip_range_services' from module \"gke\" block in wrapper",
     "Update variable \"ip_range_pods\" in wrapper to type = list(string)"
   ],
-  "total_breaking": 5,
-  "total_warnings": 1,
+  "total_breaking": 10,
+  "total_warnings": 3,
+  "upstream_breaking": 5,
+  "upstream_warnings": 2,
   "summary": "CANNOT SAFELY PIN: Wrapper has 5 breaking issue(s) with upstream v30.0.0. Resolve remediation steps before pinning."
 }

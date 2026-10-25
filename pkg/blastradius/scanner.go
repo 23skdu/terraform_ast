@@ -50,6 +50,7 @@ type BlastRadiusReport struct {
 	TotalCallSitesScanned int                `json:"total_call_sites_scanned"`
 	ImpactedRootModules   []RootModuleImpact `json:"impacted_root_modules"`
 	HighestRisk           string             `json:"highest_risk"`
+	RiskDistribution      map[string]int     `json:"risk_distribution,omitempty"`
 	CanSafelyUpdateAll    bool               `json:"can_safely_update_all"`
 	Summary               string             `json:"summary"`
 }
@@ -109,6 +110,7 @@ func ScanDirectoryWithTaint(
 		TotalCallSitesScanned: len(callSites),
 		CanSafelyUpdateAll:    true,
 		HighestRisk:           "NONE",
+		RiskDistribution:      make(map[string]int),
 	}
 
 	for _, cs := range callSites {
@@ -119,6 +121,7 @@ func ScanDirectoryWithTaint(
 		if riskRank(impact.RiskScore) > riskRank(report.HighestRisk) {
 			report.HighestRisk = impact.RiskScore
 		}
+		report.RiskDistribution[impact.RiskScore]++
 		report.ImpactedRootModules = append(report.ImpactedRootModules, impact)
 	}
 
@@ -606,8 +609,14 @@ func evaluateCallSiteImpact(
 				impact.CanSafelyUpdate = false
 			}
 		}
-		// 2. Check for missing required inputs
+		// 2. Check for missing required inputs. Attribute to this consumer only when the
+		// wrapper actually exposes the input (otherwise the wrapper, not the consumer, is at fault).
 		if issue.Category == "MissingRequiredInput" || (strings.HasPrefix(issue.Category, "Variable") && strings.Contains(issue.Description, "required")) {
+			if wrapperMod != nil {
+				if _, exposed := wrapperMod.Variables[issue.Target]; !exposed {
+					continue
+				}
+			}
 			if _, passed := cs.PassedInputs[issue.Target]; !passed {
 				impact.MissingRequiredInputs = append(impact.MissingRequiredInputs, issue.Target)
 				impact.CanSafelyUpdate = false
@@ -647,20 +656,32 @@ func evaluateCallSiteImpact(
 	}
 	sort.Strings(passedNames)
 
-	lookup := func(name string) (recreation.HazardDescriptor, bool) {
+	lookup := func(name string) (recreation.HazardDescriptor, bool, bool) {
 		if registry != nil {
 			if desc, ok := registry.Lookup(name); ok {
-				return desc, true
+				return desc, true, true
 			}
 		}
-		return recreation.LookupHazard(audit.TargetModuleName, name)
+		if desc, ok := recreation.LookupHazard(audit.TargetModuleName, name); ok {
+			return desc, true, false
+		}
+		return recreation.HazardDescriptor{}, false, false
 	}
 
 	for _, inputName := range passedNames {
-		if desc, ok := lookup(inputName); ok {
-			impact.RecreationHazards = append(impact.RecreationHazards, fmt.Sprintf("%s (%s)", inputName, desc.Impact))
-			impact.CanSafelyUpdate = false
+		desc, ok, fromRegistry := lookup(inputName)
+		if !ok {
+			continue
 		}
+		// Evidence gate: only fire a recreation hazard when the attribute is actually part
+		// of the upstream diff or confirmed by the dynamic hazard registry. A bare name
+		// match with no changed input is downgraded (no hazard, LOW risk).
+		evidenceConfirmed := fromRegistry || attributeChangedInAudit(audit, inputName)
+		if !evidenceConfirmed {
+			continue
+		}
+		impact.RecreationHazards = append(impact.RecreationHazards, fmt.Sprintf("%s (%s)", inputName, desc.Impact))
+		impact.CanSafelyUpdate = false
 	}
 	impact.RecreationHazards = dedupeSorted(impact.RecreationHazards)
 	impact.RemovedOutputsReferenced = dedupeSorted(impact.RemovedOutputsReferenced)
@@ -680,6 +701,35 @@ func evaluateCallSiteImpact(
 	}
 
 	return impact
+}
+
+func attributeChangedInAudit(audit *wrapper.WrapperCompatibilityReport, name string) bool {
+	if audit == nil {
+		return false
+	}
+	for _, iss := range audit.Issues {
+		if iss.Target == name {
+			return true
+		}
+	}
+	if audit.UpstreamDiff != nil {
+		for _, bc := range audit.UpstreamDiff.BreakingChanges {
+			if bc.Name == name {
+				return true
+			}
+		}
+		for _, w := range audit.UpstreamDiff.Warnings {
+			if w.Name == name {
+				return true
+			}
+		}
+		for _, nf := range audit.UpstreamDiff.NewFeatures {
+			if nf.Name == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func dedupeSorted(s []string) []string {

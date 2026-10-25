@@ -228,6 +228,16 @@ func RenderWrapperText(w *wrapper.WrapperCompatibilityReport, findings Findings)
 		}
 		sb.WriteString("\n")
 	}
+	if w.UpstreamDiff != nil && len(w.UpstreamDiff.BreakingChanges) > 0 {
+		sb.WriteString(fmt.Sprintf("UPSTREAM BREAKING CHANGES (%d):\n", len(w.UpstreamDiff.BreakingChanges)))
+		for _, item := range w.UpstreamDiff.BreakingChanges {
+			sb.WriteString(fmt.Sprintf("  • [%s] %s: %s\n", item.Category, item.Name, item.Description))
+			if item.Remediation != "" {
+				sb.WriteString(fmt.Sprintf("    Remediation: %s\n", item.Remediation))
+			}
+		}
+		sb.WriteString("\n")
+	}
 	if findings.BlastRadius != nil {
 		sb.WriteString("\n")
 		sb.WriteString(findings.BlastRadius.RenderText())
@@ -294,6 +304,15 @@ func RenderWrapperMarkdown(w *wrapper.WrapperCompatibilityReport, findings ...Fi
 		sb.WriteString("| :--- | :--- | :--- | :--- |\n")
 		for _, feat := range w.NewFeatureAdoptions {
 			sb.WriteString(fmt.Sprintf("| `%s` | `%s` | %s | %s |\n", feat.Category, feat.Target, feat.Description, confidenceText(feat.ConfidenceScore)))
+		}
+		sb.WriteString("\n")
+	}
+	if w.UpstreamDiff != nil && len(w.UpstreamDiff.BreakingChanges) > 0 {
+		sb.WriteString(fmt.Sprintf("### Upstream Breaking Changes (%d)\n\n", len(w.UpstreamDiff.BreakingChanges)))
+		sb.WriteString("| Category | Name | Description | Confidence | Remediation |\n")
+		sb.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")
+		for _, item := range w.UpstreamDiff.BreakingChanges {
+			sb.WriteString(fmt.Sprintf("| `%s` | `%s` | %s | %s | %s |\n", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore), item.Remediation))
 		}
 		sb.WriteString("\n")
 	}

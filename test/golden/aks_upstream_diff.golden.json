@@ -36,6 +36,16 @@
       "remediation": "Provide a required value for 'workload_identity_enabled' in wrapper module call"
     },
     {
+      "category": "VariableDefault",
+      "name": "os_disk_size_gb",
+      "severity": "BREAKING",
+      "confidence_score": 9,
+      "description": "Default value for variable 'os_disk_size_gb' changed",
+      "old_value": "50",
+      "new_value": "100",
+      "remediation": "Review callers that omit 'os_disk_size_gb'; the default no longer matches"
+    },
+    {
       "category": "VariableType",
       "name": "dns_prefix",
       "severity": "BREAKING",
@@ -78,8 +88,8 @@
       "remediation": "Ensure execution environment meets new Terraform Core requirement"
     }
   ],
-  "total_breaking": 4,
+  "total_breaking": 5,
   "total_new_features": 2,
   "total_warnings": 1,
-  "summary": "CANNOT SAFELY UPDATE: Detected 4 breaking change(s) between v7.0.0 and v8.0.0. Wrapper must be updated before pinning."
+  "summary": "CANNOT SAFELY UPDATE: Detected 5 breaking change(s) between v7.0.0 and v8.0.0. Wrapper must be updated before pinning."
 }

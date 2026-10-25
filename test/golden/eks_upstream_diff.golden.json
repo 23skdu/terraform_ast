@@ -43,6 +43,16 @@
       "description": "Input variable 'manage_aws_auth_configmap' was removed in upstream version",
       "old_value": "type=bool, required=false",
       "remediation": "Remove variable 'manage_aws_auth_configmap' from wrapper or module callers before upgrading"
+    },
+    {
+      "category": "VariableDefault",
+      "name": "cluster_version",
+      "severity": "BREAKING",
+      "confidence_score": 9,
+      "description": "Default value for variable 'cluster_version' changed",
+      "old_value": "1.28",
+      "new_value": "1.30",
+      "remediation": "Review callers that omit 'cluster_version'; the default no longer matches"
     }
   ],
   "new_features": [
@@ -87,8 +97,8 @@
       "remediation": "Verify variable values remain valid under widened type"
     }
   ],
-  "total_breaking": 4,
+  "total_breaking": 5,
   "total_new_features": 2,
   "total_warnings": 2,
-  "summary": "CANNOT SAFELY UPDATE: Detected 4 breaking change(s) between v19.0.0 and v20.0.0. Wrapper must be updated before pinning."
+  "summary": "CANNOT SAFELY UPDATE: Detected 5 breaking change(s) between v19.0.0 and v20.0.0. Wrapper must be updated before pinning."
 }

@@ -97,6 +97,7 @@ const (
 	ruleRecreationHazard     = "TF-RECREATION-HAZARD"
 	ruleBlastRadius          = "TF-BLAST-RADIUS-CONSUMER"
 	rulePlanRecreationHazard = "TF-GOLDEN-PLAN-RECREATION-HAZARD"
+	ruleUpstreamBreaking     = "TF-UPSTREAM-BREAKING-CHANGE"
 )
 
 // defaultRules is the SARIF rule catalogue. Each document only advertises the subset of rules for
@@ -142,6 +143,12 @@ var defaultRules = []SARIFRule{
 		ID:               rulePlanRecreationHazard,
 		ShortDescription: SARIFMessageText{Text: "Terraform plan recreation hazard detected"},
 		FullDescription:  SARIFMessageText{Text: "The execution plan contains resources subject to ForceNew destruction/recreation or unmigrated address shifts upon version upgrade."},
+		DefaultConfig:    SARIFRuleConfig{Level: "error"},
+	},
+	{
+		ID:               ruleUpstreamBreaking,
+		ShortDescription: SARIFMessageText{Text: "Upstream breaking change detected"},
+		FullDescription:  SARIFMessageText{Text: "The upstream module upgrade introduces a breaking change that the wrapper must accommodate."},
 		DefaultConfig:    SARIFRuleConfig{Level: "error"},
 	},
 }
@@ -263,6 +270,12 @@ func RenderWrapperSARIF(res *wrapper.WrapperCompatibilityReport, findings Findin
 	results = appendBlastResults(results, findings.BlastRadius)
 	results = appendPolicyResults(results, res.PolicyViolations, artifact)
 	results = appendGoldenPlanResults(results, findings.GoldenPlan)
+	if res.UpstreamDiff != nil {
+		for _, item := range res.UpstreamDiff.BreakingChanges {
+			results = append(results, sarifResult(ruleUpstreamBreaking, "error", artifact,
+				fmt.Sprintf("[UPSTREAM] [%s] %s: %s (Confidence: %s). %s", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore), item.Remediation)))
+		}
+	}
 
 	return renderSARIF(results)
 }

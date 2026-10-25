@@ -135,7 +135,7 @@ flowchart TD
     end
 
     subgraph MERGE["5. Gate Verdict & CI Release"]
-        F_CMD --> PASS_ALL["All 28 Fuzz Targets Clean"]
+        F_CMD --> PASS_ALL["All 29 Fuzz Targets Clean"]
         F_AST --> PASS_ALL
         F_DIFF --> PASS_ALL
         F_GITOPS --> PASS_ALL
@@ -168,7 +168,7 @@ flowchart TD
    - Evaluated atomically via `go test -covermode=atomic -coverprofile=... ./...`.
    - Rejects the build if a single statement across all packages remains uncovered.
 5. **Universal Fuzz Testing Across All Packages**:
-   - Executes fuzz testing across all 28 native Go fuzz targets spanning every package in the repository (`cmd/tfastdiff`, `pkg/ast`, `pkg/blastradius`, `pkg/codemod`, `pkg/diff`, `pkg/eval`, `pkg/gitops`, `pkg/lsp`, `pkg/planner`, `pkg/policy`, `pkg/recreation`, `pkg/registry`, `pkg/report`, `pkg/semverutil`, `pkg/wrapper`).
+   - Executes fuzz testing across all 29 native Go fuzz targets spanning every package in the repository (`cmd/tfastdiff`, `pkg/ast`, `pkg/blastradius`, `pkg/codemod`, `pkg/diff`, `pkg/eval`, `pkg/gitops`, `pkg/lsp`, `pkg/planner`, `pkg/policy`, `pkg/recreation`, `pkg/registry`, `pkg/report`, `pkg/semverutil`, `pkg/wrapper`).
 
 6. **Pre-Commit Hook (`.pre-commit-hooks.yaml`)**:
    - Executes `tfastdiff --wrapper . --exit-code` on wrapper directories to catch backward-incompatible changes before code is staged or pushed.

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
+	"github.com/23skdu/terraform_ast/pkg/diff"
 )
 
 func FuzzAnalyzeWrapper(f *testing.F) {
@@ -62,8 +63,14 @@ func FuzzAnalyzeWrapper(f *testing.F) {
 			t.Fatal("expected non-nil report")
 		}
 
-		if report.TotalBreaking != len(report.Issues) {
-			t.Fatalf("breaking count mismatch: %d vs %d", report.TotalBreaking, len(report.Issues))
+		wrapperBreaking := 0
+		for _, iss := range report.Issues {
+			if iss.Severity == diff.SeverityBreaking {
+				wrapperBreaking++
+			}
+		}
+		if report.TotalBreaking != wrapperBreaking+report.UpstreamBreaking {
+			t.Fatalf("breaking count mismatch: %d vs %d", report.TotalBreaking, wrapperBreaking+report.UpstreamBreaking)
 		}
 	})
 }

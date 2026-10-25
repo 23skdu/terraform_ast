@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
+	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -100,7 +101,8 @@ func TestAnalyzeWrapper_BreakingIssues(t *testing.T) {
 
 	assert.False(t, report.CanSafelyUpdate)
 	assert.Equal(t, "BREAKING_CHANGES_DETECTED", report.Verdict)
-	assert.Equal(t, 4, report.TotalBreaking)
+	assert.Equal(t, 7, report.TotalBreaking)
+	assert.Equal(t, 3, report.UpstreamBreaking)
 	assert.NotEmpty(t, report.RemediationSteps)
 	assert.Equal(t, `version = "30.0.0"`, report.RecommendedPin)
 	assert.Equal(t, "v29.0.0", report.SafePinVersion)
@@ -234,10 +236,18 @@ func TestAnalyzeWrapper_UpstreamBreakingChangesBlockThePin(t *testing.T) {
 
 	report := AnalyzeWrapper(wrapperMod, target, pinned, "v2.0.0", "v1.0.0")
 
-	// The wrapper side is clean...
-	require.Zero(t, report.TotalBreaking, "precondition: the wrapper itself has no breaking issues")
+	// The wrapper side is clean (no wrapper-level issues)...
+	wrapperBreaking := 0
+	for _, iss := range report.Issues {
+		if iss.Severity == diff.SeverityBreaking {
+			wrapperBreaking++
+		}
+	}
+	require.Zero(t, wrapperBreaking, "precondition: the wrapper itself has no breaking issues")
 	require.NotNil(t, report.UpstreamDiff)
 	assert.Equal(t, 1, report.UpstreamDiff.TotalBreaking)
+	assert.Equal(t, 1, report.UpstreamBreaking, "upstream breaking count is tracked separately")
+	assert.Equal(t, 1, report.TotalBreaking, "upstream breaking count is folded into the total")
 
 	// ...but the upstream transition is not, so the pin must be refused.
 	assert.False(t, report.CanSafelyUpdate, "an upstream breaking change must block the pin")

@@ -6,10 +6,7 @@
     {
       "dir": "<WORKSPACE>/test/fixtures/downstream_consumer",
       "module_name": "primary_cluster",
-      "missing_required_inputs": [
-        "cluster_autoscaling_profile",
-        "grant_registry_access"
-      ],
+      "missing_required_inputs": null,
       "removed_inputs_passed": [
         "ip_range_services"
       ],
@@ -18,18 +15,16 @@
       ],
       "recreation_hazards": [
         "ip_range_pods (Secondary pod CIDR range cannot be altered after cluster creation; triggers ForceNew recreation.)",
-        "ip_range_services (Services secondary CIDR range is immutable; removing or modifying it triggers cluster destruction.)",
-        "name (Cluster name is immutable; changing or removing it triggers complete cluster destruction and re-creation.)",
-        "network (VPC network attachment cannot be changed in-place; triggers ForceNew cluster destruction.)",
-        "project_id (GCP Project ID cannot be changed in-place; triggers ForceNew cluster destruction.)",
-        "region (Cluster region cannot be migrated in-place; triggers cluster re-creation.)",
-        "subnetwork (Subnetwork attachment is immutable; altering it destroys and recreates the cluster.)"
+        "ip_range_services (Services secondary CIDR range is immutable; removing or modifying it triggers cluster destruction.)"
       ],
       "risk_score": "CRITICAL",
       "can_safely_update": false
     }
   ],
   "highest_risk": "CRITICAL",
+  "risk_distribution": {
+    "CRITICAL": 1
+  },
   "can_safely_update_all": false,
   "summary": "Scanned 1 downstream call sites; detected breaking impacts with highest risk CRITICAL"
 }

@@ -439,7 +439,17 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 
 			case "output":
 				outName := block.Labels[0]
+				if info.Outputs == nil {
+					info.Outputs = make(map[string]OutputDef)
+				}
 				if valAttr, ok := attrs["value"]; ok {
+					valueExpr := strings.TrimSpace(string(src[valAttr.Expr.Range().Start.Byte:valAttr.Expr.Range().End.Byte]))
+					if out, exists := info.Outputs[outName]; exists {
+						out.Value = valueExpr
+						info.Outputs[outName] = out
+					} else {
+						info.Outputs[outName] = OutputDef{Name: outName, Value: valueExpr}
+					}
 					for _, traversal := range valAttr.Expr.Variables() {
 						if len(traversal) < 2 {
 							continue

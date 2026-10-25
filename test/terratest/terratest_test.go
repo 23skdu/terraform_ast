@@ -170,7 +170,7 @@ func TestGKE_WrapperAuditAndGolden(t *testing.T) {
 	// 3. Upstream requires grant_registry_access which wrapper does not pass
 	// 4. Wrapper variable ip_range_pods type (string) incompatible with upstream (list(string))
 	// 5. Wrapper output legacy_network_tag delegates to removed upstream output
-	assert.Equal(t, 5, wrapperAudit.TotalBreaking)
+	assert.Equal(t, 10, wrapperAudit.TotalBreaking)
 	assert.Equal(t, `version = "30.0.0"`, wrapperAudit.RecommendedPin)
 
 	// Golden file testing: JSON
@@ -207,7 +207,8 @@ func TestEKS_ASTDiffAndGolden(t *testing.T) {
 	// 1. Removed inputs: manage_aws_auth_configmap, legacy_security_group_id
 	// 2. Newly required input: authentication_mode
 	// 3. Removed output: aws_auth_configmap_yaml
-	assert.Equal(t, 4, diffReport.TotalBreaking)
+	// 4. Default value changed: cluster_version (1.28 -> 1.30)
+	assert.Equal(t, 5, diffReport.TotalBreaking)
 
 	// New features: enable_cluster_creator_admin_permissions (var), access_entries (output)
 	assert.Equal(t, 2, diffReport.TotalNewFeatures)
@@ -251,7 +252,7 @@ func TestEKS_WrapperAuditAndGolden(t *testing.T) {
 	// 2. Passed removed input: legacy_security_group_id
 	// 3. Missing required input: authentication_mode
 	// 4. Broken output delegation: aws_auth references removed output
-	assert.Equal(t, 4, wrapperAudit.TotalBreaking)
+	assert.Equal(t, 9, wrapperAudit.TotalBreaking)
 	assert.Equal(t, `version = "20.0.0"`, wrapperAudit.RecommendedPin)
 
 	// Golden file testing: JSON
@@ -289,7 +290,8 @@ func TestAKS_ASTDiffAndGolden(t *testing.T) {
 	// 2. Newly required input: workload_identity_enabled
 	// 3. Changed type constraint: dns_prefix (string -> list(string))
 	// 4. Removed output: client_key
-	assert.Equal(t, 4, diffReport.TotalBreaking)
+	// 5. Default value changed: os_disk_size_gb (50 -> 100)
+	assert.Equal(t, 5, diffReport.TotalBreaking)
 
 	// New features: oidc_issuer_enabled (var), oidc_issuer_url (output)
 	assert.Equal(t, 2, diffReport.TotalNewFeatures)
@@ -859,8 +861,9 @@ output "node_id" {
 	require.NoError(t, err)
 
 	diffReport := diff.Compare(oldMod, newMod, "1.0.0", "1.1.0")
-	assert.True(t, diffReport.CanSafelyUpdate, "Safe update must allow CanSafelyUpdate")
-	assert.Equal(t, 0, diffReport.TotalBreaking, "Safe update must produce 0 breaking changes")
+	// The default value of node_input changed, which is a breaking API change for callers
+	// relying on the default, even though the resulting Terraform plan is an in-place update.
+	assert.Equal(t, 1, diffReport.TotalBreaking, "Default change must be reported as a breaking change")
 
 	hazards := recreation.AnalyzeHazards(diffReport)
 	assert.Empty(t, hazards, "Safe update must yield 0 recreation hazards")

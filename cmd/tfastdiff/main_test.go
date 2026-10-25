@@ -534,6 +534,10 @@ variable "ip_range_services" {
 
 	wrapperDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+variable "ip_range_services" {
+  type = string
+}
+
 module "gke" {
   source = "`+upstreamDir+`"
 }
@@ -769,6 +773,10 @@ variable "new_required" {
 
 	wrapperDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+variable "ip_range_services" {
+  type = string
+}
+
 module "gke" {
   source = "`+upstreamDir+`"
 }
@@ -946,6 +954,10 @@ variable "ip_range_services" {
 
 	wrapperDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+variable "ip_range_services" {
+  type = string
+}
+
 module "gke" {
   source = "`+upstreamDir+`"
 }

@@ -168,7 +168,7 @@ func TestCompare_WarningsAndFeatures(t *testing.T) {
 		RequiredProviders: map[string]ast.ProviderRequirement{
 			"google": {
 				Name:               "google",
-				VersionConstraints: []string{">= 5.0"}, // updated constraint
+				VersionConstraints: []string{">= 4.1"}, // updated constraint (non-major)
 			},
 		},
 	}
@@ -352,7 +352,7 @@ func TestCompare_ProviderAliasRemovedAndSourceChanged(t *testing.T) {
 			"aws": {
 				Name:                 "aws",
 				Source:               "hashicorp/aws-fork",
-				VersionConstraints:   []string{">= 6.0"},
+				VersionConstraints:   []string{">= 5.1"},
 				ConfigurationAliases: []string{"aws.west"},
 			},
 		},
@@ -471,8 +471,19 @@ func TestCompare_ModernBlocksAndSoftRemovals(t *testing.T) {
 
 	// legacy_var was soft-removed with destroy=false, so it's a WARNING rather than BREAKING
 	// dead_var was hard-removed without removed block, so it's BREAKING
-	assert.Equal(t, 1, report.TotalBreaking)
-	assert.Equal(t, "dead_var", report.BreakingChanges[0].Name)
+	// google_compute_instance.vm was removed with destroy=true, so it's BREAKING (RemovedDestroy)
+	assert.Equal(t, 2, report.TotalBreaking)
+	var hasDeadVar, hasRemovedDestroy bool
+	for _, bc := range report.BreakingChanges {
+		if bc.Name == "dead_var" {
+			hasDeadVar = true
+		}
+		if bc.Name == "google_compute_instance.vm" && bc.Category == "RemovedDestroy" {
+			hasRemovedDestroy = true
+		}
+	}
+	assert.True(t, hasDeadVar)
+	assert.True(t, hasRemovedDestroy)
 
 	var hasSoftRemovedWarning bool
 	for _, w := range report.Warnings {

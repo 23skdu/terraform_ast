@@ -7,15 +7,16 @@
 - **Safest Known Pin**: `v7.0.0` — Keep the currently analyzed version pinned until the breaking changes are resolved.
 
 > [!CAUTION]
-> **CANNOT SAFELY UPDATE: Detected 4 breaking change(s) between v7.0.0 and v8.0.0. Wrapper must be updated before pinning.**
+> **CANNOT SAFELY UPDATE: Detected 5 breaking change(s) between v7.0.0 and v8.0.0. Wrapper must be updated before pinning.**
 
-### Breaking Changes (4)
+### Breaking Changes (5)
 
 | Category | Name | Description | Confidence | Remediation |
 | :--- | :--- | :--- | :--- | :--- |
 | `Output` | `client_key` | Output 'client_key' was removed in upstream version | 9/10 | Remove or replace references to output 'client_key' in wrapper or downstream modules |
 | `Variable` | `agents_type` | Input variable 'agents_type' was removed in upstream version | 9/10 | Remove variable 'agents_type' from wrapper or module callers before upgrading |
 | `Variable` | `workload_identity_enabled` | Newly introduced variable 'workload_identity_enabled' is required and has no default value | 9/10 | Provide a required value for 'workload_identity_enabled' in wrapper module call |
+| `VariableDefault` | `os_disk_size_gb` | Default value for variable 'os_disk_size_gb' changed | 9/10 | Review callers that omit 'os_disk_size_gb'; the default no longer matches |
 | `VariableType` | `dns_prefix` | Type constraint for variable 'dns_prefix' changed: Type constraint changed incompatibly from 'string' to 'list(string)' | 9/10 | Update variable type definition in wrapper to 'list(string)' |
 
 ### New Features (2)

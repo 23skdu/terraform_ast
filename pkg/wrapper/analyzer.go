@@ -39,6 +39,8 @@ type WrapperCompatibilityReport struct {
 	RemediationSteps    []string           `json:"remediation_steps"`
 	TotalBreaking       int                `json:"total_breaking"`
 	TotalWarnings       int                `json:"total_warnings"`
+	UpstreamBreaking    int                `json:"upstream_breaking,omitempty"`
+	UpstreamWarnings    int                `json:"upstream_warnings,omitempty"`
 	PolicyViolations    []policy.Violation `json:"policy_violations,omitempty"`
 	Summary             string             `json:"summary"`
 }
@@ -350,6 +352,17 @@ func AnalyzeWrapper(
 		report.Summary = fmt.Sprintf("SAFE TO PIN: Wrapper is fully compatible with upstream version %s. Pin to %s.", targetVersion, report.RecommendedPin)
 		report.SafePinVersion = targetVersion
 		report.SafePinRationale = "No compatibility issues were detected for the target version."
+	}
+
+	// Fold upstream diff counts into the totals so INV-3 (total_breaking == 0 <=>
+	// can_safely_update) holds for wrapper reports as well as upgrade-path reports.
+	// Verdict determination above intentionally uses wrapper-only counts so the
+	// UPSTREAM_BREAKING_CHANGES_DETECTED distinction is preserved.
+	if report.UpstreamDiff != nil {
+		report.UpstreamBreaking = report.UpstreamDiff.TotalBreaking
+		report.UpstreamWarnings = report.UpstreamDiff.TotalWarnings
+		report.TotalBreaking += report.UpstreamBreaking
+		report.TotalWarnings += report.UpstreamWarnings
 	}
 
 	return report

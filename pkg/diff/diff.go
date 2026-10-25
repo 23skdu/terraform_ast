@@ -3,6 +3,8 @@ package diff
 import (
 	"fmt"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -17,6 +19,8 @@ func Compare(oldMod, newMod *ast.ModuleInfo, oldVer, newVer string) *DiffReport 
 			Variables:         make(map[string]ast.VariableDef),
 			Outputs:           make(map[string]ast.OutputDef),
 			RequiredProviders: make(map[string]ast.ProviderRequirement),
+			ManagedResources:  make(map[string]ast.ResourceDef),
+			DataResources:     make(map[string]ast.ResourceDef),
 		}
 	}
 	if newMod == nil {
@@ -24,7 +28,21 @@ func Compare(oldMod, newMod *ast.ModuleInfo, oldVer, newVer string) *DiffReport 
 			Variables:         make(map[string]ast.VariableDef),
 			Outputs:           make(map[string]ast.OutputDef),
 			RequiredProviders: make(map[string]ast.ProviderRequirement),
+			ManagedResources:  make(map[string]ast.ResourceDef),
+			DataResources:     make(map[string]ast.ResourceDef),
 		}
+	}
+	if oldMod.ManagedResources == nil {
+		oldMod.ManagedResources = make(map[string]ast.ResourceDef)
+	}
+	if oldMod.DataResources == nil {
+		oldMod.DataResources = make(map[string]ast.ResourceDef)
+	}
+	if newMod.ManagedResources == nil {
+		newMod.ManagedResources = make(map[string]ast.ResourceDef)
+	}
+	if newMod.DataResources == nil {
+		newMod.DataResources = make(map[string]ast.ResourceDef)
 	}
 
 	bump := semverutil.DetermineBumpType(oldVer, newVer)
@@ -50,6 +68,8 @@ func Compare(oldMod, newMod *ast.ModuleInfo, oldVer, newVer string) *DiffReport 
 	// 4. Compare Modern HCL & OpenTofu Blocks
 	compareModernBlocks(oldMod, newMod, report)
 
+	// 5. Compare Managed and Data Resources
+	compareResources(oldMod, newMod, report)
 	scoreConfidence(report)
 
 	// Sort slices deterministically for stable reporting and golden testing
@@ -224,6 +244,19 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			})
 		}
 
+		// Default value change (silent behaviour change for callers that omit the input).
+		if oldVar.HasDefault && newVar.HasDefault && !reflect.DeepEqual(oldVar.Default, newVar.Default) {
+			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				Category:    "VariableDefault",
+				Name:        name,
+				Severity:    SeverityBreaking,
+				Description: fmt.Sprintf("Default value for variable '%s' changed", name),
+				OldValue:    fmt.Sprintf("%v", oldVar.Default),
+				NewValue:    fmt.Sprintf("%v", newVar.Default),
+				Remediation: fmt.Sprintf("Review callers that omit '%s'; the default no longer matches", name),
+			})
+		}
+
 		// Check if previously optional input became required
 		if oldVar.HasDefault && (!newVar.HasDefault && newVar.Required) {
 			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
@@ -380,6 +413,33 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Remediation: "Migrate downstream usage to recommended successor output",
 			})
 		}
+
+		// Output value expression change (silent behaviour change).
+		oldVal := normalizeCondition(oldOut.Value)
+		newVal := normalizeCondition(newOut.Value)
+		if oldVal != "" && newVal != "" && oldVal != newVal {
+			if oldOut.Type != newOut.Type || oldOut.Sensitive != newOut.Sensitive {
+				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					Category:    "OutputValue",
+					Name:        name,
+					Severity:    SeverityBreaking,
+					Description: fmt.Sprintf("Output '%s' value expression changed (type/sensitivity also changed)", name),
+					OldValue:    oldOut.Value,
+					NewValue:    newOut.Value,
+					Remediation: "Update downstream consumers of this output",
+				})
+			} else {
+				report.Warnings = append(report.Warnings, DifferenceItem{
+					Category:    "OutputValue",
+					Name:        name,
+					Severity:    SeverityWarning,
+					Description: fmt.Sprintf("Output '%s' value expression changed", name),
+					OldValue:    oldOut.Value,
+					NewValue:    newOut.Value,
+					Remediation: "Verify downstream consumers remain compatible",
+				})
+			}
+		}
 	}
 
 	// Check new outputs
@@ -398,15 +458,31 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 }
 
 func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
-	// Core version constraints
-	oldCore := strings.Join(oldMod.RequiredCore, ", ")
-	newCore := strings.Join(newMod.RequiredCore, ", ")
-	if oldCore != newCore && newCore != "" {
+	// Core version constraints. Normalise whitespace and ordering so a reordering of a
+	// multi-constraint list does not surface as a change; a removal is still reported.
+	normalizeCore := func(values []string) string {
+		trimmed := make([]string, 0, len(values))
+		for _, v := range values {
+			v = strings.TrimSpace(v)
+			if v != "" {
+				trimmed = append(trimmed, v)
+			}
+		}
+		sort.Strings(trimmed)
+		return strings.Join(trimmed, ", ")
+	}
+	oldCore := normalizeCore(oldMod.RequiredCore)
+	newCore := normalizeCore(newMod.RequiredCore)
+	if oldCore != newCore {
+		desc := fmt.Sprintf("Terraform Core version constraint updated from '%s' to '%s'", oldCore, newCore)
+		if newCore == "" {
+			desc = fmt.Sprintf("Terraform Core version constraint removed (was '%s')", oldCore)
+		}
 		report.Warnings = append(report.Warnings, DifferenceItem{
 			Category:    "TerraformCore",
 			Name:        "required_version",
 			Severity:    SeverityWarning,
-			Description: fmt.Sprintf("Terraform Core version constraint updated from '%s' to '%s'", oldCore, newCore),
+			Description: desc,
 			OldValue:    oldCore,
 			NewValue:    newCore,
 			Remediation: "Ensure execution environment meets new Terraform Core requirement",
@@ -463,9 +539,32 @@ func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				})
 			}
 
-			oldC := strings.Join(oldReq.VersionConstraints, ", ")
-			newC := strings.Join(newReq.VersionConstraints, ", ")
-			if oldC != newC {
+			normalizeConstraints := func(values []string) string {
+				trimmed := make([]string, 0, len(values))
+				for _, v := range values {
+					v = strings.TrimSpace(v)
+					if v != "" {
+						trimmed = append(trimmed, v)
+					}
+				}
+				sort.Strings(trimmed)
+				return strings.Join(trimmed, ", ")
+			}
+			oldC := normalizeConstraints(oldReq.VersionConstraints)
+			newC := normalizeConstraints(newReq.VersionConstraints)
+			if oldC == newC {
+				// constraint-only noise (whitespace/ordering) produces nothing
+			} else if isMajorProviderBump(oldReq.VersionConstraints, newReq.VersionConstraints) {
+				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					Category:    "ProviderMajorUpgrade",
+					Name:        name,
+					Severity:    SeverityBreaking,
+					Description: fmt.Sprintf("Provider '%s' constraint major upgrade from '%s' to '%s' (schema/state migration likely required)", name, oldC, newC),
+					OldValue:    oldC,
+					NewValue:    newC,
+					Remediation: "Review provider migration guide and update resource schemas before upgrading",
+				})
+			} else {
 				report.Warnings = append(report.Warnings, DifferenceItem{
 					Category:    "ProviderRequirement",
 					Name:        name,
@@ -546,9 +645,23 @@ func sortDifferences(items []DifferenceItem) {
 }
 
 func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
-	// 1. Removed blocks (Terraform 1.7+ / OpenTofu 1.6+)
+	if oldMod == nil {
+		oldMod = &ast.ModuleInfo{}
+	}
+	if newMod == nil {
+		newMod = &ast.ModuleInfo{}
+	}
+
+	// 1. Removed blocks (Terraform 1.7+ / OpenTofu 1.6+). Keyed on both directions.
+	oldRemoved := make(map[string]ast.RemovedBlockDef)
+	for _, rb := range oldMod.RemovedBlocks {
+		oldRemoved[rb.From] = rb
+	}
 	for _, rb := range newMod.RemovedBlocks {
 		if !rb.Destroy {
+			if _, existed := oldRemoved[rb.From]; existed {
+				continue
+			}
 			report.NewFeatures = append(report.NewFeatures, DifferenceItem{
 				Category:        "SoftRemovedBlock",
 				Name:            rb.From,
@@ -556,10 +669,40 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				ConfidenceScore: 9,
 				Description:     fmt.Sprintf("Resource or block '%s' declared in removed block with lifecycle.destroy = false (soft migration)", rb.From),
 			})
+		} else {
+			if _, existed := oldRemoved[rb.From]; existed {
+				continue
+			}
+			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				Category:        "RemovedDestroy",
+				Name:            rb.From,
+				Severity:        SeverityBreaking,
+				ConfidenceScore: 9,
+				Description:     fmt.Sprintf("Resource or block '%s' declared in removed block with lifecycle.destroy = true (upstream declares this address will be destroyed)", rb.From),
+			})
+		}
+	}
+	// A removed block that disappears -> destruction path no longer declared.
+	for _, rb := range oldMod.RemovedBlocks {
+		found := false
+		for _, nrb := range newMod.RemovedBlocks {
+			if nrb.From == rb.From {
+				found = true
+				break
+			}
+		}
+		if !found {
+			report.Warnings = append(report.Warnings, DifferenceItem{
+				Category:        "RemovedBlockRemoved",
+				Name:            rb.From,
+				Severity:        SeverityWarning,
+				ConfidenceScore: 9,
+				Description:     fmt.Sprintf("removed block for '%s' no longer declared (destruction path undeclared again)", rb.From),
+			})
 		}
 	}
 
-	// 2. Check blocks (Terraform 1.5+)
+	// 2. Check blocks (Terraform 1.5+).
 	for name, cb := range newMod.CheckBlocks {
 		if _, existed := oldMod.CheckBlocks[name]; !existed {
 			report.NewFeatures = append(report.NewFeatures, DifferenceItem{
@@ -571,9 +714,19 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			})
 		}
 	}
+	for name := range oldMod.CheckBlocks {
+		if _, exists := newMod.CheckBlocks[name]; !exists {
+			report.Warnings = append(report.Warnings, DifferenceItem{
+				Category:        "CheckBlockRemoved",
+				Name:            name,
+				Severity:        SeverityWarning,
+				ConfidenceScore: 9,
+				Description:     fmt.Sprintf("Check assertion block '%s' removed (validation regression)", name),
+			})
+		}
+	}
 
-	// 3. Import blocks (Terraform 1.5+). The resource address is what makes an import new; a
-	// changed id on an address that was already imported is not a new capability.
+	// 3. Import blocks (Terraform 1.5+).
 	oldImports := makeStringSet(importAddresses(oldMod.ImportBlocks))
 	for _, ib := range newMod.ImportBlocks {
 		if _, existed := oldImports[ib.To]; existed {
@@ -587,8 +740,20 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			Description:     fmt.Sprintf("Programmatic import declared for '%s' (id=%s)", ib.To, ib.ID),
 		})
 	}
+	newImports := makeStringSet(importAddresses(newMod.ImportBlocks))
+	for _, ib := range oldMod.ImportBlocks {
+		if _, existed := newImports[ib.To]; !existed {
+			report.Warnings = append(report.Warnings, DifferenceItem{
+				Category:        "ImportBlockRemoved",
+				Name:            ib.To,
+				Severity:        SeverityWarning,
+				ConfidenceScore: 9,
+				Description:     fmt.Sprintf("Import block for '%s' removed (re-import required)", ib.To),
+			})
+		}
+	}
 
-	// 4. Custom Functions (Terraform 1.8+)
+	// 4. Custom Functions (Terraform 1.8+).
 	for name, fn := range newMod.Functions {
 		if _, existed := oldMod.Functions[name]; !existed {
 			report.NewFeatures = append(report.NewFeatures, DifferenceItem{
@@ -600,9 +765,19 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			})
 		}
 	}
+	for name := range oldMod.Functions {
+		if _, exists := newMod.Functions[name]; !exists {
+			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				Category:        "FunctionRemoved",
+				Name:            name,
+				Severity:        SeverityBreaking,
+				ConfidenceScore: 9,
+				Description:     fmt.Sprintf("Custom function '%s' removed (callers fail at plan)", name),
+			})
+		}
+	}
 
-	// 5. Encryption blocks (OpenTofu 1.7+). Keying on the key provider also surfaces a swap of
-	// the encryption backend, which is a configuration change the operator must act on.
+	// 5. Encryption blocks (OpenTofu 1.7+).
 	oldEncryption := makeStringSet(encryptionProviders(oldMod.EncryptionBlocks))
 	for _, eb := range newMod.EncryptionBlocks {
 		if _, existed := oldEncryption[eb.KeyProvider]; existed {
@@ -616,6 +791,18 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			Description:     fmt.Sprintf("State encryption configured with key provider '%s'", eb.KeyProvider),
 		})
 	}
+	newEncryption := makeStringSet(encryptionProviders(newMod.EncryptionBlocks))
+	for _, eb := range oldMod.EncryptionBlocks {
+		if _, existed := newEncryption[eb.KeyProvider]; !existed {
+			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				Category:        "EncryptionRemoved",
+				Name:            eb.KeyProvider,
+				Severity:        SeverityBreaking,
+				ConfidenceScore: 9,
+				Description:     fmt.Sprintf("State encryption with key provider '%s' removed (encryption stops applying)", eb.KeyProvider),
+			})
+		}
+	}
 }
 
 // importAddresses returns the set of resource addresses that are programmatically imported.
@@ -627,6 +814,58 @@ func importAddresses(blocks []ast.ImportBlockDef) []string {
 	return addresses
 }
 
+// majorVersionRe extracts the first numeric version component from a constraint string such as
+// "~> 4.0" or ">= 3.1.0".
+var majorVersionRe = regexp.MustCompile(`(\d+)`)
+
+func majorFromConstraint(c string) (int, bool) {
+	m := majorVersionRe.FindStringSubmatch(strings.TrimSpace(c))
+	if m == nil {
+		return 0, false
+	}
+	// parse the first number
+	n := 0
+	for _, ch := range m[1] {
+		n = n*10 + int(ch-'0')
+	}
+	return n, true
+}
+
+// isMajorProviderBump reports whether the provider version constraints move to a different
+// major version, which routinely forces schema/state migration.
+func isMajorProviderBump(oldConstraints, newConstraints []string) bool {
+	if len(oldConstraints) == 0 || len(newConstraints) == 0 {
+		return false
+	}
+	oldMajor, okOld := majorFromConstraint(oldConstraints[0])
+	newMajor, okNew := majorFromConstraint(newConstraints[0])
+	if !okOld || !okNew {
+		return false
+	}
+	// Use the highest/lowest? Simplest: compare first constraint's major.
+	// Also check if any old vs any new major differs.
+	for _, oc := range oldConstraints {
+		om, ok := majorFromConstraint(oc)
+		if !ok {
+			continue
+		}
+		for _, nc := range newConstraints {
+			nm, ok2 := majorFromConstraint(nc)
+			if !ok2 {
+				continue
+			}
+			if om != nm && om != 0 {
+				// treat as major bump only if the new major is greater and differs
+				if nm > om {
+					return true
+				}
+			}
+		}
+	}
+	// fallback: direct major compare on first
+	return oldMajor != newMajor && newMajor > oldMajor
+}
+
 // encryptionProviders returns the set of declared state-encryption key providers.
 func encryptionProviders(blocks []ast.EncryptionBlockDef) []string {
 	providers := make([]string, 0, len(blocks))
@@ -634,4 +873,152 @@ func encryptionProviders(blocks []ast.EncryptionBlockDef) []string {
 		providers = append(providers, block.KeyProvider)
 	}
 	return providers
+}
+
+// resourceFullAddress renders the canonical address string for a ResourceDef so it can be
+// matched against ast.DetectAddressShifts output.
+func resourceFullAddress(mode string, res ast.ResourceDef) string {
+	if mode == "data" {
+		return "data." + res.Type + "." + res.Name
+	}
+	return res.Type + "." + res.Name
+}
+
+func modeLabel(mode string) string {
+	if mode == "data" {
+		return "data"
+	}
+	return "managed"
+}
+
+// compareResources diffs the managed and data resources declared by oldMod and newMod.
+// Removed resources become breaking changes, added resources become new features, and
+// type/provider reassignment becomes a breaking change. Resources that are already
+// reported as address shifts by ast.DetectAddressShifts are suppressed so a renamed
+// resource is reported once.
+func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
+	if oldMod == nil {
+		oldMod = &ast.ModuleInfo{}
+	}
+	if newMod == nil {
+		newMod = &ast.ModuleInfo{}
+	}
+	if oldMod.ManagedResources == nil {
+		oldMod.ManagedResources = make(map[string]ast.ResourceDef)
+	}
+	if oldMod.DataResources == nil {
+		oldMod.DataResources = make(map[string]ast.ResourceDef)
+	}
+	if newMod.ManagedResources == nil {
+		newMod.ManagedResources = make(map[string]ast.ResourceDef)
+	}
+	if newMod.DataResources == nil {
+		newMod.DataResources = make(map[string]ast.ResourceDef)
+	}
+
+	// Address shifts are reported separately; suppress duplicates here.
+	shiftedOld := make(map[string]struct{})
+	shiftedNew := make(map[string]struct{})
+	for _, sh := range ast.DetectAddressShifts(oldMod, newMod) {
+		// Only suppress when the resource is renamed/recreated at a new address;
+		// a true removal (empty new address) is still reported as a removed resource.
+		if sh.NewAddress.FullAddress() != "" {
+			shiftedOld[sh.OldAddress.FullAddress()] = struct{}{}
+			shiftedNew[sh.NewAddress.FullAddress()] = struct{}{}
+		}
+	}
+
+	type resourceSet struct {
+		mode string
+		old  map[string]ast.ResourceDef
+		new  map[string]ast.ResourceDef
+	}
+	sets := []resourceSet{
+		{"managed", oldMod.ManagedResources, newMod.ManagedResources},
+		{"data", oldMod.DataResources, newMod.DataResources},
+	}
+
+	for _, rs := range sets {
+		consumedNew := make(map[string]bool)
+
+		// Removed / changed resources
+		for key, oldRes := range rs.old {
+			fullOld := resourceFullAddress(rs.mode, oldRes)
+			if _, shifted := shiftedOld[fullOld]; shifted {
+				continue
+			}
+
+			// Exact key match
+			if newRes, ok := rs.new[key]; ok {
+				if oldRes.Provider != "" && newRes.Provider != "" && oldRes.Provider != newRes.Provider {
+					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+						Category:    "ResourceProvider",
+						Name:        key,
+						Severity:    SeverityBreaking,
+						Description: fmt.Sprintf("Resource '%s' provider changed from '%s' to '%s'", key, oldRes.Provider, newRes.Provider),
+						OldValue:    oldRes.Provider,
+						NewValue:    newRes.Provider,
+						Remediation: "Update provider configuration for this resource",
+					})
+				}
+				consumedNew[key] = true
+				continue
+			}
+
+			// Same label, different type -> type reassignment
+			reassigned := false
+			for nKey, newRes := range rs.new {
+				if consumedNew[nKey] {
+					continue
+				}
+				if newRes.Name != "" && newRes.Name == oldRes.Name && newRes.Type != oldRes.Type {
+					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+						Category:    "ResourceProvider",
+						Name:        key,
+						Severity:    SeverityBreaking,
+						Description: fmt.Sprintf("Resource '%s' type changed from '%s' to '%s'", oldRes.Name, oldRes.Type, newRes.Type),
+						OldValue:    oldRes.Type,
+						NewValue:    newRes.Type,
+						Remediation: "Update resource type and migrate state before upgrading",
+					})
+					consumedNew[nKey] = true
+					reassigned = true
+					break
+				}
+			}
+			if reassigned {
+				continue
+			}
+
+			// Removed
+			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				Category:    "Resource",
+				Name:        key,
+				Severity:    SeverityBreaking,
+				Description: fmt.Sprintf("%s resource '%s' was removed in upstream version", modeLabel(rs.mode), key),
+				OldValue:    fmt.Sprintf("type=%s, provider=%s", oldRes.Type, oldRes.Provider),
+				Remediation: "Remove resource or migrate state before upgrading",
+			})
+		}
+
+		// Added resources
+		for key, newRes := range rs.new {
+			if consumedNew[key] {
+				continue
+			}
+			fullNew := resourceFullAddress(rs.mode, newRes)
+			if _, shifted := shiftedNew[fullNew]; shifted {
+				continue
+			}
+			// skip if it was a type-reassignment target (consumed already handled above via consumedNew)
+			report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+				Category:    "Resource",
+				Name:        key,
+				Severity:    SeverityNewFeature,
+				Description: fmt.Sprintf("New %s resource '%s' available in upstream", modeLabel(rs.mode), key),
+				NewValue:    fmt.Sprintf("type=%s, provider=%s", newRes.Type, newRes.Provider),
+				Remediation: "Consider exposing this resource in wrapper if needed",
+			})
+		}
+	}
 }
