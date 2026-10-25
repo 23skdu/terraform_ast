@@ -103,11 +103,14 @@ type EncryptionBlockDef struct {
 
 // ResourceDef captures managed and data resource definitions in a Terraform module.
 type ResourceDef struct {
-	Mode     string             `json:"mode"` // "managed" or "data"
-	Type     string             `json:"type"`
-	Name     string             `json:"name"`
-	Provider string             `json:"provider,omitempty"`
-	Pos      tfconfig.SourcePos `json:"pos"`
+	Mode         string             `json:"mode"` // "managed" or "data"
+	Type         string             `json:"type"`
+	Name         string             `json:"name"`
+	Provider     string             `json:"provider,omitempty"`
+	Lifecycle    LifecycleFlags     `json:"lifecycle,omitempty"`
+	Provisioners []string           `json:"provisioners,omitempty"`
+	Triggers     map[string]string  `json:"triggers,omitempty"`
+	Pos          tfconfig.SourcePos `json:"pos"`
 }
 
 // ModuleInfo is the normalized AST representation of a Terraform module.
@@ -127,6 +130,7 @@ type ModuleInfo struct {
 	EncryptionBlocks        []EncryptionBlockDef           `json:"encryption_blocks,omitempty"`
 	ManagedResources        map[string]ResourceDef         `json:"managed_resources,omitempty"`
 	DataResources           map[string]ResourceDef         `json:"data_resources,omitempty"`
+	Backend                 *BackendConfig                 `json:"backend,omitempty"`
 }
 
 // TypeCompatibilityResult describes the compatibility between two type constraints.
@@ -391,3 +395,19 @@ func CheckObjectCompatibility(oldAttrs, newAttrs map[string]ObjectAttribute) Typ
 		Reason:     "Object schemas are compatible",
 	}
 }
+
+// LifecycleFlags captures the lifecycle toggles that control destruction behaviour.
+type LifecycleFlags struct {
+	PreventDestroy      bool     `json:"prevent_destroy,omitempty"`
+	CreateBeforeDestroy bool     `json:"create_before_destroy,omitempty"`
+	ReplaceTriggeredBy  []string `json:"replace_triggered_by,omitempty"`
+	IgnoreChanges       []string `json:"ignore_changes,omitempty"`
+}
+
+// BackendConfig captures the state backend type and its literal attributes.
+type BackendConfig struct {
+	Type       string            `json:"type,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
+// ModuleInfo lifecycle/backend/provisioner fields are stored below via enrichment.

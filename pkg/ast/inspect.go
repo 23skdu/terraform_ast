@@ -340,6 +340,9 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 			{Type: "import"},
 			{Type: "function", LabelNames: []string{"name"}},
 			{Type: "encryption"},
+			{Type: "resource", LabelNames: []string{"type", "name"}},
+			{Type: "data", LabelNames: []string{"type", "name"}},
+			{Type: "terraform"},
 		},
 	}
 
@@ -584,6 +587,94 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 					KeyProvider: provider,
 					Pos:         tfconfig.SourcePos{Filename: filePath, Line: block.DefRange.Start.Line},
 				})
+
+			case "resource", "data":
+				// Capture lifecycle flags and provisioner presence for the resource.
+				mode := "managed"
+				if block.Type == "data" {
+					mode = "data"
+				}
+				key := block.Labels[0] + "." + block.Labels[1]
+				if mode == "data" {
+					key = "data." + key
+				}
+				res, exists := info.ManagedResources[key]
+				if mode == "data" {
+					res, exists = info.DataResources[key]
+				}
+				if !exists {
+					res = ResourceDef{Mode: mode, Type: block.Labels[0], Name: block.Labels[1]}
+				}
+				// lifecycle block
+				lcContent, _, _ := block.Body.PartialContent(&hcl.BodySchema{
+					Blocks: []hcl.BlockHeaderSchema{{Type: "lifecycle"}},
+				})
+				if lcContent != nil {
+					for _, lc := range lcContent.Blocks {
+						lcAttrs, _ := lc.Body.JustAttributes()
+						if v, ok := lcAttrs["prevent_destroy"]; ok {
+							val := strings.TrimSpace(string(src[v.Expr.Range().Start.Byte:v.Expr.Range().End.Byte]))
+							res.Lifecycle.PreventDestroy = (val == "true")
+						}
+						if v, ok := lcAttrs["create_before_destroy"]; ok {
+							val := strings.TrimSpace(string(src[v.Expr.Range().Start.Byte:v.Expr.Range().End.Byte]))
+							res.Lifecycle.CreateBeforeDestroy = (val == "true")
+						}
+						if v, ok := lcAttrs["replace_triggered_by"]; ok {
+							res.Lifecycle.ReplaceTriggeredBy = append(res.Lifecycle.ReplaceTriggeredBy, strings.TrimSpace(string(src[v.Expr.Range().Start.Byte:v.Expr.Range().End.Byte])))
+						}
+						if v, ok := lcAttrs["ignore_changes"]; ok {
+							res.Lifecycle.IgnoreChanges = append(res.Lifecycle.IgnoreChanges, strings.TrimSpace(string(src[v.Expr.Range().Start.Byte:v.Expr.Range().End.Byte])))
+						}
+					}
+				}
+				// provisioner blocks
+				provContent, _, _ := block.Body.PartialContent(&hcl.BodySchema{
+					Blocks: []hcl.BlockHeaderSchema{{Type: "provisioner", LabelNames: []string{"type"}}},
+				})
+				if provContent != nil {
+					for _, pc := range provContent.Blocks {
+						when := "apply"
+						pcAttrs, _ := pc.Body.JustAttributes()
+						if wAttr, ok := pcAttrs["when"]; ok {
+							when = strings.Trim(strings.TrimSpace(string(src[wAttr.Expr.Range().Start.Byte:wAttr.Expr.Range().End.Byte])), `"`)
+						}
+						res.Provisioners = append(res.Provisioners, when)
+					}
+				}
+				// triggers attribute (for null_resource etc.)
+				blockAttrs, _ := block.Body.JustAttributes()
+				if tAttr, ok := blockAttrs["triggers"]; ok {
+					if res.Triggers == nil {
+						res.Triggers = make(map[string]string)
+					}
+					res.Triggers["triggers"] = strings.TrimSpace(string(src[tAttr.Expr.Range().Start.Byte:tAttr.Expr.Range().End.Byte]))
+				}
+				if mode == "data" {
+					if info.DataResources == nil {
+						info.DataResources = make(map[string]ResourceDef)
+					}
+					info.DataResources[key] = res
+				} else {
+					if info.ManagedResources == nil {
+						info.ManagedResources = make(map[string]ResourceDef)
+					}
+					info.ManagedResources[key] = res
+				}
+
+			case "terraform":
+				bcContent, _, _ := block.Body.PartialContent(&hcl.BodySchema{
+					Blocks: []hcl.BlockHeaderSchema{{Type: "backend", LabelNames: []string{"type"}}},
+				})
+				if bcContent != nil && len(bcContent.Blocks) > 0 {
+					bc := bcContent.Blocks[0]
+					bcfg := &BackendConfig{Type: bc.Labels[0], Attributes: make(map[string]string)}
+					bAttrs, _ := bc.Body.JustAttributes()
+					for an, av := range bAttrs {
+						bcfg.Attributes[an] = strings.TrimSpace(string(src[av.Expr.Range().Start.Byte:av.Expr.Range().End.Byte]))
+					}
+					info.Backend = bcfg
+				}
 			}
 		}
 	}

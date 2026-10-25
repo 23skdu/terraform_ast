@@ -70,6 +70,9 @@ func Compare(oldMod, newMod *ast.ModuleInfo, oldVer, newVer string) *DiffReport 
 
 	// 5. Compare Managed and Data Resources
 	compareResources(oldMod, newMod, report)
+
+	// 6. Compare destructive toggles (lifecycle, backend, provisioners, triggers)
+	compareDestructiveToggles(oldMod, newMod, report)
 	scoreConfidence(report)
 
 	// Sort slices deterministically for stable reporting and golden testing
@@ -910,6 +913,171 @@ func isMajorProviderBump(oldConstraints, newConstraints []string) bool {
 	}
 	// fallback: direct major compare on first
 	return oldMajor != newMajor && newMajor > oldMajor
+}
+
+func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
+	if oldMod == nil {
+		oldMod = &ast.ModuleInfo{}
+	}
+	if newMod == nil {
+		newMod = &ast.ModuleInfo{}
+	}
+
+	// Backend change
+	if oldMod.Backend != nil || newMod.Backend != nil {
+		oldType := ""
+		newType := ""
+		if oldMod.Backend != nil {
+			oldType = oldMod.Backend.Type
+		}
+		if newMod.Backend != nil {
+			newType = newMod.Backend.Type
+		}
+		if oldType != newType && (oldType != "" || newType != "") {
+			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				Category:    "StateBackendChange",
+				Name:        "backend",
+				Severity:    SeverityBreaking,
+				Description: fmt.Sprintf("State backend type changed from '%s' to '%s'", oldType, newType),
+				OldValue:    oldType,
+				NewValue:    newType,
+				Remediation: "Migrate state to the new backend before upgrading",
+			})
+		}
+		// compare attributes
+		oldAttrs := map[string]string{}
+		newAttrs := map[string]string{}
+		if oldMod.Backend != nil {
+			oldAttrs = oldMod.Backend.Attributes
+		}
+		if newMod.Backend != nil {
+			newAttrs = newMod.Backend.Attributes
+		}
+		for k, v := range oldAttrs {
+			if nv, ok := newAttrs[k]; ok {
+				if v != nv {
+					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+						Category:    "StateBackendChange",
+						Name:        "backend." + k,
+						Severity:    SeverityBreaking,
+						Description: fmt.Sprintf("Backend attribute '%s' changed from '%s' to '%s'", k, v, nv),
+						OldValue:    v,
+						NewValue:    nv,
+						Remediation: "Migrate state to the new backend before upgrading",
+					})
+				}
+			} else {
+				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					Category:    "StateBackendChange",
+					Name:        "backend." + k,
+					Severity:    SeverityBreaking,
+					Description: fmt.Sprintf("Backend attribute '%s' removed", k),
+					OldValue:    v,
+					Remediation: "Migrate state to the new backend before upgrading",
+				})
+			}
+		}
+		for k, v := range newAttrs {
+			if _, ok := oldAttrs[k]; !ok {
+				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					Category:    "StateBackendChange",
+					Name:        "backend." + k,
+					Severity:    SeverityBreaking,
+					Description: fmt.Sprintf("Backend attribute '%s' added", k),
+					NewValue:    v,
+					Remediation: "Migrate state to the new backend before upgrading",
+				})
+			}
+		}
+	}
+
+	// Resource-level lifecycle/provisioner comparison
+	sets := []struct {
+		old map[string]ast.ResourceDef
+		new map[string]ast.ResourceDef
+	}{
+		{oldMod.ManagedResources, newMod.ManagedResources},
+		{oldMod.DataResources, newMod.DataResources},
+	}
+	for _, s := range sets {
+		for key, oldRes := range s.old {
+			newRes, ok := s.new[key]
+			if !ok {
+				continue
+			}
+			// prevent_destroy removed
+			if oldRes.Lifecycle.PreventDestroy && !newRes.Lifecycle.PreventDestroy {
+				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					Category:    "LifecycleDestroy",
+					Name:        key,
+					Severity:    SeverityBreaking,
+					Description: fmt.Sprintf("lifecycle.prevent_destroy removed from resource '%s'", key),
+					OldValue:    "true",
+					NewValue:    "false",
+					Remediation: "Re-enable prevent_destroy or accept destruction risk",
+				})
+			}
+			// create_before_destroy removed
+			if oldRes.Lifecycle.CreateBeforeDestroy && !newRes.Lifecycle.CreateBeforeDestroy {
+				report.Warnings = append(report.Warnings, DifferenceItem{
+					Category:    "LifecycleCreateBeforeDestroy",
+					Name:        key,
+					Severity:    SeverityWarning,
+					Description: fmt.Sprintf("lifecycle.create_before_destroy removed from resource '%s'", key),
+					OldValue:    "true",
+					NewValue:    "false",
+					Remediation: "Verify downtime tolerance for in-place replacements",
+				})
+			}
+			// replace_triggered_by added
+			if len(oldRes.Lifecycle.ReplaceTriggeredBy) == 0 && len(newRes.Lifecycle.ReplaceTriggeredBy) > 0 {
+				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					Category:    "LifecycleReplaceTriggered",
+					Name:        key,
+					Severity:    SeverityBreaking,
+					Description: fmt.Sprintf("lifecycle.replace_triggered_by added to resource '%s'", key),
+					NewValue:    strings.Join(newRes.Lifecycle.ReplaceTriggeredBy, ", "),
+					Remediation: "Review replacement triggers before upgrading",
+				})
+			}
+			// ignore_changes: narrowing (old has more than new) -> warning
+			if len(oldRes.Lifecycle.IgnoreChanges) > len(newRes.Lifecycle.IgnoreChanges) {
+				report.Warnings = append(report.Warnings, DifferenceItem{
+					Category:    "LifecycleIgnoreChanges",
+					Name:        key,
+					Severity:    SeverityWarning,
+					Description: fmt.Sprintf("lifecycle.ignore_changes narrowed for resource '%s'", key),
+					OldValue:    strings.Join(oldRes.Lifecycle.IgnoreChanges, ", "),
+					NewValue:    strings.Join(newRes.Lifecycle.IgnoreChanges, ", "),
+					Remediation: "Verify previously ignored attributes are now applied",
+				})
+			}
+			// provisioner destroy-time added/removed
+			oldDestroyProv := 0
+			newDestroyProv := 0
+			for _, p := range oldRes.Provisioners {
+				if p == "destroy" {
+					oldDestroyProv++
+				}
+			}
+			for _, p := range newRes.Provisioners {
+				if p == "destroy" {
+					newDestroyProv++
+				}
+			}
+			if oldDestroyProv != newDestroyProv {
+				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					Category:    "LifecycleProvisioner",
+					Name:        key,
+					Severity:    SeverityBreaking,
+					Description: fmt.Sprintf("Destroy-time provisioner changed for resource '%s'", key),
+					OldValue:    fmt.Sprintf("%d", oldDestroyProv),
+					NewValue:    fmt.Sprintf("%d", newDestroyProv),
+					Remediation: "Review provisioner side effects before upgrading",
+				})
+			}
+		}
+	}
 }
 
 // encryptionProviders returns the set of declared state-encryption key providers.

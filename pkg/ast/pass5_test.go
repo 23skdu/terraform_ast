@@ -54,6 +54,92 @@ func TestPass5_DetectAddressShiftsMoved(t *testing.T) {
 	}
 }
 
+func TestPass5_EnrichLifecycleBackend(t *testing.T) {
+	dir := t.TempDir()
+	src := `resource "null_resource" "x" {
+  triggers = {
+    a = "b"
+  }
+  lifecycle {
+    prevent_destroy      = true
+    create_before_destroy = true
+    replace_triggered_by = [null_resource.y]
+    ignore_changes      = [triggers]
+  }
+  provisioner "local-exec" {
+    when    = destroy
+    command = "echo hi"
+  }
+}
+
+terraform {
+  backend "s3" {
+    bucket = "my-bucket"
+    key    = "path/to/state"
+  }
+}
+`
+	if err := os.WriteFile(dir+"/main.tf", []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	info := &ModuleInfo{
+		Variables:               make(map[string]VariableDef),
+		Outputs:                 make(map[string]OutputDef),
+		ModuleCalls:             make(map[string]ModuleCallDef),
+		WrapperOutputReferences: make(map[string][]OutputReference),
+		ManagedResources:        make(map[string]ResourceDef),
+		DataResources:           make(map[string]ResourceDef),
+		CheckBlocks:             make(map[string]CheckBlockDef),
+		Functions:               make(map[string]FunctionDef),
+	}
+	enrichFromHCLFiles(dir, info)
+	if len(info.ManagedResources) != 1 {
+		t.Fatalf("expected 1 managed resource, got %d", len(info.ManagedResources))
+	}
+	r := info.ManagedResources["null_resource.x"]
+	if !r.Lifecycle.PreventDestroy || !r.Lifecycle.CreateBeforeDestroy {
+		t.Fatal("lifecycle flags not captured")
+	}
+	if len(r.Provisioners) != 1 || r.Provisioners[0] != "destroy" {
+		t.Fatalf("provisioner not captured: %v", r.Provisioners)
+	}
+	if info.Backend == nil || info.Backend.Type != "s3" {
+		t.Fatalf("backend not captured: %v", info.Backend)
+	}
+	_ = info.Backend.Attributes["bucket"]
+}
+
+func TestPass5_EnrichNilMaps(t *testing.T) {
+	dir := t.TempDir()
+	src := `resource "null_resource" "x" {
+  triggers = {
+    a = "b"
+  }
+}
+
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+terraform {
+  backend "s3" {
+    bucket = "b"
+  }
+}
+`
+	if err := os.WriteFile(dir+"/main.tf", []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	info := &ModuleInfo{}
+	enrichFromHCLFiles(dir, info)
+	if info.ManagedResources == nil {
+		t.Fatal("expected managed resources initialized")
+	}
+}
+
 func TestPass5_EnrichMovedBlocks(t *testing.T) {
 	dir := t.TempDir()
 	src := `moved {

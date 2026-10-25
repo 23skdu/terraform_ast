@@ -423,6 +423,57 @@ func TestPass5_DetectAddressShiftsMovedSuppresses(t *testing.T) {
 	assert.False(t, shifts[0].IsRecreation)
 }
 
+func TestPass5_DestructiveToggles(t *testing.T) {
+	oldMod := &ast.ModuleInfo{
+		ManagedResources: map[string]ast.ResourceDef{
+			"null_resource.x": {Mode: "managed", Type: "null_resource", Name: "x", Lifecycle: ast.LifecycleFlags{PreventDestroy: true, CreateBeforeDestroy: true, IgnoreChanges: []string{"a", "b"}}, Provisioners: []string{"destroy"}},
+		},
+		Backend: &ast.BackendConfig{Type: "s3", Attributes: map[string]string{"bucket": "b1"}},
+	}
+	newMod := &ast.ModuleInfo{
+		ManagedResources: map[string]ast.ResourceDef{
+			"null_resource.x": {Mode: "managed", Type: "null_resource", Name: "x", Lifecycle: ast.LifecycleFlags{PreventDestroy: false, CreateBeforeDestroy: false, IgnoreChanges: []string{"a"}, ReplaceTriggeredBy: []string{"null_resource.y"}}, Provisioners: []string{"apply"}},
+		},
+		Backend: &ast.BackendConfig{Type: "gcs", Attributes: map[string]string{"bucket": "b2"}},
+	}
+	report := Compare(oldMod, newMod, "1.0.0", "1.1.0")
+	var hasLifecycle, hasBackend bool
+	for _, bc := range report.BreakingChanges {
+		if bc.Category == "LifecycleDestroy" {
+			hasLifecycle = true
+		}
+		if bc.Category == "StateBackendChange" {
+			hasBackend = true
+		}
+	}
+	assert.True(t, hasLifecycle)
+	assert.True(t, hasBackend)
+	// create_before_destroy removed -> warning
+	var hasCBD bool
+	for _, w := range report.Warnings {
+		if w.Category == "LifecycleCreateBeforeDestroy" {
+			hasCBD = true
+		}
+	}
+	assert.True(t, hasCBD)
+}
+
+func TestPass5_DestructiveTogglesNilAndBackendAttrs(t *testing.T) {
+	report := &DiffReport{}
+	compareDestructiveToggles(nil, nil, report)
+	require.NotNil(t, report)
+
+	// backend attribute removed + added
+	oldMod := &ast.ModuleInfo{Backend: &ast.BackendConfig{Type: "s3", Attributes: map[string]string{"bucket": "b1", "key": "k"}}}
+	newMod := &ast.ModuleInfo{Backend: &ast.BackendConfig{Type: "s3", Attributes: map[string]string{"bucket": "b1", "region": "us"}}}
+	Compare(oldMod, newMod, "1.0.0", "1.1.0")
+
+	// provisioner destroy added
+	oldMod2 := &ast.ModuleInfo{ManagedResources: map[string]ast.ResourceDef{"r": {Mode: "managed", Type: "null_resource", Name: "r", Provisioners: []string{"apply"}}}}
+	newMod2 := &ast.ModuleInfo{ManagedResources: map[string]ast.ResourceDef{"r": {Mode: "managed", Type: "null_resource", Name: "r", Provisioners: []string{"destroy"}}}}
+	Compare(oldMod2, newMod2, "1.0.0", "1.1.0")
+}
+
 func TestPass5_ResourceFullAddressAndModeLabel(t *testing.T) {
 	r := ast.ResourceDef{Mode: "data", Type: "aws_ami", Name: "x"}
 	assert.Equal(t, "data.aws_ami.x", resourceFullAddress("data", r))
