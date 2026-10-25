@@ -1,410 +1,664 @@
-# Strategic Product Roadmap
+# Strategic Product Roadmap — Pass 5
 
-This document outlines the strategic development history and completed milestones for `terraform_ast`, focusing on automated refactoring, developer ecosystem integration, multi-version upgrade planning, enterprise DevSecOps, and continuous quality verification.
+**Scope:** 20 numbered improvement items (`#91` – `#110`) covering analysis **accuracy**, analysis **performance**, and an expanded taxonomy of **destructive changes** that must be classified as breaking.
+
+**Status:** Open. Items are ordered by delivery batch, not by ID.
 
 ---
 
-## Roadmap Architecture & Delivery Status
+## 0. How this pass was produced
+
+Pass 5 was produced by reading every non-test Go source file in `cmd/`, `pkg/`, and `internal/`, then
+constructing reproductions against a locally built `bin/tfastdiff`. Nothing below is inferred from
+documentation; every gap carries a file/line citation or a command transcript.
+
+Baseline verified before writing this document:
+
+| Check | Result |
+| :--- | :--- |
+| `go build ./...` | clean |
+| `go vet ./...` | clean |
+| `go test ./pkg/diff/... ./pkg/ast/... ./pkg/blastradius/... ./pkg/report/... ./pkg/wrapper/...` | all `ok` |
+| `test/fixtures/*` | contains **no** `moved {}`, `removed {}` or `check {}` block — the newest HCL constructs are exercised only by struct literals in unit tests, never by a parsed fixture |
+| Working tree | clean |
+
+### Delivery history (unchanged record)
+
+| Pass | Items | Delivered |
+| :--- | :--- | :--- |
+| Pass 1 | `#1` – `#36` | Core analysis quality, dead code, build/release hygiene |
+| Pass 2 | `#37` – `#70` | Reproduced false negatives, LSP protocol conformance, cache safety |
+| Pass 3 | `#71` – `#76` | IR evaluation graph, OPA v1, cross-module taint, differential verification |
+| Pass 4 | `#77` – `#90` | Registry subpaths, monorepo tags, golden-plan verification |
+| **Pass 5** | **`#91` – `#110`** | **This document** |
+
+---
+
+## 1. What the analysis found
+
+Three families of problem, in descending severity.
+
+### 1.1 Detection blind spots — the tool reports SAFE for destructive transitions
+
+Reproductions (all run as `bin/tfastdiff --old <old> --new <new> --format json`):
+
+**R1 — identity violation.** Two byte-identical directories, each holding a soft `removed` block and a
+`check` block:
+
+```
+verdict SAFE  break 0  warn 0  feat 1
+features [('SoftRemovedBlock', 'aws_s3_bucket.legacy')]
+```
+
+`Δ(A -> A)` must be empty. `pkg/diff/diff.go:548-560` walks **`newMod.RemovedBlocks` only** and never
+compares against `oldMod.RemovedBlocks`, so a pre-existing soft `removed` block is re-reported as a
+new feature on every run. The identity property test at `pkg/diff/algebra_test.go:40-46` asserts
+`Verdict`, `TotalBreaking` and `TotalWarnings` but **not** `TotalNewFeatures`, and none of its eight
+fixtures contains a `removed` block — so the invariant is stated in the comment and not enforced by
+the assertion set.
+
+**R2 — an upstream declaring destruction is reported as SAFE.** `new` adds `removed {}` for a bucket
+(`destroy` defaults to `true` in Terraform 1.7+):
+
+```
+verdict SAFE  break 0  warn 0  feat 0
+```
+
+`pkg/diff/diff.go:550-559` emits a finding only when `!rb.Destroy`. The destructive case emits
+nothing at all.
+
+**R3 — silent behavioural drift.** `old` declares `variable "region" { default = "us-east-1" }`,
+`new` declares `default = "eu-west-1"`; `old` has a `check` block, `new` does not; the output value
+expression changes; the resource body changes:
+
+```
+verdict SAFE  break 0  warn 0  feat 0
+Summary: SAFE TO UPDATE: 100% backward-compatible transition from  to .
+```
+
+`VariableDef.Default` (`pkg/ast/types.go:21`) is captured by the inspector but never compared —
+`pkg/diff/diff.go` contains no reference to `oldVar.Default` — and the output `value` expression is not
+captured at all: `OutputDef` has no value field, and the `output` enrichment
+(`pkg/ast/inspect.go:440-465`) only extracts `module.*` traversals for output delegation.
+
+**R4 — `count`/`for_each` transitions are invisible.** A module changing `count = 2` on a resource to
+`for_each = toset([...])`, while also changing the state backend bucket/region, provider region and
+`default_tags`, dropping `required_version = ">= 1.5.0"`, removing `lifecycle { prevent_destroy }`,
+and moving the provider constraint `~> 4.0` → `~> 6.0` produces:
+
+```
+verdict WARNINGS_ONLY  break 0  warn 1
+warnings [('ProviderRequirement', 'aws', "constraint updated from '~> 4.0' to '~> 6.0'")]
+address_shifts absent
+```
+
+`pkg/ast/inspect.go:429-430` discards `count`/`for_each`/`providers`/`depends_on` during enrichment,
+`pkg/ast/ir.go:127-131` builds addresses with no `IndexKey`, and no code path parses `backend`,
+`provider`, `lifecycle` or `terraform.required_providers` major-bump semantics. `docs/FEATURES.md`
+section 4 claims singleton ↔ indexed transitions are detected; they are not.
+
+**R5 — blast radius flags every consumer CRITICAL.** A synthetic monorepo, 3000 root modules each
+passing `name = "prod<i>"` and `project_id` to a wrapper:
+
+```
+scanned 3000  highest CRITICAL  safe_all False
+risk dist Counter({'CRITICAL': 3000})
+sample: recreation_hazards = ["name (Resource names are immutable ...)"]
+        missing_required_inputs = ["ip_range_pods","ip_range_services","network","subnetwork"]
+```
+
+Two independent defects:
+
+* `pkg/blastradius/scanner.go:659-664` flags a **recreation hazard for any passed input whose bare
+  name matches** `genericHazards` (`pkg/recreation/heuristics.go:127-140` = `name`, `location`,
+  `region`) — with no evidence that the attribute changed. Nearly every Terraform module passes one
+  of those names, so the risk score has no discriminating power and `--exit-code` is permanently 1.
+* `pkg/blastradius/scanner.go:609-615` attributes `MissingRequiredInput` issues (whose targets are
+  **upstream** inputs the wrapper itself never declares) to the **consumer** for not passing them.
+  The wrapper is at fault; the consumer cannot pass an input the wrapper does not expose.
+
+### 1.2 Reporting and gate integrity — findings that never reach a consumer
+
+* **`UpstreamDiff` is JSON-only.** `RenderWrapperText` (`pkg/report/report.go:185`), `RenderWrapperMarkdown`
+  (`:260`) and `RenderWrapperSARIF` (`pkg/report/sarif.go:244`) never reference `res.UpstreamDiff`.
+  A wrapper whose verdict is `UPSTREAM_BREAKING_CHANGES_DETECTED` therefore renders a text, Markdown
+  and SARIF report containing **zero** breaking-change details, and `total_breaking` stays `0` while
+  `can_safely_update` is `false` — inverting the equivalence documented as INV-3 in `docs/gates.md`,
+  which is today asserted only over upgrade-path reports and never over wrapper reports.
+* **SARIF always cites line 1.** `DifferenceItem` (`pkg/diff/models.go:18-27`) carries no `Pos`,
+  although `VariableDef`, `OutputDef` and `ModuleCallDef` all do; `sarifResult` (`pkg/report/sarif.go:270-272`)
+  hard-codes `startLine: 1`. Every code-scanning result lands on line 1 of the module path.
+* **Missing SARIF rules.** Address shifts, taint reachability and upstream breaking changes have no
+  SARIF rule at all, so three of the tool's strongest signals never reach GitHub Code Scanning.
+* **Markdown drops findings.** `RenderMarkdown(r)` takes no `Findings`, so `--format markdown` loses
+  `address_shifts` in compare mode; the wrapper Markdown renderer takes `Findings` but only uses
+  `RecreationHazards` and `GoldenPlan`.
+* **`--fix` does not apply the remediation it reports.** `MissingRequiredInput` is reported as
+  breaking, but `codemod.AddMissingInputs` is reachable only from the LSP
+  (`pkg/lsp/server.go:624`); `cmd/tfastdiff/main.go:511` calls `ApplyRemovedInputs` alone, although
+  the previous roadmap listed "missing required input injection" as delivered under `--fix`.
+* **Confidence is a constant.** `scoreConfidence` (`pkg/diff/diff.go:100-119`) assigns `9` to every
+  breaking change and `9`/`8`/`7`/`6` by category to warnings. The oracle's "mean confidence ≥ 8.0"
+  gate is therefore satisfied by construction, not by evidence.
+
+### 1.3 Performance
+
+Measured on this machine with `bin/tfastdiff`:
+
+| Workload | Wall time |
+| :--- | :--- |
+| 300 tiny consumer modules (≈120 B each), `--blast-radius` | 0.021 s |
+| 3000 tiny consumer modules | 0.153 s |
+| 50 consumer modules totalling **7.1 MB** of HCL (≈14 000 lines each) | **1.629 s** |
+
+Redundant work found in the code:
+
+| Where | Cost |
+| :--- | :--- |
+| `pkg/ast/inspect.go:178-192,305` | Every uncached `Inspect` reads the whole module **three** times: `moduleFingerprint` (`pkg/ast/cache.go:28-51`) hashes full file contents, `tfconfig.LoadModule` parses, `enrichFromHCLFiles` re-reads and re-parses every file with a fresh `hclparse.Parser` |
+| `pkg/ast/cache.go:178-211` | `cacheModule` runs `json.Marshal` on **every** inspection, including pure in-memory hits with no disk cache configured; a hit then re-runs `json.Unmarshal` (`:141`) |
+| `pkg/blastradius/scanner.go:250,257,515` | Every `.tf` file in the walk is parsed **twice** — `hclsyntax.ParseConfig` at `:250`, then `extractModuleReferences` parses the same bytes again — and `refs` is computed before any check that the file contains a `module` block |
+| `cmd/tfastdiff/main.go:318,390,431` | Wrapper mode inspects wrapper → target → pinned **serially**, although `ast.InspectModulesParallel` already exists and is used for two-dir compare (`:732`) |
+| `cmd/tfastdiff/main.go:918-935` | Upgrade-path intermediate versions are **downloaded one at a time**; only the subsequent inspection is parallel (`:938`) |
+| `pkg/lsp/server.go:230,456` + `pkg/ast/inspect.go:35-52` | Every `didChange` creates a temp directory, copies all `.tf` files, runs a full inspection and deletes the directory — with no debounce and no reuse of unchanged sibling files |
+| `pkg/policy/rego.go:249-255` | `rego.New(...).Eval(...)` rebuilds and recompiles the policy module on **every** call, once per upgrade-path step (`cmd/tfastdiff/main.go:776-786`) |
+| `pkg/blastradius/scanner.go:601-631` | `evaluateCallSiteImpact` rescans the full `audit.Issues` slice for every call site — O(call sites × issues) |
+
+---
+
+## 2. The 20 improvement items
+
+| ID | Class | Pri | Item |
+| :--- | :--- | :--- | :--- |
+| `#91` | Accuracy | P0 | Diff managed resources and data sources |
+| `#92` | Accuracy | P0 | Instance-graph fidelity: `count`/`for_each`, index keys, nested module paths, deterministic address pairing |
+| `#93` | Accuracy | P0 | Modern-block symmetry: `removed { destroy = true }` is breaking, identity holds, removals are detected |
+| `#94` | Accuracy | P0 | Parse and honour `moved {}` blocks |
+| `#95` | Accuracy | P0 | Compare variable defaults and output value expressions |
+| `#96` | Accuracy | P0 | Blast radius: evidence-gated hazards and correct attribution |
+| `#97` | Accuracy | P0 | Report parity for `UpstreamDiff` across every renderer and gate |
+| `#98` | Accuracy | P1 | Provider and core constraint semantics |
+| `#99` | Accuracy | P1 | SARIF precision: real regions and rules for every finding class |
+| `#100` | Accuracy | P1 | Evidence-based confidence scoring |
+| `#101` | Accuracy | P1 | Destructive-argument and lifecycle value analysis |
+| `#102` | Accuracy | P1 | Close the remediation loop: `--fix` injects missing required inputs |
+| `#103` | Performance | P1 | Single-pass module inspection with a cheap fingerprint and marshal-once cache |
+| `#104` | Performance | P1 | Parallel wrapper-mode inspection |
+| `#105` | Performance | P1 | Concurrent upgrade-path prefetch with a shared archive cache |
+| `#106` | Performance | P1 | Blast-radius scan: parse once, pre-filter candidates, index issue lookups |
+| `#107` | Performance | P1 | Parallel directory walk for blast radius |
+| `#108` | Performance | P1 | LSP: debounce and incremental overlay staging |
+| `#109` | Performance | P2 | Prepare OPA policies once per run |
+| `#110` | Performance | P2 | Performance budget gate: benchmarks in CI |
+
+---
+
+## 3. Item detail
+
+### `#91` — Diff managed resources and data sources (Accuracy, P0)
+
+**Gap.** `ModuleInfo.ManagedResources` and `DataResources` are populated (`pkg/ast/inspect.go:261-289`)
+and consumed by the IR, but `diff.Compare` (`pkg/diff/diff.go:41-51`) never looks at them. A resource
+that disappears, changes type, or is reassigned to another provider alias produces an empty interface
+diff; only `DetectAddressShifts` sees part of it, and only when it runs.
+
+**Change.** Add `compareResources(oldMod, newMod, report)` to `diff.Compare`: removed managed/data
+resource → `BreakingChanges` (`Category: "Resource"`); added resource → `NewFeatures`; resource type
+or `provider`/alias reassignment → `BreakingChanges` (`Category: "ResourceProvider"`). Derive
+`IsRecreation` from `ast.DetectAddressShifts` so a renamed resource is reported once, not twice.
+
+**Acceptance.** Fixture pair with a removed resource yields `TotalBreaking >= 1`; identity diff of a
+resource-bearing module yields zero findings in all four buckets; every new branch covered by
+`scripts/verify.sh`.
+
+### `#92` — Instance-graph fidelity (Accuracy, P0)
+
+**Gap.** `pkg/ast/inspect.go:429-430` explicitly skips `count`, `for_each`, `providers` and
+`depends_on`; `ExtractResourceAddresses` (`pkg/ast/ir.go:119-149`) never sets `IndexKey`. Consequences:
+singleton ↔ indexed, `count` → `for_each`, `for_each` key-set changes and `count` reductions are all
+invisible, and the pairing loop (`pkg/ast/ir.go:215-222`) matches a vanished address to the **first**
+same-type new address in sorted order — an invented, non-deterministic mapping presented as fact.
+
+**Change.**
+1. Record `count`/`for_each` presence and raw expression on `ResourceDef` and `ModuleCallDef`.
+2. Populate `IndexKey`/instance metadata in the address model so `aws_instance.web[0]` and
+   `aws_instance.web["a"]` are distinguishable from `aws_instance.web`.
+3. Replace first-match pairing with deterministic best-match scoring (type, label, module path,
+   expression similarity); when no candidate scores above a threshold, report
+   `OldAddress → (unknown)` with `IsRecreation: true` and a `confidence` field instead of inventing a
+   target. Include `ModulePath` in the comparison so a resource moved into a child module is
+   classified as a move, not as a deletion.
+
+**Acceptance.** Repro R4 reports an address shift for `count = 2` → `for_each`; a module moved into
+`module.x` is classified `relocated`; pairing is stable across 100 randomized key orders (property
+test); identity diff reports zero shifts.
+
+### `#93` — Modern-block symmetry (Accuracy, P0)
+
+**Gap.** `compareModernBlocks` (`pkg/diff/diff.go:548-619`) reports only *additions*, and for
+`removed` blocks only the non-destructive case. Three consequences, all reproduced above: R1 identity
+violation for `removed`, R2 an upstream declaring `destroy = true` reported as `SAFE`, and R3 removal
+of `check`/`function`/`import`/`encryption` blocks reported as nothing.
+
+**Change.**
+1. Key every modern-block comparison on **both** directions (old set vs new set), matching the fix
+   already applied to `import`/`encryption` in `#39`.
+2. A `removed` block that is new in `newMod` with `Destroy == true` → `BreakingChanges`,
+   `Category: "RemovedDestroy"` ("upstream declares this address will be destroyed").
+3. A `removed` block that disappears → `Warnings` (destruction path no longer declared).
+4. Removal of a `check` block → `Warnings` (validation regression); removal of a custom `function`
+   or of an `encryption` block → `BreakingChanges` (callers referencing it fail; state encryption
+   stops applying); removal of an `import` block → `Warnings`.
+
+**Acceptance.** Repro R1 → `TotalNewFeatures == 0`; repro R2 → `TotalBreaking == 1`, verdict
+`BREAKING_CHANGES`; the identity property test additionally asserts
+`assert.Empty(t, report.NewFeatures)`.
+
+### `#94` — Parse and honour `moved {}` (Accuracy, P0)
+
+**Gap.** `moved` is absent from the enrichment block schema (`pkg/ast/inspect.go:330-339`), so
+upstream-shipped state migrations are invisible. Two failure modes: an address shift that upstream
+already mitigates with `moved {}` is still reported as ForceNew recreation, and `--fix` synthesises a
+**duplicate** `moved.tf` for a migration that already exists.
+
+**Change.** Add `MovedBlockDef{From, To, Pos}` to `ModuleInfo`; compare old/new sets in
+`compareModernBlocks` (new upstream `moved` → `NewFeatures`; removed upstream `moved` →
+`BreakingChanges` with `Category: "StateMigrationRemoved"`); suppress `IsRecreation` in
+`DetectAddressShifts` when a `moved` block covers the transition, and have
+`codemod.SynthesizeMovedBlocksForShifts` skip addresses already covered.
+
+**Acceptance.** Fixture pair where `new` ships `moved {}` for a renamed resource yields
+`IsRecreation == false` and `--fix` writes no duplicate block; removing a `moved` block from `new`
+yields a breaking finding.
+
+### `#95` — Compare defaults and output values (Accuracy, P0)
+
+**Gap.** Repro R3: `VariableDef.Default` is captured but never compared, and the output `value`
+expression is not captured at all (`OutputDef` has no `Value` field), so upstream silently changes
+behaviour for every caller that relies on a default or on an output's computation.
+
+**Change.**
+1. Capture the output `value` expression text in `enrichFromHCLFiles` (`output` case,
+   `pkg/ast/inspect.go:440-465`).
+2. In `compareVariables`, compare `Default` with a canonical form (literal values normalised,
+   expressions compared after whitespace folding): changed default → `BreakingChanges` when the
+   wrapper/caller does **not** pass the input (blast radius already knows which inputs are passed —
+   see `#96`), otherwise `Warnings` (`Category: "VariableDefault"`).
+3. Changed output `value` expression → `Warnings` (`Category: "OutputValue"`), promoted to
+   `BreakingChanges` when the declared output type or `sensitive` also changes.
+
+**Acceptance.** Repro R3 yields `TotalBreaking >= 1`; a caller that explicitly passes the input is
+downgraded to a warning (false-positive control); identity still holds.
+
+### `#96` — Blast radius: evidence and attribution (Accuracy, P0)
+
+**Gap.** Repro R5: 3000/3000 consumers `CRITICAL`. Causes are `pkg/blastradius/scanner.go:659-664`
+(name-only hazard lookup, no evidence the attribute changed) and `:609-615` (upstream-only
+`MissingRequiredInput` targets attributed to consumers).
+
+**Change.**
+1. Fire a recreation hazard for a consumer only when the attribute is **actually part of the diff**
+   (a `DifferenceItem` on that name in `res.UpstreamDiff`/`res.Issues`) or is confirmed by
+   `DynamicHazardRegistry` for a resource the wrapper declares; a bare `genericHazards` name match
+   with no changed input is downgraded to `LOW` and reported as "watch", not as a hazard.
+2. Attribute `MissingRequiredInput` to a consumer only when the **wrapper declares** that input and
+   the consumer omits it; otherwise the finding belongs to the wrapper audit alone.
+3. Require `AnalysisIncomplete` to be scored separately from `CRITICAL` so incomplete evaluation never
+   inflates the risk distribution.
+4. Emit a risk distribution summary (`counts by risk`) so a user can see discrimination at a glance.
+
+**Acceptance.** On the R5 corpus, `highest_risk` is no longer uniformly `CRITICAL`; a consumer that
+passes only inert inputs scores `LOW`; a consumer that genuinely passes a removed input or a changed
+immutable attribute still scores `CRITICAL`; `--exit-code` returns 0 for the inert corpus and 1 for
+the seeded-breaking corpus.
+
+### `#97` — Report parity for `UpstreamDiff` (Accuracy, P0)
+
+**Gap.** `UpstreamDiff` reaches only JSON. Text, Markdown and SARIF renderers omit it, and
+`WrapperCompatibilityReport.TotalBreaking`/`TotalWarnings` exclude it, so
+`can_safely_update = false` coexists with `total_breaking = 0` — the documented INV-3 equivalence
+fails for every `UPSTREAM_BREAKING_CHANGES_DETECTED` report.
+
+**Change.** Render an `UPSTREAM BREAKING CHANGES (n):` section in `RenderWrapperText`,
+`RenderWrapperMarkdown` and a `TF-UPSTREAM-BREAKING-CHANGE` rule in `RenderWrapperSARIF`; add
+`UpstreamBreaking`/`UpstreamWarnings` counters **and** fold them into `TotalBreaking`/`TotalWarnings`
+(keeping the sub-counts for detail); assert `total_breaking == 0 <=> can_safely_update` over wrapper
+reports in the accuracy gate.
+
+**Acceptance.** A wrapper report with upstream breakage renders the same finding count in text,
+Markdown, JSON and SARIF; `total_breaking > 0` whenever `verdict == "UPSTREAM_BREAKING_CHANGES_DETECTED"`.
+
+### `#98` — Provider and core constraint semantics (Accuracy, P1)
+
+**Gap.** `~> 4.0` → `~> 6.0` is a generic warning at confidence 7 (`pkg/diff/diff.go:466-478`); a
+provider major migration routinely forces resource replacement and state/provider-address migration.
+Conversely, `required_version` is only reported when the new constraint is **non-empty**
+(`pkg/diff/diff.go:404`), so deleting `required_version = ">= 1.5.0"` is silent.
+
+**Change.** Parse both constraints with `semverutil`, classify provider constraint transitions as
+`major`/`minor`/`patch`/`widened`/`narrowed`/`removed`; a major bump or a source change →
+`BreakingChanges` (`Category: "ProviderMajorUpgrade"`) carrying the migration note; a removed
+`required_version` → `Warnings` (`Category: "TerraformCore"`); keep narrowing as a warning with the
+specific excluded versions named.
+
+**Acceptance.** Repro R4 reports a breaking provider-major finding in addition to the existing
+warning; deleting `required_version` produces a warning; constraint-only-noise cases (whitespace,
+ordering of a multi-constraint list) produce nothing.
+
+### `#99` — SARIF precision (Accuracy, P1)
+
+**Gap.** `sarifResult` hard-codes `startLine: 1` (`pkg/report/sarif.go:270-272`) because
+`DifferenceItem` has no `Pos`, although `VariableDef.Pos`, `OutputDef.Pos` and `ModuleCallDef.Pos`
+exist. No rule exists for address shifts, taint, or upstream breakage.
+
+**Change.** Add `Pos tfconfig.SourcePos` to `DifferenceItem` and `WrapperIssue`, populated from the
+old (removed) or new (added) declaration; emit real `startLine`; add rules
+`TF-ADDRESS-SHIFT`, `TF-TAINT-REACHABLE`, `TF-UPSTREAM-BREAKING-CHANGE`; emit one result per address
+shift with the old artifact URI and line. Drop `Locations` only when no position can be resolved, and
+say so in the message rather than defaulting to line 1.
+
+**Acceptance.** `grep -c '"startLine": 1'` over SARIF from a fixture diff is less than the result
+count; a removed variable points at its declaration line; `gosec`/SARIF schema validation still pass.
+
+### `#100` — Evidence-based confidence (Accuracy, P1)
+
+**Gap.** Confidence is a constant (`pkg/diff/diff.go:100-119`, `pkg/wrapper/analyzer.go:358-367`).
+The oracle gate "mean confidence ≥ 8.0" is satisfiable by the constant alone, so the number carries no
+information for a consumer ranking findings.
+
+**Change.** Score from evidence: +3 provider-schema-confirmed `requires_replace`; +3 structural
+identity (removed symbol, absent symbol); +2 parsed-literal value comparison; +1 heuristic name match
+(`genericHazards`); −1 when the finding depends on unevaluated dynamic input. Clamp to `[1,10]`,
+require `>= 7` for breaking as INV-6 already does, and document the table in
+`docs/TESTING_METHODOLOGY.md`.
+
+**Acceptance.** No category keeps a fixed score; a schema-confirmed hazard scores strictly higher than
+a bare name match; INV-6 still holds on the accuracy gate; the oracle report shows a spread rather
+than a spike.
+
+### `#101` — Destructive-argument and lifecycle value analysis (Accuracy, P1)
+
+**Gap.** The diff is entirely **name-based**. Toggles that control destruction are carried in
+*values* and in blocks no code path parses: `lifecycle { prevent_destroy / create_before_destroy /
+replace_triggered_by / ignore_changes }`, `deletion_protection`, `force_destroy`, `triggers`,
+`provisioner` blocks (especially `when = destroy`), and `backend {}` configuration. Repro R4 confirms
+the `prevent_destroy` removal is silent.
+
+**Change.** Extend `enrichFromHCLFiles` with schemas for `resource`/`data`/`module`/`terraform`
+sub-blocks; record `lifecycle` flags, provisioner presence and `when`, backend type and its literal
+attributes, and `triggers`. Compare them: removing `prevent_destroy`/`deletion_protection` →
+`BreakingChanges`; adding `replace_triggered_by` or a destroy-time provisioner → `BreakingChanges`;
+`ignore_changes` narrowing → `Warnings`; `backend` bucket/key/region change → `BreakingChanges`
+(`Category: "StateBackendChange"`).
+
+**Acceptance.** Repro R4 (minus the provider/core parts handled by `#98`) yields
+`TotalBreaking >= 2`; a backend key change is reported for a root module; a fixture with no
+lifecycle/provisioner blocks is unchanged.
+
+### `#102` — Close the remediation loop (Accuracy, P1)
+
+**Gap.** `codemod.AddMissingInputs` is reachable only from the LSP (`pkg/lsp/server.go:624`).
+`--fix` (`cmd/tfastdiff/main.go:504-544`) removes obsolete arguments but never inserts the required
+ones it just reported, so a user must hand-edit the file the tool diagnosed.
+
+**Change.** In `runWrapperMode`, collect `MissingRequiredInput` issues from `res.Issues`, map them to
+placeholder values from the upstream variable's `Default`/type, and call `codemod.AddMissingInputs`;
+mirror it in `--fix-preview` with a unified diff. Refuse (exit 2) when no safe placeholder can be
+derived rather than writing `null` into a required input.
+
+**Acceptance.** `--fix` on a wrapper missing a required input writes the argument and the subsequent
+audit reports `MissingRequiredInput == 0`; `--fix-preview` changes no files; the value-fallback
+failure path returns 2 with an actionable message.
+
+### `#103` — Single-pass inspection (Performance, P1)
+
+**Gap.** Each uncached `Inspect` reads the module three times and parses it twice (§1.3), and
+`cacheModule` marshals JSON even when no disk cache is configured.
+
+**Change.** Parse once: reuse the `hclparse.Parser` output already produced by `enrichFromHCLFiles`
+for the enrichment pass, or derive both `tfconfig`-level and enrichment-level facts from one file
+read; make `moduleFingerprint` a stat-based fast path (`name + size + mtime`) that falls back to full
+content hashing only when a stat-derived key is absent or the stat set changed; skip
+`json.Marshal` when neither the in-memory nor the disk cache will be written.
+
+**Acceptance.** Benchmark `BenchmarkInspectModule` shows a ≥30 % reduction in `B/op` and `ns/op` on a
+30-file module; a cache hit still invalidates on content change with equal mtime+size (test writes the
+same size with different bytes and asserts a miss); behavior of `Inspect` is unchanged on all
+fixtures.
+
+### `#104` — Parallel wrapper-mode inspection (Performance, P1)
+
+**Gap.** Wrapper, target and pinned inspections run serially (`cmd/tfastdiff/main.go:318,390,431`).
+
+**Change.** Inspect wrapper and target concurrently; once the target version is known, inspect the
+pinned version concurrently with the wrapper inspection. Keep registry downloads on their own
+goroutines (they are I/O bound) with the existing context cancellation.
+
+**Acceptance.** Wall time for wrapper mode with two local fixture modules drops; ordering of reports
+is unchanged (assert against golden files); `-race` clean.
+
+### `#105` — Concurrent upgrade-path prefetch (Performance, P1)
+
+**Gap.** `cmd/tfastdiff/main.go:918-935` resolves each intermediate version sequentially; only the
+later `InspectModulesParallel` call is concurrent. For a 20-step path at ~300 ms per registry fetch,
+the dominant term is serial network time. Extracted archives are discarded afterwards, so a second
+run repeats every download.
+
+**Change.** Prefetch intermediate versions with a bounded worker pool (default
+`min(8, GOMAXPROCS)`) feeding the existing parallel inspection; add a content-addressed archive cache
+under `--cache-dir` keyed `source@version` so a repeated CI run starts from disk; keep
+`registry-timeout` as a whole-operation bound by deriving a per-fetch deadline from the remaining
+context budget.
+
+**Acceptance.** A mock registry with 100 ms latency and 12 intermediate versions completes prefetch
+in `≤ 2 × latency × ceil(12/pool)`; a second run performs zero network fetches; cancellation during
+prefetch leaves no temp directories (assert empty `tfastdiff_upgrade_step_*`).
+
+### `#106` — Blast-radius scan internals (Performance, P1)
+
+**Gap.** Every `.tf` file is parsed twice and reference extraction runs even for files that contain no
+`module` block (`pkg/blastradius/scanner.go:250,257,515`); `evaluateCallSiteImpact` rescans all
+issues per call site (`:601-631`).
+
+**Change.** Parse each file once and derive both block structure and `module.x.y` references from the
+same `*hclsyntax.Body`; pre-filter with a cheap byte scan for `module`/`inputs`/`terragrunt` before
+parsing; reuse one `hclparse.Parser` per walk instead of per file; index `audit.Issues` by
+`(category, target)` once before the loop.
+
+**Acceptance.** Benchmark on the 7.1 MB corpus shows ≥35 % wall-time reduction; call-site discovery
+output is byte-identical to today's (golden compare on `test/fixtures/downstream_consumer`); no
+behavior change in risk scores.
+
+### `#107` — Parallel directory walk (Performance, P1)
+
+**Gap.** `filepath.WalkDir` in `discoverCallSites` reads and parses files on one goroutine.
+
+**Change.** Two-phase walk: collect candidate paths on the walker, then process them through a
+bounded worker pool preserving deterministic ordering by sorting results on `(file, block position)`
+before returning. Respect the existing skip rules (`.terraform`, `vendor`, dot-directories) and
+propagate the first read error.
+
+**Acceptance.** Output ordering is identical across 20 runs (determinism test); wall time on the
+7.1 MB corpus improves; `RACE=1 make test` is clean.
+
+### `#108` — LSP debounce and incremental overlay (Performance, P1)
+
+**Gap.** Every `didChange` stages a temp directory and re-inspects the whole module
+(`pkg/ast/inspect.go:35-52`, `pkg/lsp/server.go:456`) with no debounce — O(module size) per keystroke.
+
+**Change.** Debounce diagnostics (default 200 ms, configurable via `initializationOptions`); reuse
+the last inspection for unchanged sibling files by caching per-file parse results keyed on content
+hash, staging only the edited file into an in-memory overlay instead of copying the directory; publish
+only when the diagnostic set actually changes.
+
+**Acceptance.** A burst of 100 `didChange` notifications for the same document results in ≤ 5
+inspections; diagnostics content is unchanged for a saved document; a save-only client still works
+(existing test preserved).
+
+### `#109` — Prepare OPA policies once (Performance, P2)
+
+**Gap.** `EvaluateRegoArbitrary` calls `rego.New(...).Eval(...)` per invocation
+(`pkg/policy/rego.go:249-255`), i.e. recompiles the policy for every upgrade-path step and re-marshals
+the full report for every call (`pkg/policy/rego.go:196`).
+
+**Change.** Prepare the query once per `RegoPolicy` (`rego.PrepareForEval`) with the prepared object
+stored on the policy, cache the marshalled report map per `DiffReport` pointer, and reuse both across
+the step loop; keep the fail-closed behaviour on compile errors.
+
+**Acceptance.** A 20-step upgrade path with one Rego file shows ≥50 % lower policy-eval time in a
+benchmark; identical violation sets before/after (golden compare); compile-error path still fails
+closed.
+
+### `#110` — Performance budget gate (Performance, P2)
+
+**Gap.** `scripts/verify.sh` gates correctness (format, vet, lint, 100 % coverage, fuzz) but nothing
+stops a performance regression; the measurements in §1.3 are ad hoc.
+
+**Change.** Add `TestBenchmark*` benchmarks for `ast.Inspect`, `diff.Compare`,
+`blastradius.ScanDirectory*` and `report.Render*`, plus a `make perf` target running
+`go test -bench . -benchtime=... -count=5` with `benchstat`, storing a checked-in baseline for the
+three fixture corpora and failing on a >15 % regression in `ns/op`; wire it into CI as a non-blocking
+job for the first release, blocking afterwards.
+
+**Acceptance.** `make perf` runs in CI, the baseline is committed, and a deliberate 2× slowdown in a
+seeding commit is caught by the gate.
+
+---
+
+## 4. Expanded destructive-change taxonomy
+
+The current destructive-change vocabulary is effectively two things: immutable-attribute hazards
+(`pkg/recreation`) and resource address shifts (`pkg/ast/ir.go`). This pass widens the definition of
+**breaking** to the classes below. Severity is assigned per class, and each class names the roadmap
+item that implements it.
+
+### Class I — State address displacement (destroy + recreate)
+
+| # | Change | Severity | Status today | Item |
+| :--- | :--- | :--- | :--- | :--- |
+| I.1 | Resource label rename at the same type | Breaking (recreation) | Detected, arbitrary pairing | `#92` |
+| I.2 | Resource type change at the same label | Breaking (recreation) | Detected, arbitrary pairing | `#92` |
+| I.3 | Resource moved into/out of a child module | Breaking (recreation) | Reported as "removed"; module path ignored | `#92` |
+| I.4 | Singleton ↔ indexed: `count` added/removed, `count` ↔ `for_each` | Breaking (recreation) | **Not detected** | `#92` |
+| I.5 | `for_each` key-set removal or `count` reduction (instance loss) | Breaking (destruction) | **Not detected** | `#92` |
+| I.6 | Nested `module { source }` swap inside the upstream module | Breaking (all child addresses) | **Not detected** (`ModuleCalls` unused by `diff`) | `#91`, `#92` |
+| I.7 | Loss of an upstream `moved {}` migration | Breaking (state migration missing) | **Not detected** | `#94` |
+
+### Class II — Immutable-attribute (ForceNew) changes
+
+| # | Change | Severity | Status today | Item |
+| :--- | :--- | :--- | :--- | :--- |
+| II.1 | Wrapper input mapped to a `requires_replace` attribute | Breaking | Detected, but name-keyed → CRITICAL flood | `#96`, `#100` |
+| II.2 | Resource-body attribute change on a `requires_replace` field | Breaking | **Not detected** (resource bodies are never read) | `#91`, `#101` |
+| II.3 | Provider major upgrade reclassifying attribute mutability | Breaking | Warning only | `#98` |
+| II.4 | `replace_triggered_by` / `triggers` added or narrowed | Breaking | **Not detected** | `#101` |
+| II.5 | `ignore_changes` narrowed (previously ignored attrs now applied) | Warning → Breaking if the attribute is ForceNew | **Not detected** | `#101` |
+
+### Class III — Explicit destruction and lifecycle gates
+
+| # | Change | Severity | Status today | Item |
+| :--- | :--- | :--- | :--- | :--- |
+| III.1 | New `removed { from = … }` with `destroy = true` (Terraform default) | **Breaking — destruction declared** | **Silent** (repro R2) | `#93` |
+| III.2 | Soft `removed { destroy = false }` reported on an identity diff | must not be a finding | **False positive** (repro R1) | `#93` |
+| III.3 | `lifecycle { prevent_destroy }` removed | Breaking | **Not detected** (repro R4) | `#101` |
+| III.4 | `create_before_destroy` removed | Warning (downtime window) | **Not detected** | `#101` |
+| III.5 | `deletion_protection` / `force_destroy` input default flipped to permissive | Breaking when the caller does not set it | **Not detected** | `#95`, `#101` |
+| III.6 | Destroy-time `provisioner` added or removed | Breaking (side effects change) | **Not detected** | `#101` |
+
+### Class IV — Provider, backend and state-migration changes
+
+| # | Change | Severity | Status today | Item |
+| :--- | :--- | :--- | :--- | :--- |
+| IV.1 | Provider source change | Breaking | Detected | — |
+| IV.2 | Provider constraint **major** bump (`~> 4.0` → `~> 6.0`) | Breaking (schema/state migration) | Warning, confidence 7 | `#98` |
+| IV.3 | Resource `provider`/alias reassignment | Breaking | **Not detected** | `#91` |
+| IV.4 | `required_version` tightening / **removal** | Warning; Breaking when removed and previously enforced | Removal **silent** (`newCore != ""` guard) | `#98` |
+| IV.5 | `backend {}` type or bucket/key/region change | Breaking (state location moves) | **Not detected** | `#101` |
+| IV.6 | `encryption {}` key provider change or removal (OpenTofu) | Breaking; removal = encryption off | Addition only; removal **silent** | `#93` |
+| IV.7 | New required `configuration_aliases` | Breaking | Detected | — |
+
+### Class V — Silent behaviour changes (no interface change)
+
+| # | Change | Severity | Status today | Item |
+| :--- | :--- | :--- | :--- | :--- |
+| V.1 | Variable `default` value change | Breaking if the caller omits the input, else Warning | **Silent** (repro R3) | `#95` |
+| V.2 | Output `value` expression change | Warning; Breaking if type/sensitivity changes | **Not detected** (`OutputDef` has no value) | `#95` |
+| V.3 | Validation rule tightened to reject previously valid input | Warning → Breaking when a literal comparison proves rejection | Warning only | `#95`, `#100` |
+| V.4 | Wrapper-passed input **value** change reaching an immutable attribute | Breaking | Names compared only | `#96`, `#101` |
+| V.5 | Data-source selector change (`most_recent`, filters) feeding replacements | Warning → Breaking on resource association | **Not detected** | `#91` |
+| V.6 | `locals` change feeding a resource argument | Warning (with taint trace when `--taint` is set) | Not detected in `diff` | `#95`, `#101` |
+
+### Class VI — Validation and operational regressions
+
+| # | Change | Severity | Status today | Item |
+| :--- | :--- | :--- | :--- | :--- |
+| VI.1 | `check {}` assertion removed or weakened | Warning | **Silent** (repro R3) | `#93` |
+| VI.2 | Custom `function {}` removed (callers fail at plan) | Breaking | **Silent** | `#93` |
+| VI.3 | `import {}` block removed | Warning (re-import required) | **Silent** | `#93` |
+| VI.4 | `removed {}` block removed (destruction path undeclared again) | Warning | **Silent** | `#93` |
+
+**Severity policy.** One rule governs the whole table: a finding is `BREAKING` iff applying the new
+version to an unchanged caller changes what Terraform would create, update-in-place, or destroy; it is
+`WARNING` when the change alters behaviour a caller can observe but does not move state; it is a
+`NEW_FEATURE` only when it strictly adds capability. Class V.1 and II.5 are decided per caller, using
+the blast-radius input set, so a value change that a caller overrides is never reported as breaking —
+that is the false-positive control keeping `#95` from regressing into the `#96` failure mode.
+
+---
+
+## 5. Delivery sequence
 
 ```mermaid
 flowchart TD
-    A["v0.1.0 - v0.2.0 Core analysis and trust<br/>v0.3.0 - v0.4.0 Remediation and automation<br/>v0.5.0 - v0.6.0 Codemods and scaling"] --> B["v0.7.0 Deep semantic taint and language evolution"]
-    B --> C["v0.8.0 Enterprise DevSecOps and governance"]
-    C --> D["v0.9.0 Continuous quality and cloud emulation"]
-    D --> E["Gap analysis backlog<br/>Pass 1 (#1-#36): Closed<br/>Pass 2 (#37-#70): Closed<br/>Pass 3 (#71-#76): Closed<br/>Pass 4 (#77-#90): Closed"]
+    A["Batch A: False negatives<br/>#91 #92 #93 #94 #95 #96 #97"] --> B["Batch B: Precision<br/>#98 #99 #100 #101 #102"]
+    B --> C["Batch C: Performance<br/>#103 #104 #105 #106 #107"]
+    C --> D["Batch D: Tooling<br/>#108 #109 #110"]
+    D --> E["Pass 6 gap analysis<br/>reopen only from reproductions"]
 ```
+
+| Batch | Items | Rationale |
+| :--- | :--- | :--- |
+| A — False negatives | `#91`–`#97` | Each item starts from a reproduction that currently reports `SAFE`; these are the changes that stop silent destruction |
+| B — Precision | `#98`–`#102` | Improves what a reported finding says and whether it should have been reported |
+| C — Performance | `#103`–`#107` | Removes duplicated work; measurable against the §1.3 baseline |
+| D — Tooling | `#108`–`#110` | Sustains A–C after delivery |
 
 ---
 
-## Delivered Capabilities & Release History
-
-All strategic roadmap milestones have been fully implemented, verified, and delivered with 100.0% statement test coverage:
-
-| Milestone | Delivered Scope | Key Capabilities |
-| :--- | :--- | :--- |
-| **v0.1.0 – v0.2.0** | **P0: Core Analysis Quality & Trust** | Terraform HCL/JSON AST parser, module meta-arguments (`count`/`for_each`/`providers`), confidence scoring, variable validation & nullability diffing, SHA-256 fingerprint caching, Terragrunt consumer inspection. |
-| **v0.3.0** | **P1: Operational Remediation & Safe Pinning** | Semantic policy evaluation engine (`pkg/policy`), safe-pin recommendation engine (`pkg/planner`), actionable remediation guidance, and preview patch synthesis. |
-| **v0.4.0** | **P2: Developer Workflow & Automation** | Pre-commit hook configuration (`.pre-commit-hooks.yaml`), Docker-based GitHub Action (`action.yml`), SARIF v2.1.0 output formatting for GitHub Code Scanning, and automated PR comment summaries. |
-| **v0.5.0** | **P3: Automated Migration Codemods & Planner** | In-place refactoring (`--fix`) and preview (`--fix-preview`) via `hclwrite`, automatic `moved {}` block synthesis, missing required input injection, and multi-version transitive Git tag upgrade path planner. |
-| **v0.6.0** | **P4: Dynamic Schema & High-Performance Scaling** | Attribute-level dynamic provider schema ForceNew hazard detection (`DynamicHazardRegistry`, `terraform providers schema -json`), parallel AST worker pools (`InspectModulesParallel`), and persistent L2 content-addressable disk cache (`--cache-dir`). |
-| **v0.7.0** | **Phase 1: Deep Semantic Taint & Language Evolution** | Embedded `hcl.EvalContext` with Terraform standard functions (`concat`, `merge`, `lookup`, `coalesce`, `element`, `jsondecode`), Terragrunt dynamic `inputs = merge(...)` evaluation, input taint dependency reachability analysis (`pkg/eval`), modern Terraform 1.6–1.9 & OpenTofu 1.6–1.7+ blocks (`removed` with soft lifecycle, `check`, `import`, custom `function`, `encryption`). |
-| **v0.8.0** | **Phase 2: Enterprise DevSecOps & Governance** | Hermetic SLSA Level 3 builder (`.github/workflows/slsa-release.yml`), Sigstore Cosign keyless image/binary signing, Syft CycloneDX & SPDX SBOM generation, Trivy CVE scanning, Open Policy Agent (OPA / Rego) evaluation engine (`pkg/policy/rego.go`), and JSON-RPC 2.0 Language Server Protocol (LSP) daemon (`tfastdiff daemon` / `--lsp`) with buffer-aware diagnostics. |
-| **v0.9.0** | **Phase 3: Continuous Quality & Cloud Emulation** | Multi-Cloud Golden Image Test Matrix (`internal/goldentest/drift.go`) across GCP, AWS, and Azure, automated scheduled upstream drift detection (`.github/workflows/drift-detection.yml`), algebraic invariant property testing (Identity & Triangle Inequality Invariants), differential compiler fuzzing (`pkg/ast/diff_fuzz_test.go`) against native HashiCorp Terraform and OpenTofu cores, and offline Terratest emulated plan state validation (`Plan: 0 to destroy` on safe updates, `(forces replacement)` on `ForceNew`). |
-
----
-
-## Roadmap Delivery Summary Matrix
-
-| Milestone | Status | Feature Area | Primary Value | Key Technology |
-| :--- | :--- | :--- | :--- | :--- |
-| **v0.7.0** | **Delivered** | **Semantic Taint & Language Evolution** | Deep expression evaluation and modern HCL/OpenTofu syntax | `hcl.EvalContext`, taint analysis, modern HCL blocks |
-| **v0.8.0** | **Delivered** | **Enterprise DevSecOps & Governance** | Cryptographic supply chain verification and IDE feedback | SLSA L3, Cosign, Syft SBOM, OPA/Rego, LSP Daemon |
-| **v0.9.0** | **Delivered** | **Continuous Quality & Cloud Emulation** | Upstream drift detection, differential fuzzing, and offline plan validation | Golden matrix, differential fuzzing, Terratest emulated plan validation |
-
----
-
-# Gap Analysis & Engineering Backlog (Pass 1 — Items #1 to #36)
-
-> **Status:** 100% Closed & Delivered. **Scope:** Deep code analysis of the CLI (`cmd/tfastdiff`), all `pkg/*` engines,
-> `internal/goldentest`, GitHub Actions workflows, `action.yml`, and documentation.
->
-> All 36 findings across P0 (Shipping Blockers), P1 (Dead Code), P2 (Analysis Correctness & Verification Credibility),
-> and P3 (Build, Release & Repo Hygiene) have been fully resolved, verified with regression tests, and delivered.
-> Completed defect tables have been cleared from the pending backlog; full implementation details and architectural
-> changes are recorded in the permanent Resolution Logs below.
-
-
----
-
-# Pass 2 — Reproduced Defects & Additional Gaps (#37 – #70)
-
-> **Status:** 100% Closed & Delivered. All 34 findings (#37 through #70) across P0 (False Negatives),
-> P1 (Analysis Correctness, Wiring & Robustness), and P2 (CI, Supply Chain & Repo Hygiene) have been fully
-> fixed, tested, and verified.
-> Completed defect tables have been cleared from the pending backlog; full implementation details and architectural
-> changes are recorded in the permanent Resolution Logs below.
-
-### Resolution log — Batches 1–3 (closed)
-
-| Item | Status | What changed |
-| :--- | :--- | :--- |
-| #37 | **Fixed** | `AnalyzeWrapper` verdict now folds `UpstreamDiff` in; new `UPSTREAM_BREAKING_CHANGES_DETECTED` verdict blocks the pin and carries the upstream remediation steps. `pkg/wrapper/analyzer.go` |
-| #38 | **Fixed** | Recreation hazards no longer require a matching wrapper audit issue. `pkg/blastradius/scanner.go` |
-| #39 | **Fixed** | `import {}` / `encryption {}` blocks are compared against the old module. `pkg/diff/diff.go` |
-| #40 | **Fixed** | Oversize archive entries now error instead of silently truncating. `pkg/registry/client.go` |
-| #41 | **Fixed** | `GetLatestVersion` and pinned-resolution errors now fail loudly (exit 1) instead of being discarded. `cmd/tfastdiff/main.go` |
-| #42 | **Fixed** | `--format` is validated against the four supported renderers. |
-| #56 | **Fixed** | `--fix` / `--fix-preview` reject `--blast-radius`, `--provider-schema`, an explicit `--check-recreation`, and a non-text `--format`. |
-| #3 | **Fixed** | Added `BumpUnknown`, distinct from `BumpInvalid`; `max_bump` no longer fires when no version was supplied. |
-| #2 | **Fixed** | `--blast-radius` is rejected in comparison mode instead of silently discarded. |
-| #1 | **Partially fixed** | `--blast-radius` now treats an empty value as unset and rejects a flag-shaped value. `action.yml` still passes the flag positionally; the definitive fix is a composed arg list (blocked on #27). |
-| #13 | **Fixed (in part)** | `LookupHazard` no longer bleeds across providers: a classified module resolves only its own table, and an unclassified module falls back to a provider-agnostic table that reports the hazard without naming an invented resource. The remaining part — resolving the provider from the module *source* — is #46/#47. |
-| #21 | **Fixed** | The two failing-path tests set `RetryMaxElapsedTime`, cutting `cmd/tfastdiff` from **383s to 0.2s**. |
-| #63 | **Fixed** | `--registry-timeout` bounds the retry window, and `signal.NotifyContext` cancels in-flight registry requests on SIGINT/SIGTERM so the deferred cache clear always runs. |
-
-Two latent problems were uncovered while landing these and fixed in the same change:
-
-- `TestExecute_WrapperPolicyCombinesUpstreamDiff` was **passing vacuously**. It built a `v1.0.0`
-  repository but asked the `v2.0.0` repository for that tag, so the pinned fetch always failed, was
-  swallowed, and the "upstream diff" it asserted on was an identical no-op. It now builds one
-  repository carrying both tags and asserts a real transition.
-- `TestExecute_GitErrorBranches` asserted that a failing pinned lookup "degrades gracefully". That
-  graceful degradation *was* the #41 defect, so the expectation was inverted and replaced with
-  `TestExecute_PinnedVersionMustResolve`.
-
-
-### Resolution log — Terragrunt batch (closed)
-
-| Item | Status | What changed |
-| :--- | :--- | :--- |
-| #14 | **Fixed** | Dynamic Terragrunt inputs now evaluate. Added `pkg/eval/terragrunt.go` with a Terragrunt function set (`get_env`, `get_terragrunt_dir`, `get_parent_terragrunt_dir`, `path_relative_to_include`, `find_in_parent_folders`, `read_terragrunt_config`, `try`), locals resolution that iterates so a local may reference one declared later, and include-chain following with Terragrunt's child-over-parent precedence. A committed `test/fixtures/terragrunt_env/` fixture now exercises it; the package had none. |
-
-Before this, `parseTerragruntCallSite` called `eval.BuildEvalContext(nil, nil)`, which left `local`
-empty and implemented none of the Terragrunt built-ins, so `merge(local.defaults, {...})` always
-failed. Every realistic Terragrunt consumer was flagged `InputAnalysisIncomplete` →
-`CanSafelyUpdate=false` → `MEDIUM` risk, which made `--blast-radius` close to useless on the
-ecosystem it exists to serve.
-
-Three limits are deliberate and documented rather than papered over:
-
-- **Only functions determinable from the configuration and filesystem are implemented.** A call to
-  anything cloud- or shell-dependent is absent, so evaluation fails and the consumer is reported as
-  unanalysed. Returning a plausible value would claim full understanding that does not exist.
-- **`try()` cannot catch a failing function.** cty evaluates every argument before the
-  implementation runs, so `try(read_terragrunt_config("x"), {})` propagates the error rather than
-  falling back. `TestTerragruntTryCannotCatchFunctionErrors` pins that. `read_terragrunt_config`'s
-  own default argument does work, and is covered separately.
-- **A literal `inputs = { ... }` object is still recorded verbatim, not evaluated.** Blast radius
-  only compares input *names* against the wrapper, so the source text is sufficient and more
-  faithful to what the file says. `TestTerragruntStaticInputsKeepSourceText` documents this.
-
-### Resolution log — wrapper audit and cache batch (closed)
-
-| Item | Status | What changed |
-| :--- | :--- | :--- |
-| #15 | **Fixed** | A second false negative. The audit sorted the wrapper's module-call names and broke on the first, so a wrapper calling several upstream modules was checked against exactly one of them. A removed input passed to any other call was reported as safe to pin. Every call is now audited; the per-call input and output-delegation checks are evaluated per call rather than over an aggregate, and findings iterate in sorted order so reports stay stable. |
-| #5 | **Fixed** | `ast.ClearPersistentCache` called `os.RemoveAll` on whatever `--cache-dir` named, so `--cache-dir .` destroyed the repository. It now validates the directory, removes only files matching the cache's own `<sha256>.json` naming, and refuses a directory holding anything else. Reachable as `--clear-cache`, which requires `--cache-dir`. |
-
-### Resolution log — LSP batch (closed)
-
-| Item | Status | What changed |
-| :--- | :--- | :--- |
-| #50 | **Fixed** | Notifications are never answered. `HandleRequest` distinguishes a request (has `id`) from a notification and returns no response for the latter, instead of replying `-32601` to `didChange`, `exit`, `$/cancelRequest`, and every other unhandled method. |
-| #51 | **Fixed** | The advertised quick fixes now execute. `initialize` returns `executeCommandProvider`, and `workspace/executeCommand` implements both commands — which is what wires up the previously unreachable `codemod.WriteMovedBlocks` and `codemod.AddMissingInputs` (#7, #12). Arguments are a single JSON object rather than a positional list, because the input names and the directory were both trailing strings and neither could be validated. |
-| #52 | **Fixed** | Diagnostics follow the editor buffer. Added `ast.InspectSource`, which analyses in-memory text and rewrites every recorded position back to the real files; the server prefers the buffer and falls back to disk, so a save-only client still works and a half-typed file does not raise an error on every keystroke. Line numbers are clamped, so a missing position can no longer produce a negative LSP line. |
-| #4 | **Fixed** | `textDocument/didChange` is handled, and `exit` terminates the daemon. The server previously only stopped on stdin EOF, so a client following the LSP lifecycle waited for the editor to close the pipe. |
-| #24 (partial) | **Fixed** | `serverInfo.version` is no longer quoted with a `v` prefix (the LSP client displays it verbatim) and no longer claims `v0.8.0`. |
-
-### Resolution log — Engineering backlog closure (closed)
-
-| Item | Status | What changed |
-| :--- | :--- | :--- |
-| #6, #46 | **Fixed** | `--rego-policy` flag wired across wrapper mode, direct compare mode, and upgrade path mode via `policy.LoadRego` and `policy.EvaluateRego`. Rego parser fails closed on unrecognized fields or zero rules, and supports modern Rego syntax (`contains`, `if`). |
-| #8 | **Fixed** | `eval.AnalyzeVariableTaint` wired via `--taint <var>` in wrapper mode, and attached to `report.Findings` with markdown and text formatting. |
-| #9, #49 | **Fixed** | Intermediate upgrade-path versions inspected concurrently via `ast.InspectModulesParallel`, replacing serial downloads and inspections. `runCompareMode` parallelized via worker pool. |
-| #12 | **Fixed** | Unified LSP daemon execution via `lsp.RunDaemonStreams(in, out)` for both `tfastdiff daemon` and `--lsp`. |
-| #16 | **Fixed** | `NewFeatureAdoptions` filtered against `pinnedUpstream` variables to omit existing variables from new feature recommendations. |
-| #17, #18 | **Fixed** | SARIF reports emit real `physicalLocation` regions with line numbers from `Pos`, include warning results for `AnalysisIncomplete` consumers, and stamp tool version `0.9.0`. |
-| #22, #24 | **Fixed** | Added `--verbose`/`-v` stderr logging, `var version = "0.9.0"`, and `--version` CLI flag. |
-| #25 | **Fixed** | Aligned license across `README.md` and `LICENSE` to Unlicense public domain. |
-| #26 | **Fixed** | Consolidated all semver parsing on `pkg/semverutil` (`golang.org/x/mod/semver`), removed `github.com/Masterminds/semver/v3` from `go.mod`. |
-| #31, #32 | **Fixed** | Added standard `Makefile` (with `verify`, `build`, `test`, `fuzz`, `clean`), `CONTRIBUTING.md`, and `SECURITY.md`. Cleaned all stray root coverage artifacts. |
-| #33 | **Fixed** | Deleted duplicate lowercase symlink `docs/roadmap.md`. |
-| #34, #36 | **Fixed** | Updated `docs/CLI_USAGE.md` with complete flag references, corrected upstream URLs, and documented OPA/Rego and taint capabilities. |
-| #35 | **Fixed** | Updated `README.md` to document all 19 native Go fuzz targets. |
-| #43, #44, #45, #62 | **Fixed** | Blast radius classifies findings by stable category enums, checks `wrapperMod.Outputs` for removed output references, passes `DynamicHazardRegistry` to `ScanDirectoryWithRegistry`, skips unreadable subdirectories, and tightens module source matching to resolved path equality. |
-| #47 | **Fixed** | `DynamicHazardRegistry` deterministically sorts provider and resource keys, and registers multi-key descriptors (`resName+"."+fullPath`, `fullPath`, bare `attrName`). |
-| #53, #54 | **Fixed** | `codemod.WriteMovedBlocks` made idempotent, `ApplyRemovedInputs` made atomic across multiple files, and `.tf.json` files excluded prior to reading. |
-| #55 | **Fixed** | `CheckObjectCompatibility` aggregates all breaking attribute shifts into a comprehensive incompatibility reason. |
-| #57 | **Fixed** | `WrapperOutputReferences` maps each output to a slice of delegations (`map[string][]OutputReference`). |
-| #58 | **Fixed** | `sameStrings` normalizes condition whitespace and performs sorted multiset matching. |
-| #59, #60 | **Fixed** | Added `FilterPrereleases` to filter prereleases in `GetLatestVersion`, and implemented strict weak ordering partitioned sort in `semverutil.Sort`. |
-| #61 | **Fixed** | Persistent L2 cache writes `<sha256>.json` atomically using temporary file rename. |
-| #70 | **Fixed** | Provided working default args `["--wrapper", ".", "--exit-code"]` in `.pre-commit-hooks.yaml`, and set output report file write permissions to `0644`. |
-| #28, #64, #66 | **Fixed** | Aligned workflow action pins and Go/Terraform tooling across `drift-detection.yml`, `dependabot.yml`, `slsa-release.yml` with `ci.yml` (`checkout@v7`, `setup-go@v7`, `setup-terraform@v4`, Terraform `1.16.5`). Bound CI jobs with `timeout-minutes: 30` and explicit package test timeouts. Enforced `scripts/verify.sh` 100% coverage gate in `dependabot.yml` before auto-merging. |
-| #48 | **Fixed** | Reused shared cached clone (`SharedClone`) for `--upgrade-path` planning and tag extraction, eliminating duplicate network downloads and intermediate version drops. |
-
-### Resolution log — Verification, Drift & Release Reproducibility batch (closed)
-
-| Item | Status | What changed |
-| :--- | :--- | :--- |
-| #10, #11 | **Fixed** | Trimmed `MultiCloudCatalog()` to the three canonical benchmark modules (GCP GKE, AWS EKS, Azure AKS), added automated daily drift detection in `.github/workflows/drift-detection.yml`, and added automated GitHub issue reporting with `GenerateDriftIssuePayload`. |
-| #19 | **Fixed** | Integrated in-process HashiCorp `terraform-config-inspect` structural cross-validation on every fuzz iteration (variables, outputs, required flags), and validated compiler diagnostic error counts. |
-| #20 | **Fixed** | Wired `diff.Compare` and `recreation.AnalyzeHazardsWithRegistry` into Terratest suite (`TestTerratest_PlanStateSafeUpdate` and `TestTerratest_PlanStateForceNewHazard`), and asserted native `terraform show -json` structured plan output confirms resource replacement actions (`delete` + `create`, `action_reason="replace_because_cannot_update"`). |
-| #27, #70 | **Fixed** | Dockerfile updated to support multi-arch builds (`TARGETOS`/`TARGETARCH`), labeled version `0.9.0`, and wired into `.github/workflows/slsa-release.yml` with `docker/build-push-action` for `linux/amd64,linux/arm64` publishing to GHCR. |
-| #29, #30 | **Fixed** | Fixed `TestTerratest_ValidateFixtures` cleanup to preserve `.terraform.lock.hcl` files, removed test filter in drift workflow, and configured `TF_PLUGIN_CACHE_DIR` across CI workflows. |
-| #67, #68, #69 | **Fixed** | Pinned `golangci-lint` to `v1.64.5`, added per-package 100.0% statement coverage enforcement loops in `scripts/verify.sh` and `ci.yml`, and added in-process reference structural verification eliminating binary dependency skips. |
-
-
-One defect surfaced while landing this, unrelated to the roadmap items and present since the
-original LSP implementation:
-
-- **The fuzzer found a denial-of-service in the message framing.** `Content-Length` was passed
-  straight to `make([]byte, n)`, so a header of `100000000000000` attempted a 100 TB allocation and
-  hung the daemon. Lengths are now validated as positive and within a 64 MiB ceiling, and the
-  crasher is kept in `pkg/lsp/testdata/fuzz/FuzzLSPServe/` as a regression seed.
-
-## Documentation Conventions
-
-Emoji have been removed from `README.md` and every file under `docs/`. Two consequences worth
-recording, so a future change does not reintroduce the problem by accident:
-
-- **Emoji are gone from the tool itself, not just the prose.** The status markers `pkg/report`,
-  `pkg/recreation`, and `pkg/blastradius` used to prefix every section heading have been removed,
-  and the five affected golden files under `test/golden/` were regenerated so they match. The
-  repository now contains zero pictographs across Go sources, tests, fixtures, goldens,
-  documentation, and workflows. Consumers who grep the output for a glyph must switch to the
-  ASCII section headings (`BREAKING CHANGES (n):`, `NEW FEATURES (n):`, `WARNINGS & NON-BREAKING
-  CHANGES (n):`, `POLICY VIOLATIONS (n):`, `WRAPPER ISSUES (n):`,
-  `UNUSED UPSTREAM FEATURES AVAILABLE (n):`, `BLAST-RADIUS DOWNSTREAM CONSUMER ANALYSIS`,
-  `STATE DESTRUCTION & RECREATION HAZARDS (ForceNew):`). Markdown output lost only the glyph, not
-  the `###` heading level, so severity signalling there is unchanged.
-- **Typographic arrows are not emoji.** U+2190..U+21FF was deliberately excluded from the removal.
-  `variable → local → module` and `hashicorp/google → hashicorp/google-beta` carry meaning that a
-  bare removal would destroy.
-
-Mermaid diagrams are validated rather than eyeballed: each block is parsed with `mermaid.parse()`
-and rendered to SVG to confirm the labels lay out. A diagram can parse and still be wrong — the
-previous `\n` line breaks rendered literally — so both checks matter. All three diagrams in this
-repository pass.
-
-## Standing Rule
-
-100% statement coverage is necessary but **not sufficient** evidence of delivery. Any exported
-symbol that no production entry point can reach must either be wired up or removed in the same
-change, and the coverage gate should be supplemented with a reachability check (for example
-`deadcode` / `unused` over `./cmd/...` as the import root) so the next dead package cannot pass
-review unnoticed.
-
-Pass 2 adds the second half of the rule, which Pass 1 made concrete:
-
-> **A green report is not the same as a correct report.** Coverage proves every line ran; it cannot
-> prove the line reached the verdict, that the verdict considered all the evidence, or that a missing
-> input surfaced as a failure rather than as silence. Every false negative in Pass 2 (#37, #38, #39)
-> sits behind a 100 %-covered function. Three rules follow:
->
-> 1. **Any analysis that cannot complete must say so.** Swallowed errors, `continue`s past unreadable
->    input, and `t.Skip` on a required tool all currently convert into a confident "safe".
-> 2. **Every gate must consume every finding.** `--exit-code`, `--policy`, SARIF, and the text report
->    must read from one merged verdict, not from different subsets of it (#37).
-> 3. **Every false negative ships with a regression test built from its reproduction.** Appendix A is
->    the source material for those tests.
-
----
-
-## Appendix A — Reproduction Evidence
-
-Each snippet below was executed against this tree (`main` @ `989c354`). The temporary verification
-package used to run them was deleted afterwards; `go vet ./...`, `gofmt -l .`, and `go test ./...`
-are all clean and unmodified.
-
-### A.1 — #39: identical `import {}` / `encryption {}` blocks reported as new features
-
-Two `ModuleInfo` values with byte-identical `ImportBlocks` and `EncryptionBlocks`:
-
-```
---- PASS: TestImportEncryption (initial run)
-    identical import+encryption blocks -> TotalNewFeatures=2
-      new feature: EncryptionConfigured / pbkdf2
-      new feature: ImportBlockAdded / a.b
-    FALSE POSITIVE: identical blocks reported as 2 new features
-```
-
-### A.2 — #37: wrapper verdict ignores upstream breaking changes
-
-Wrapper calling one module; upstream `required_providers` source changed
-`hashicorp/google` → `hashicorp/google-beta` between `--old-version` and `--new-version`:
-
-```
-wrapper TotalBreaking=0 verdict="SAFE_TO_PIN" CanSafelyUpdate=true
-upstream diff TotalBreaking=1 verdict="BREAKING_CHANGES" CanSafelyUpdate=false
-  upstream breaking: ProviderSource / google
-FALSE NEGATIVE: upstream has 1 breaking changes yet wrapper verdict=SAFE_TO_PIN
-                and --exit-code would return 0
-```
-
-### A.3 — #38: blast radius drops recreation hazards
-
-Downstream consumer passing `project_id = "acme-prod"` and `name = "prod"` — both present in the
-`gke` hazard table — to a wrapper whose audit produced zero issues:
-
-```
-wrapper audit issues=0 breaking=0 verdict=SAFE_TO_PIN
-callSites=1 CanSafelyUpdateAll=true HighestRisk=LOW
-  consumer gke: risk=LOW safe=true recreationHazards=[]
-NOTE: consumer passes 'name', a known GKE ForceNew hazard. LookupHazard says: true
-FALSE NEGATIVE: recreation hazard on passed input 'name' was dropped
-                because no wrapper issue targeted it
-```
-
-### A.4 — #50 / #51: LSP protocol violations and unexecutable quick fixes
-
-```
-didChange -> resp=&{JSONRPC:2.0 ID:<nil> Error:0x...}
-PROTOCOL VIOLATION: replied to a notification with
-  {"jsonrpc":"2.0","error":{"code":-32601,"message":"method 'textDocument/didChange' not found"}}
-exit -> replied {"jsonrpc":"2.0","error":{"code":-32601,"message":"method 'exit' not found"}}
-initialize caps: {"capabilities":{"codeActionProvider":true,"textDocumentSync":1},
-                   "serverInfo":{"name":"tfastdiff-lsp","version":"v0.8.0"}}
-GAP: codeActionProvider advertised but no executeCommandProvider -> quick fixes are not executable
-codeActions: [{"command":"tfastdiff.applyMovedBlocks"},{"command":"tfastdiff.addMissingInputs"}]
-```
-
-### A.5 — #15: wrapper target selection picks one arbitrary module call
-
-Wrapper with two child calls, `alpha` (clean) and `zebra` (passes a removed input), sorted order
-favours `alpha`:
-
-```
-module calls discovered: 2
-  call "alpha" source="./upstream" passed=[kept]
-  call "zebra" source="./upstream" passed=[kept removed_input]
-TargetModuleName="alpha" TotalBreaking=0
-FALSE NEGATIVE: removed_input passed to 2 module calls reported 0 breaking issues
-```
-
-### A.6 — #13: cross-cloud hazard bleed in `LookupHazard`
-
-```
-module "gke"          cluster_name -> ok=true resource=aws_eks_cluster
-module "eks"          cluster_name -> ok=true resource=aws_eks_cluster
-module "aks"          cluster_name -> ok=true resource=azurerm_kubernetes_cluster
-module "checks"       cluster_name -> ok=true resource=aws_eks_cluster
-module "my-checks"    cluster_name -> ok=true resource=aws_eks_cluster
-module "index"        cluster_name -> ok=true resource=aws_eks_cluster
-module "gke-standard" cluster_name -> ok=true resource=aws_eks_cluster
-gke + vpc_id -> ok=true resource=aws_eks_cluster (cross-cloud bleed)
-```
-
-`matchModuleCategory` also classifies `"checks"` as EKS, because `strings.Contains("checks", "eks")`
-is true, and `LookupHazard`'s "check all known rules" fallback (`heuristics.go:145-149`) then maps
-GKE's `cluster_name` onto `aws_eks_cluster`.
-
-### A.7 — #3 / #47 / #64: supporting measurements
-
-```
-$ grep -oE 'fs\.(String|Bool|Int)Var\(&[a-zA-Z]+, "[a-z-]+"' cmd/tfastdiff/main.go | grep -oE '"[a-z-]+"' | sort
-"blast-radius" "cache-dir" "check-recreation" "fix" "fix-preview" "format" "lsp" "new"
-"new-version" "old" "old-version" "output" "policy" "provider-schema" "upgrade-path"
-"upstream" "wrapper"
-# -> no "rego-policy": docs/CLI_USAGE.md:437 documents a flag that does not exist (#6)
-
-$ grep -n permissions -A4 .github/workflows/tfastdiff-audit.yml
-permissions:
-  contents: read
-  pull-requests: write
-  security-events: write
-# -> github.rest.issues.createComment requires `issues: write` (#65)
-
-$ go test -covermode=atomic -coverprofile=coverage.out ./...
-ok  github.com/23skdu/terraform_ast/cmd/tfastdiff   432.955s  coverage: 100.0% of statements
-  -- PASS: TestExecute_RegistryDownloadErrors          (303.05s)
-  -- PASS: TestExecute_CompareMode_NewDownloadFailure  ( 92.21s)
-# -> 433s of Go's 600s default per-package timeout, before -race (#21, #64)
-
-bump with empty versions = "INVALID"
-policy violations with no version info:
-  [{Rule:max_bump Message:policy allows at most a MAJOR version bump, got INVALID}]
-# -> max_bump fails runs that simply omitted --old-version/--new-version (#3)
-```
-
-### A.8 — Version strings that disagree
-
-The same binary reports three different versions to its consumers:
-
-| Consumer | Value | Source |
-| :--- | :--- | :--- |
-| SARIF `tool.driver.version` | `0.1.0` | `pkg/report/sarif.go:90` |
-| LSP `serverInfo.version` | `v0.8.0` | `pkg/lsp/server.go:122` |
-| Docker `org.opencontainers.image.version` | `0.1.0` | `Dockerfile:51` |
-| Docs / roadmap | `v0.9.0` | `docs/ROADMAP.md` |
-| Latest git tag | `0.2.0` | `git tag` |
-| `slsa-release.yml` trigger | `v*.*.*` | `.github/workflows/slsa-release.yml` |
-
-> Note: Resolved under #18 and #24. Version `0.9.0` is now build-stamped and unified across `cmd/tfastdiff/main.go` (`var version = "0.9.0"`), CLI `--version`, SARIF report driver version, LSP serverInfo version, and Dockerfile container labels.
-
----
-
-# Pass 3 — Enterprise Deep Semantic & Dynamic Evaluation Backlog (#71 – #76)
-
-> **Status:** 100% Closed & Delivered. **Scope:** Closing the gap between static AST extraction and dynamic Terraform runtime evaluation semantics, eliminating structural blind spots in real-world enterprise infrastructure pipelines.
->
-> All 6 enterprise items (#71 through #76) have been fully implemented, verified, and integrated. Completed backlog tables have been cleared; implementation details are preserved in the Resolution Log below.
-
-### Resolution log — Pass 3 Enterprise Evaluation batch (closed)
-
-| Item | Status | What changed |
-| :--- | :--- | :--- |
-| #71 | **Fixed** | Intermediate Representation (IR) evaluation graph and canonical hierarchical addressing implemented in `pkg/ast/ir.go`. Extracts `ResourceAddress` across modules, data sources, and indexed instances. `DetectAddressShifts` detects topological and address shifts between module versions, flagging ForceNew state recreation hazards. |
-| #72 | **Fixed** | Automated Terraform 1.1+ `moved {}` block synthesis implemented in `pkg/codemod/apply.go`. `SynthesizeMovedBlocksForShifts` and `SynthesizeAndWriteMovedBlocks` translate detected AST address shifts into idempotent, deduplicated `moved` blocks. |
-| #73 | **Fixed** | Integrated official Open Policy Agent Go SDK (`github.com/open-policy-agent/opa/v1/rego`) in `pkg/policy/rego.go`. `EvaluateRegoArbitrary` supports full Rego v1 / OPA semantics, sets, maps, comprehensions, and rules against arbitrary report structures. |
-| #74 | **Fixed** | Dynamic provider schema auto-discovery and atomic disk caching implemented in `pkg/recreation/autodiscover.go`. Discovers local schemas, synthesizes standard ForceNew attribute descriptors (AzureRM, Kubernetes, Cloudflare), and caches them in the persistent L2 disk cache. |
-| #75 | **Fixed** | Cross-module inter-procedural taint reachability wired into blast radius in `pkg/blastradius/scanner.go` (`ScanDirectoryWithTaint` and `FilterTaintedCallSites`). Consumers that neither pass tainted variables nor reference tainted outputs are filtered from downstream risk reports. |
-| #76 | **Fixed** | Deep differential compiler verification implemented in `pkg/ast/diff_fuzz_test.go` (`TestDifferentialStructuralEquivalence`). Asserts strict structural invariants comparing `ast.Inspect` against `terraform-config-inspect` across variables, outputs, providers, module calls, and managed/data resources. |
-
----
-
-# Pass 4 — Enterprise Production Hardening & Ecosystem Gaps (#77 – #89)
-
-> **Status:** 100% Closed & Delivered. **Scope:** Closing critical real-world registry subpaths, monorepo tag discovery, intermediate representation (IR) CLI integration, automated moved block code actions, blast radius Terragrunt dependencies, full-fidelity OPA evaluations, and LSP diagnostic completeness.
->
-> All 13 findings (#77 through #89) across P0 (Shipping & Accuracy Blockers), P1 (Wiring, Robustness & Policy Fidelity), and P2 (Developer Ergonomics & LSP Completeness) have been fully resolved, verified with regression tests, and delivered with 100.0% statement test coverage across all packages.
-
-### Resolution log — Pass 4 Production Hardening batch (closed)
-
-| Item | Status | What changed |
-| :--- | :--- | :--- |
-| #77 | **Fixed** | Added `ParseRegistrySourceWithSubmodule` and `SubmodulePath` in `pkg/registry/client.go`. Enhanced `DownloadModule` to download root archive and verify submodule existence. Wired submodule extraction path in CLI (`cmd/tfastdiff/main.go`) for direct comparison and wrapper audits. |
-| #78 | **Fixed** | Added loop over `newMod.RequiredProviders` in `compareRequirements` in `pkg/diff/diff.go`. Newly added provider constraints are flagged as warnings and newly required provider configuration aliases are flagged as breaking changes. |
-| #79 | **Fixed** | Implemented `ParseScopedTag`, `ListScopedSemverTags`, and directory-scoped tag parsing in `pkg/gitops/git.go`. Enhanced `CheckoutRef` to support monorepo component prefixes (`modules/vpc/v1.2.0`, `vpc-v1.2.0`). |
-| #80 | **Fixed** | Implemented `pruneToSafeHarbor` and `extractGitBaseAndSubpath` in `pkg/planner/planner.go`. Traversal plans prune intermediate patch releases to safe-harbor boundaries (latest patch per minor version and major hops), and filter out prereleases (`-rc`, `-beta`) via `semverutil.FilterPrereleases`. |
-| #81 | **Fixed** | Wired `ast.DetectAddressShifts` in `cmd/tfastdiff/main.go` for both `runCompareMode` and `runWrapperMode`. Added `AddressShifts` to `report.Findings` and formatted human-readable output in `RenderText` and `RenderWrapperText`. |
-| #82 | **Fixed** | Wired `codemod.SynthesizeMovedBlocksForShifts` into `runWrapperMode` `--fix-preview` (rendering `moved.tf` diff patch) and `codemod.SynthesizeAndWriteMovedBlocks` into `--fix` (generating idempotent `moved.tf` file). |
-| #83 | **Fixed** | Updated `terragruntInputKey` in `pkg/blastradius/scanner.go` to unwrap `*hclsyntax.TemplateWrapExpr`, `*hclsyntax.TemplateExpr` (string literals), and `*hclsyntax.LiteralValueExpr` so quoted keys in Terragrunt inputs evaluate correctly. |
-| #84 | **Fixed** | Resolved subpath suffix collision in `isMatchingSource` in `pkg/blastradius/scanner.go` by prefixing a path separator before checking caller target suffix. |
-| #85 | **Fixed** | Added Terragrunt `dependency` block modeling in `pkg/eval/terragrunt.go` (`terragruntDependencies`), extracting `mock_outputs` and generating fallback placeholder outputs for inter-module reference resolution. |
-| #86 | **Fixed** | Extended `policy.Input` with `Report any` in `pkg/policy/policy.go`, passing the full structured report findings to `EvaluateRego` and `EvaluateRegoArbitrary` for deep policy inspection. |
-| #87 | **Fixed** | Modernized Rego parser and evaluation in `pkg/policy/rego.go` with `selectRegoVersion` supporting Rego v0 and v1. Flattened report attributes and relaxed `parseCondition` to allow arbitrary Rego expressions. |
-| #88 | **Fixed** | Extended `computeDiagnostics` in `pkg/lsp/server.go` to report missing module call sources (Error, Severity 1), unpinned registry module calls (Warning, Severity 2), and removed blocks with `destroy = true` (Warning, Severity 2). |
-| #89 | **Fixed** | Pre-populated quick fix code actions in `pkg/lsp/server.go` (`codeActionsFor`) with valid `ApplyMovedBlocksArgs` and `AddMissingInputsArgs` containing directory and target module name extracted from document URI. |
-| #90 | **Fixed** | Golden Plan & State Recreation Hazard Verification Engine implemented in `pkg/recreation/plan.go`. Ingests Terraform plan JSON (`terraform show -json <planfile>`) via `--golden-plan <file>` or autodiscovery (`golden-plan.json`, `golden_plan.json`, `tfplan.json`, `plan.json`, `.terraform/golden-plan.json`, `.terraform/tfplan.json`). Correlates planned resources against `ForceNew` immutable attributes, unmigrated address shifts, and plan replacement actions (`["delete", "create"]`). Wired into `cmd/tfastdiff/main.go` and `pkg/report`. |
+## 6. Definition of done
+
+Every item, without exception:
+
+1. **Reproduction → regression test.** The reproduction in §1.3/§1 is committed as a test that fails
+   on today's tree and passes after the change (Pass 2 standing rule, item 3).
+2. **100 % statement coverage**, both module-wide and per package, enforced by `scripts/verify.sh:40-57`.
+3. **Reachability.** Any new exported symbol is reachable from a production entry point
+   (`cmd/tfastdiff` or `pkg/lsp`), verified with a reachability tool over `./cmd/...`.
+4. **Fuzz target** added for every new parser (`moved`, `lifecycle`, `backend`, `count`/`for_each`),
+   bringing the target count above the current 29 (`docs/gates.md` still says 28 — correct it in the
+   same change).
+5. **Fixture coverage.** At least one committed fixture under `test/fixtures/` contains `moved {}`,
+   `removed {}`, `check {}`, `count`, `for_each`, `lifecycle` and `backend` — today none does.
+6. **Invariant strengthening.** `Δ(A -> A)` additionally asserts zero new features; INV-3
+   (`total_breaking == 0 <=> can_safely_update`) is asserted over wrapper reports as well as upgrade
+   paths.
+7. **Performance items** land with a benchmark and are measured against the §1.3 baseline via `#110`.
+8. **Documentation** (`docs/CLI_USAGE.md`, `docs/FEATURES.md`, `README.md`) is updated in the same
+   change; any claim found unimplemented during Pass 5 analysis is corrected — in particular the
+   `docs/FEATURES.md` section 4 claim about singleton ↔ indexed detection, and the `--fix` claim about
+   missing required input injection (`#102`).
+9. **No emoji** anywhere in sources, fixtures, goldens, documentation or workflow files; typographic
+   arrows (`→`, `↔`) remain permitted.
+
+## 7. Standing rules carried forward
+
+1. 100 % statement coverage is necessary but **not sufficient**. Pair it with a reachability check.
+2. **A green report is not the same as a correct report.** Coverage proves a line ran; it cannot prove
+   the line reached the verdict. Every Pass 5 false negative (R1–R5) sat behind a fully covered
+   function.
+3. **Any analysis that cannot complete must say so**, and a missing input must surface as a failure,
+   not as silence.
+4. **Every gate must consume every finding.** `#97` and `#99` exist because three renderers silently
+   dropped a finding class that the verdict had already acted on.
+5. **A verdict with no discriminating power is a false negative in disguise.** `#96` exists because a
+   risk score that marks 100 % of consumers `CRITICAL` teaches its users to ignore it.
