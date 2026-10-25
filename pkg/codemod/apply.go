@@ -231,10 +231,26 @@ func WriteMovedBlocks(targetPath string, blocks []MovedBlock) error {
 	return nil
 }
 
+// CoveredMovedAddresses builds the set of "from->to" keys for upstream moved blocks so that
+// SynthesizeMovedBlocksForShifts can skip addresses already covered.
+func CoveredMovedAddresses(blocks []ast.MovedBlockDef) map[string]struct{} {
+	covered := make(map[string]struct{})
+	for _, mb := range blocks {
+		covered[mb.From+"->"+mb.To] = struct{}{}
+	}
+	return covered
+}
+
 // SynthesizeMovedBlocksForShifts translates detected AST resource address shifts into Terraform 1.1+ moved blocks.
-func SynthesizeMovedBlocksForShifts(shifts []ast.ResourceAddressShift) []MovedBlock {
+// Addresses already covered by an upstream moved {} block (passed via covered) are skipped so --fix
+// does not write a duplicate.
+func SynthesizeMovedBlocksForShifts(shifts []ast.ResourceAddressShift, covered ...map[string]struct{}) []MovedBlock {
 	var blocks []MovedBlock
 	seen := make(map[string]struct{})
+	var coveredSet map[string]struct{}
+	if len(covered) > 0 {
+		coveredSet = covered[0]
+	}
 
 	for _, s := range shifts {
 		from := s.OldAddress.FullAddress()
@@ -243,6 +259,11 @@ func SynthesizeMovedBlocksForShifts(shifts []ast.ResourceAddressShift) []MovedBl
 			continue
 		}
 		key := from + "->" + to
+		if coveredSet != nil {
+			if _, ok := coveredSet[key]; ok {
+				continue
+			}
+		}
 		if _, exists := seen[key]; !exists {
 			seen[key] = struct{}{}
 			blocks = append(blocks, MovedBlock{
@@ -260,7 +281,7 @@ func SynthesizeMovedBlocksForShifts(shifts []ast.ResourceAddressShift) []MovedBl
 }
 
 // SynthesizeAndWriteMovedBlocks converts address shifts into moved blocks and writes them idempotently to targetPath.
-func SynthesizeAndWriteMovedBlocks(targetPath string, shifts []ast.ResourceAddressShift) error {
-	blocks := SynthesizeMovedBlocksForShifts(shifts)
+func SynthesizeAndWriteMovedBlocks(targetPath string, shifts []ast.ResourceAddressShift, covered ...map[string]struct{}) error {
+	blocks := SynthesizeMovedBlocksForShifts(shifts, covered...)
 	return WriteMovedBlocks(targetPath, blocks)
 }

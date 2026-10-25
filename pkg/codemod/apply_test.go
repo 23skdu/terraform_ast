@@ -279,6 +279,15 @@ func TestSynthesizeMovedBlocks(t *testing.T) {
 	blocksDup := SynthesizeMovedBlocksForShifts(shiftsWithDup)
 	assert.Len(t, blocksDup, 2)
 
+	// covered skip
+	covered := map[string]struct{}{"aws_subnet.this->aws_subnet.renamed": {}}
+	blocksCov := SynthesizeMovedBlocksForShifts(shifts, covered)
+	assert.Len(t, blocksCov, 1)
+
+	// CoveredMovedAddresses helper
+	ca := CoveredMovedAddresses([]ast.MovedBlockDef{{From: "a", To: "b"}})
+	assert.Contains(t, ca, "a->b")
+
 	// Test SynthesizeAndWriteMovedBlocks
 	target := filepath.Join(t.TempDir(), "moved.tf")
 	require.NoError(t, SynthesizeAndWriteMovedBlocks(target, shifts))

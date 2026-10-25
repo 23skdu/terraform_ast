@@ -136,6 +136,9 @@ func rebaseModulePaths(info *ModuleInfo, from, to string) {
 		r.Pos.Filename = rebasePath(r.Pos.Filename, from, to)
 		info.DataResources[name] = r
 	}
+	for i := range info.MovedBlocks {
+		info.MovedBlocks[i].Pos.Filename = rebasePath(info.MovedBlocks[i].Pos.Filename, from, to)
+	}
 	info.Path = to
 }
 
@@ -332,6 +335,7 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 			{Type: "module", LabelNames: []string{"name"}},
 			{Type: "output", LabelNames: []string{"name"}},
 			{Type: "removed"},
+			{Type: "moved"},
 			{Type: "check", LabelNames: []string{"name"}},
 			{Type: "import"},
 			{Type: "function", LabelNames: []string{"name"}},
@@ -498,6 +502,21 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 					From:    from,
 					Destroy: destroy,
 					Pos:     tfconfig.SourcePos{Filename: filePath, Line: block.DefRange.Start.Line},
+				})
+
+			case "moved":
+				from := ""
+				if fromAttr, ok := attrs["from"]; ok {
+					from = strings.TrimSpace(string(src[fromAttr.Expr.Range().Start.Byte:fromAttr.Expr.Range().End.Byte]))
+				}
+				to := ""
+				if toAttr, ok := attrs["to"]; ok {
+					to = strings.TrimSpace(string(src[toAttr.Expr.Range().Start.Byte:toAttr.Expr.Range().End.Byte]))
+				}
+				info.MovedBlocks = append(info.MovedBlocks, MovedBlockDef{
+					From: from,
+					To:   to,
+					Pos:  tfconfig.SourcePos{Filename: filePath, Line: block.DefRange.Start.Line},
 				})
 
 			case "check":

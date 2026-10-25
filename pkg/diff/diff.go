@@ -803,6 +803,42 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			})
 		}
 	}
+
+	// Moved blocks (Terraform 1.1+). New upstream moved block -> new feature (state migration shipped).
+	// Removed upstream moved block -> breaking (state migration no longer declared).
+	oldMoved := make(map[string]ast.MovedBlockDef)
+	for _, mb := range oldMod.MovedBlocks {
+		oldMoved[mb.From+"->"+mb.To] = mb
+	}
+	for _, mb := range newMod.MovedBlocks {
+		key := mb.From + "->" + mb.To
+		if _, existed := oldMoved[key]; existed {
+			continue
+		}
+		report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+			Category:        "MovedBlockAdded",
+			Name:            mb.To,
+			Severity:        SeverityNewFeature,
+			ConfidenceScore: 9,
+			Description:     fmt.Sprintf("State migration declared: moved %s to %s", mb.From, mb.To),
+		})
+	}
+	newMoved := make(map[string]ast.MovedBlockDef)
+	for _, mb := range newMod.MovedBlocks {
+		newMoved[mb.From+"->"+mb.To] = mb
+	}
+	for _, mb := range oldMod.MovedBlocks {
+		key := mb.From + "->" + mb.To
+		if _, existed := newMoved[key]; !existed {
+			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				Category:        "StateMigrationRemoved",
+				Name:            mb.From,
+				Severity:        SeverityBreaking,
+				ConfidenceScore: 9,
+				Description:     fmt.Sprintf("State migration removed: %s -> %s no longer declared", mb.From, mb.To),
+			})
+		}
+	}
 }
 
 // importAddresses returns the set of resource addresses that are programmatically imported.

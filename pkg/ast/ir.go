@@ -239,6 +239,22 @@ func DetectAddressShifts(oldMod, newMod *ModuleInfo) []ResourceAddressShift {
 		}
 	}
 
+	// Suppress IsRecreation when an upstream moved {} block covers the transition.
+	covered := make(map[string]bool)
+	for _, mb := range newMod.MovedBlocks {
+		covered[mb.From+"->"+mb.To] = true
+	}
+	for _, mb := range oldMod.MovedBlocks {
+		covered[mb.From+"->"+mb.To] = true
+	}
+	for i := range shifts {
+		key := shifts[i].OldAddress.FullAddress() + "->" + shifts[i].NewAddress.FullAddress()
+		if covered[key] {
+			shifts[i].IsRecreation = false
+			shifts[i].Reason = fmt.Sprintf("Resource address migrated via moved block from %s to %s", shifts[i].OldAddress.FullAddress(), shifts[i].NewAddress.FullAddress())
+		}
+	}
+
 	// Sort shifts deterministically by old address
 	sort.Slice(shifts, func(i, j int) bool {
 		return shifts[i].OldAddress.FullAddress() < shifts[j].OldAddress.FullAddress()

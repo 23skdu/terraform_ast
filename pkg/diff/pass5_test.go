@@ -364,6 +364,65 @@ func TestPass5_IsMajorProviderBumpDowngradeAndNoise(t *testing.T) {
 	assert.False(t, isMajorProviderBump([]string{">= 4.0"}, []string{">= 4.0"}))
 }
 
+func TestPass5_MovedBlocksIdentity(t *testing.T) {
+	m := &ast.ModuleInfo{
+		MovedBlocks: []ast.MovedBlockDef{{From: "a", To: "b"}},
+	}
+	report := Compare(m, m, "1.0.0", "1.0.0")
+	for _, nf := range report.NewFeatures {
+		assert.NotEqual(t, "MovedBlockAdded", nf.Category)
+	}
+	for _, bc := range report.BreakingChanges {
+		assert.NotEqual(t, "StateMigrationRemoved", bc.Category)
+	}
+}
+
+func TestPass5_MovedBlocks(t *testing.T) {
+	oldMod := &ast.ModuleInfo{}
+	newMod := &ast.ModuleInfo{
+		MovedBlocks: []ast.MovedBlockDef{{From: "aws_s3_bucket.old", To: "aws_s3_bucket.new"}},
+	}
+	report := Compare(oldMod, newMod, "1.0.0", "1.1.0")
+	var has bool
+	for _, nf := range report.NewFeatures {
+		if nf.Category == "MovedBlockAdded" {
+			has = true
+		}
+	}
+	assert.True(t, has)
+
+	// removed moved block -> breaking
+	oldMod2 := &ast.ModuleInfo{
+		MovedBlocks: []ast.MovedBlockDef{{From: "aws_s3_bucket.old", To: "aws_s3_bucket.new"}},
+	}
+	newMod2 := &ast.ModuleInfo{}
+	report2 := Compare(oldMod2, newMod2, "1.0.0", "1.1.0")
+	var hasBreak bool
+	for _, bc := range report2.BreakingChanges {
+		if bc.Category == "StateMigrationRemoved" {
+			hasBreak = true
+		}
+	}
+	assert.True(t, hasBreak)
+}
+
+func TestPass5_DetectAddressShiftsMovedSuppresses(t *testing.T) {
+	oldMod := &ast.ModuleInfo{
+		ManagedResources: map[string]ast.ResourceDef{
+			"aws_s3_bucket.old": {Mode: "managed", Type: "aws_s3_bucket", Name: "old"},
+		},
+	}
+	newMod := &ast.ModuleInfo{
+		ManagedResources: map[string]ast.ResourceDef{
+			"aws_s3_bucket.new": {Mode: "managed", Type: "aws_s3_bucket", Name: "new"},
+		},
+		MovedBlocks: []ast.MovedBlockDef{{From: "aws_s3_bucket.old", To: "aws_s3_bucket.new"}},
+	}
+	shifts := ast.DetectAddressShifts(oldMod, newMod)
+	require.Len(t, shifts, 1)
+	assert.False(t, shifts[0].IsRecreation)
+}
+
 func TestPass5_ResourceFullAddressAndModeLabel(t *testing.T) {
 	r := ast.ResourceDef{Mode: "data", Type: "aws_ami", Name: "x"}
 	assert.Equal(t, "data.aws_ami.x", resourceFullAddress("data", r))

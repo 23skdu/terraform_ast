@@ -66,6 +66,13 @@ type RemovedBlockDef struct {
 	Pos     tfconfig.SourcePos `json:"pos"`
 }
 
+// MovedBlockDef captures Terraform 1.1+ moved {} blocks shipped by upstream.
+type MovedBlockDef struct {
+	From string             `json:"from"`
+	To   string             `json:"to"`
+	Pos  tfconfig.SourcePos `json:"pos"`
+}
+
 // CheckBlockDef captures Terraform 1.5+ check {} blocks and assertions.
 type CheckBlockDef struct {
 	Name        string             `json:"name"`
@@ -113,6 +120,7 @@ type ModuleInfo struct {
 	RequiredProviders       map[string]ProviderRequirement `json:"required_providers,omitempty"`
 	WrapperOutputReferences map[string][]OutputReference   `json:"wrapper_output_references,omitempty"`
 	RemovedBlocks           []RemovedBlockDef              `json:"removed_blocks,omitempty"`
+	MovedBlocks             []MovedBlockDef                `json:"moved_blocks,omitempty"`
 	CheckBlocks             map[string]CheckBlockDef       `json:"check_blocks,omitempty"`
 	ImportBlocks            []ImportBlockDef               `json:"import_blocks,omitempty"`
 	Functions               map[string]FunctionDef         `json:"functions,omitempty"`

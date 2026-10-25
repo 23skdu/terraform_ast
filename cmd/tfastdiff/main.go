@@ -473,7 +473,11 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		if pinnedInfo != nil && targetInfo != nil {
 			shifts := ast.DetectAddressShifts(pinnedInfo, targetInfo)
 			if len(shifts) > 0 {
-				blocks := codemod.SynthesizeMovedBlocksForShifts(shifts)
+				var covered map[string]struct{}
+				if targetInfo != nil {
+					covered = codemod.CoveredMovedAddresses(targetInfo.MovedBlocks)
+				}
+				blocks := codemod.SynthesizeMovedBlocksForShifts(shifts, covered)
 				if len(blocks) > 0 {
 					movedTf := filepath.Join(wrapperPath, "moved.tf")
 					movedBlocksPreview = fmt.Sprintf("--- %s\n+++ %s\n%s",
@@ -516,8 +520,12 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		if pinnedInfo != nil && targetInfo != nil {
 			shifts := ast.DetectAddressShifts(pinnedInfo, targetInfo)
 			if len(shifts) > 0 {
+				var covered map[string]struct{}
+				if targetInfo != nil {
+					covered = codemod.CoveredMovedAddresses(targetInfo.MovedBlocks)
+				}
 				movedFile := filepath.Join(wrapperPath, "moved.tf")
-				if err := codemod.SynthesizeAndWriteMovedBlocks(movedFile, shifts); err != nil {
+				if err := codemod.SynthesizeAndWriteMovedBlocks(movedFile, shifts, covered); err != nil {
 					_, _ = fmt.Fprintf(stderr, "Error writing moved blocks: %v\n", err)
 					return 1
 				}
