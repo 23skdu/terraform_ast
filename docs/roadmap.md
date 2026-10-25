@@ -94,7 +94,7 @@ address_shifts absent
 
 `pkg/ast/inspect.go:429-430` discards `count`/`for_each`/`providers`/`depends_on` during enrichment,
 `pkg/ast/ir.go:127-131` builds addresses with no `IndexKey`, and no code path parses `backend`,
-`provider`, `lifecycle` or `terraform.required_providers` major-bump semantics. `docs/FEATURES.md`
+`provider`, `lifecycle` or `terraform.required_providers` major-bump semantics. `docs/features.md`
 section 4 claims singleton ↔ indexed transitions are detected; they are not.
 
 **R5 — blast radius flags every consumer CRITICAL.** A synthetic monorepo, 3000 root modules each
@@ -370,7 +370,7 @@ information for a consumer ranking findings.
 identity (removed symbol, absent symbol); +2 parsed-literal value comparison; +1 heuristic name match
 (`genericHazards`); −1 when the finding depends on unevaluated dynamic input. Clamp to `[1,10]`,
 require `>= 7` for breaking as INV-6 already does, and document the table in
-`docs/TESTING_METHODOLOGY.md`.
+`docs/testing_methodology.md`.
 
 **Acceptance.** No category keeps a fixed score; a schema-confirmed hazard scores strictly higher than
 a bare name match; INV-6 still holds on the accuracy gate; the oracle report shows a spread rather
@@ -643,9 +643,9 @@ Every item, without exception:
    (`total_breaking == 0 <=> can_safely_update`) is asserted over wrapper reports as well as upgrade
    paths.
 7. **Performance items** land with a benchmark and are measured against the §1.3 baseline via `#110`.
-8. **Documentation** (`docs/CLI_USAGE.md`, `docs/FEATURES.md`, `README.md`) is updated in the same
+8. **Documentation** (`docs/cli_usage.md`, `docs/features.md`, `README.md`) is updated in the same
    change; any claim found unimplemented during Pass 5 analysis is corrected — in particular the
-   `docs/FEATURES.md` section 4 claim about singleton ↔ indexed detection, and the `--fix` claim about
+   `docs/features.md` section 4 claim about singleton ↔ indexed detection, and the `--fix` claim about
    missing required input injection (`#102`).
 9. **No emoji** anywhere in sources, fixtures, goldens, documentation or workflow files; typographic
    arrows (`→`, `↔`) remain permitted.

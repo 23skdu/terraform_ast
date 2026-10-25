@@ -30,5 +30,5 @@ make clean
 
 - [ ] `make verify` passes cleanly with 100.0% statement coverage across all packages.
 - [ ] No regression in Golden Test baselines (`test/golden/`).
-- [ ] Any new CLI flags or features are documented in `README.md` and `docs/CLI_USAGE.md`.
+- [ ] Any new CLI flags or features are documented in `README.md` and `docs/cli_usage.md`.
 - [ ] Unit and fuzz tests cover all new branches, edge cases, and error conditions.
