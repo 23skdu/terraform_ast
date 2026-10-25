@@ -62,7 +62,7 @@
                   "uri": "terraform-google-modules/kubernetes-engine/google"
                 },
                 "region": {
-                  "startLine": 1
+                  "startLine": 17
                 }
               }
             }
@@ -81,7 +81,7 @@
                   "uri": "terraform-google-modules/kubernetes-engine/google"
                 },
                 "region": {
-                  "startLine": 1
+                  "startLine": 52
                 }
               }
             }
@@ -100,7 +100,7 @@
                   "uri": "terraform-google-modules/kubernetes-engine/google"
                 },
                 "region": {
-                  "startLine": 1
+                  "startLine": 44
                 }
               }
             }
@@ -138,7 +138,7 @@
                   "uri": "terraform-google-modules/kubernetes-engine/google"
                 },
                 "region": {
-                  "startLine": 1
+                  "startLine": 39
                 }
               }
             }
@@ -195,7 +195,7 @@
                   "uri": "terraform-google-modules/kubernetes-engine/google"
                 },
                 "region": {
-                  "startLine": 1
+                  "startLine": 18
                 }
               }
             }

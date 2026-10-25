@@ -12,7 +12,11 @@
       "category": "BrokenOutputDelegation",
       "target": "legacy_network_tag",
       "description": "Wrapper output 'legacy_network_tag' references module.gke.legacy_network_tag, but output 'legacy_network_tag' was removed in target upstream v30.0.0",
-      "remediation": "Update or remove output \"legacy_network_tag\" in wrapper outputs.tf"
+      "remediation": "Update or remove output \"legacy_network_tag\" in wrapper outputs.tf",
+      "pos": {
+        "filename": "<WORKSPACE>/test/fixtures/gke_wrapper/outputs.tf",
+        "line": 11
+      }
     },
     {
       "severity": "BREAKING",
@@ -20,7 +24,11 @@
       "category": "MissingRequiredInput",
       "target": "cluster_autoscaling_profile",
       "description": "Target upstream v30.0.0 requires input 'cluster_autoscaling_profile' (no default), but wrapper call 'gke' does not provide it",
-      "remediation": "Add argument 'cluster_autoscaling_profile = ...' to module \"gke\" block in wrapper"
+      "remediation": "Add argument 'cluster_autoscaling_profile = ...' to module \"gke\" block in wrapper",
+      "pos": {
+        "filename": "<WORKSPACE>/test/fixtures/upstream_gke_v2/variables.tf",
+        "line": 52
+      }
     },
     {
       "severity": "BREAKING",
@@ -28,7 +36,11 @@
       "category": "MissingRequiredInput",
       "target": "grant_registry_access",
       "description": "Target upstream v30.0.0 requires input 'grant_registry_access' (no default), but wrapper call 'gke' does not provide it",
-      "remediation": "Add argument 'grant_registry_access = ...' to module \"gke\" block in wrapper"
+      "remediation": "Add argument 'grant_registry_access = ...' to module \"gke\" block in wrapper",
+      "pos": {
+        "filename": "<WORKSPACE>/test/fixtures/upstream_gke_v2/variables.tf",
+        "line": 46
+      }
     },
     {
       "severity": "BREAKING",
@@ -36,7 +48,11 @@
       "category": "PassedRemovedInput",
       "target": "ip_range_services",
       "description": "Wrapper passes argument 'ip_range_services' to child module 'gke', but 'ip_range_services' is not an accepted input in target upstream v30.0.0",
-      "remediation": "Remove argument 'ip_range_services' from module \"gke\" block in wrapper"
+      "remediation": "Remove argument 'ip_range_services' from module \"gke\" block in wrapper",
+      "pos": {
+        "filename": "<WORKSPACE>/test/fixtures/gke_wrapper/main.tf",
+        "line": 5
+      }
     },
     {
       "severity": "BREAKING",
@@ -44,7 +60,11 @@
       "category": "TypeMismatch",
       "target": "ip_range_pods",
       "description": "Wrapper variable 'ip_range_pods' type 'string' is incompatible with upstream expected type 'list(string)'",
-      "remediation": "Update variable \"ip_range_pods\" in wrapper to type = list(string)"
+      "remediation": "Update variable \"ip_range_pods\" in wrapper to type = list(string)",
+      "pos": {
+        "filename": "<WORKSPACE>/test/fixtures/gke_wrapper/variables.tf",
+        "line": 40
+      }
     },
     {
       "severity": "WARNING",
@@ -52,7 +72,11 @@
       "category": "TypeMismatch",
       "target": "zones",
       "description": "Wrapper variable 'zones' type 'list(string)' differs from upstream 'set(string)': Type converted from list to set (Terraform automatically coerces list to set, but ordering is not preserved)",
-      "remediation": "Align variable \"zones\" with upstream type"
+      "remediation": "Align variable \"zones\" with upstream type",
+      "pos": {
+        "filename": "<WORKSPACE>/test/fixtures/gke_wrapper/variables.tf",
+        "line": 24
+      }
     }
   ],
   "new_feature_adoptions": [
@@ -62,7 +86,11 @@
       "category": "OptionalVariableAvailable",
       "target": "enable_cost_allocation",
       "description": "New optional upstream parameter 'enable_cost_allocation' (type bool) can be exposed in wrapper",
-      "remediation": "Consider declaring variable \"enable_cost_allocation\" in wrapper and forwarding to upstream"
+      "remediation": "Consider declaring variable \"enable_cost_allocation\" in wrapper and forwarding to upstream",
+      "pos": {
+        "filename": "<WORKSPACE>/test/fixtures/upstream_gke_v2/variables.tf",
+        "line": 58
+      }
     }
   ],
   "upstream_diff": {
@@ -82,7 +110,11 @@
         "severity": "BREAKING",
         "confidence_score": 9,
         "description": "Output 'legacy_network_tag' was removed in upstream version",
-        "remediation": "Remove or replace references to output 'legacy_network_tag' in wrapper or downstream modules"
+        "remediation": "Remove or replace references to output 'legacy_network_tag' in wrapper or downstream modules",
+        "pos": {
+          "filename": "<WORKSPACE>/test/fixtures/upstream_gke_v1/outputs.tf",
+          "line": 17
+        }
       },
       {
         "category": "Variable",
@@ -91,7 +123,11 @@
         "confidence_score": 9,
         "description": "Newly introduced variable 'cluster_autoscaling_profile' is required and has no default value",
         "new_value": "type=string (required)",
-        "remediation": "Provide a required value for 'cluster_autoscaling_profile' in wrapper module call"
+        "remediation": "Provide a required value for 'cluster_autoscaling_profile' in wrapper module call",
+        "pos": {
+          "filename": "<WORKSPACE>/test/fixtures/upstream_gke_v2/variables.tf",
+          "line": 52
+        }
       },
       {
         "category": "Variable",
@@ -100,7 +136,11 @@
         "confidence_score": 9,
         "description": "Input variable 'ip_range_services' was removed in upstream version",
         "old_value": "type=string, required=true",
-        "remediation": "Remove variable 'ip_range_services' from wrapper or module callers before upgrading"
+        "remediation": "Remove variable 'ip_range_services' from wrapper or module callers before upgrading",
+        "pos": {
+          "filename": "<WORKSPACE>/test/fixtures/upstream_gke_v1/variables.tf",
+          "line": 44
+        }
       },
       {
         "category": "VariableRequirement",
@@ -110,7 +150,11 @@
         "description": "Variable 'grant_registry_access' was optional (had default) but is now required with no default",
         "old_value": "optional with default",
         "new_value": "required without default",
-        "remediation": "Explicitly supply a value for 'grant_registry_access' in the wrapper module call"
+        "remediation": "Explicitly supply a value for 'grant_registry_access' in the wrapper module call",
+        "pos": {
+          "filename": "",
+          "line": 0
+        }
       },
       {
         "category": "VariableType",
@@ -120,7 +164,11 @@
         "description": "Type constraint for variable 'ip_range_pods' changed: Type constraint changed incompatibly from 'string' to 'list(string)'",
         "old_value": "string",
         "new_value": "list(string)",
-        "remediation": "Update variable type definition in wrapper to 'list(string)'"
+        "remediation": "Update variable type definition in wrapper to 'list(string)'",
+        "pos": {
+          "filename": "<WORKSPACE>/test/fixtures/upstream_gke_v1/variables.tf",
+          "line": 39
+        }
       }
     ],
     "new_features": [
@@ -131,7 +179,11 @@
         "confidence_score": 9,
         "description": "New output 'cost_allocation_status' available in upstream",
         "new_value": "type=",
-        "remediation": "Consider re-exporting this output in wrapper if useful for downstream consumers"
+        "remediation": "Consider re-exporting this output in wrapper if useful for downstream consumers",
+        "pos": {
+          "filename": "<WORKSPACE>/test/fixtures/upstream_gke_v2/outputs.tf",
+          "line": 18
+        }
       },
       {
         "category": "Variable",
@@ -140,7 +192,11 @@
         "confidence_score": 9,
         "description": "New optional variable 'enable_cost_allocation' available in upstream",
         "new_value": "type=bool",
-        "remediation": "Consider exposing this new parameter in wrapper if needed"
+        "remediation": "Consider exposing this new parameter in wrapper if needed",
+        "pos": {
+          "filename": "",
+          "line": 0
+        }
       }
     ],
     "warnings": [
@@ -152,7 +208,11 @@
         "description": "Terraform Core version constraint updated from '\u003e= 1.3.0' to '\u003e= 1.5.0'",
         "old_value": "\u003e= 1.3.0",
         "new_value": "\u003e= 1.5.0",
-        "remediation": "Ensure execution environment meets new Terraform Core requirement"
+        "remediation": "Ensure execution environment meets new Terraform Core requirement",
+        "pos": {
+          "filename": "",
+          "line": 0
+        }
       },
       {
         "category": "VariableType",
@@ -162,7 +222,11 @@
         "description": "Type constraint for variable 'zones' widened: Type converted from list to set (Terraform automatically coerces list to set, but ordering is not preserved)",
         "old_value": "list(string)",
         "new_value": "set(string)",
-        "remediation": "Verify variable values remain valid under widened type"
+        "remediation": "Verify variable values remain valid under widened type",
+        "pos": {
+          "filename": "",
+          "line": 0
+        }
       }
     ],
     "total_breaking": 5,

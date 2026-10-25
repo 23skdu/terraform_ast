@@ -204,6 +204,7 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Description: fmt.Sprintf("Input variable '%s' was removed in upstream version", name),
 				OldValue:    fmt.Sprintf("type=%s, required=%t", oldVar.Type, oldVar.Required),
 				Remediation: fmt.Sprintf("Remove variable '%s' from wrapper or module callers before upgrading", name),
+				Pos:         oldVar.Pos,
 			})
 			continue
 		}
@@ -219,6 +220,7 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				OldValue:    oldVar.Type,
 				NewValue:    newVar.Type,
 				Remediation: fmt.Sprintf("Update variable type definition in wrapper to '%s'", newVar.Type),
+				Pos:         oldVar.Pos,
 			})
 		} else if oldVar.Type != newVar.Type {
 			report.Warnings = append(report.Warnings, DifferenceItem{
@@ -254,6 +256,7 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				OldValue:    fmt.Sprintf("%v", oldVar.Default),
 				NewValue:    fmt.Sprintf("%v", newVar.Default),
 				Remediation: fmt.Sprintf("Review callers that omit '%s'; the default no longer matches", name),
+				Pos:         oldVar.Pos,
 			})
 		}
 
@@ -332,6 +335,7 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					Description: fmt.Sprintf("Newly introduced variable '%s' is required and has no default value", name),
 					NewValue:    fmt.Sprintf("type=%s (required)", newVar.Type),
 					Remediation: fmt.Sprintf("Provide a required value for '%s' in wrapper module call", name),
+					Pos:         newVar.Pos,
 				})
 			} else {
 				// New optional variable is a NEW FEATURE
@@ -359,6 +363,7 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Severity:    SeverityBreaking,
 				Description: fmt.Sprintf("Output '%s' was removed in upstream version", name),
 				Remediation: fmt.Sprintf("Remove or replace references to output '%s' in wrapper or downstream modules", name),
+				Pos:         oldOut.Pos,
 			})
 			continue
 		}
@@ -375,6 +380,7 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					OldValue:    oldOut.Type,
 					NewValue:    newOut.Type,
 					Remediation: fmt.Sprintf("Update downstream references to output '%s' to expect '%s'", name, newOut.Type),
+					Pos:         oldOut.Pos,
 				})
 			} else {
 				report.Warnings = append(report.Warnings, DifferenceItem{
@@ -427,6 +433,7 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					OldValue:    oldOut.Value,
 					NewValue:    newOut.Value,
 					Remediation: "Update downstream consumers of this output",
+					Pos:         oldOut.Pos,
 				})
 			} else {
 				report.Warnings = append(report.Warnings, DifferenceItem{
@@ -452,6 +459,7 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Description: fmt.Sprintf("New output '%s' available in upstream", name),
 				NewValue:    fmt.Sprintf("type=%s", newOut.Type),
 				Remediation: "Consider re-exporting this output in wrapper if useful for downstream consumers",
+				Pos:         newOut.Pos,
 			})
 		}
 	}
@@ -668,6 +676,7 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Severity:        SeverityNewFeature,
 				ConfidenceScore: 9,
 				Description:     fmt.Sprintf("Resource or block '%s' declared in removed block with lifecycle.destroy = false (soft migration)", rb.From),
+				Pos:             rb.Pos,
 			})
 		} else {
 			if _, existed := oldRemoved[rb.From]; existed {
@@ -679,6 +688,7 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Severity:        SeverityBreaking,
 				ConfidenceScore: 9,
 				Description:     fmt.Sprintf("Resource or block '%s' declared in removed block with lifecycle.destroy = true (upstream declares this address will be destroyed)", rb.From),
+				Pos:             rb.Pos,
 			})
 		}
 	}
@@ -995,6 +1005,7 @@ func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 						OldValue:    oldRes.Provider,
 						NewValue:    newRes.Provider,
 						Remediation: "Update provider configuration for this resource",
+						Pos:         oldRes.Pos,
 					})
 				}
 				consumedNew[key] = true
@@ -1016,6 +1027,7 @@ func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 						OldValue:    oldRes.Type,
 						NewValue:    newRes.Type,
 						Remediation: "Update resource type and migrate state before upgrading",
+						Pos:         oldRes.Pos,
 					})
 					consumedNew[nKey] = true
 					reassigned = true
@@ -1034,6 +1046,7 @@ func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Description: fmt.Sprintf("%s resource '%s' was removed in upstream version", modeLabel(rs.mode), key),
 				OldValue:    fmt.Sprintf("type=%s, provider=%s", oldRes.Type, oldRes.Provider),
 				Remediation: "Remove resource or migrate state before upgrading",
+				Pos:         oldRes.Pos,
 			})
 		}
 
@@ -1054,6 +1067,7 @@ func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Description: fmt.Sprintf("New %s resource '%s' available in upstream", modeLabel(rs.mode), key),
 				NewValue:    fmt.Sprintf("type=%s, provider=%s", newRes.Type, newRes.Provider),
 				Remediation: "Consider exposing this resource in wrapper if needed",
+				Pos:         newRes.Pos,
 			})
 		}
 	}

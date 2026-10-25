@@ -10,6 +10,7 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/policy"
 	"github.com/23skdu/terraform_ast/pkg/semverutil"
+	"github.com/hashicorp/terraform-config-inspect/tfconfig"
 )
 
 // WrapperIssue represents a specific compatibility issue found in the wrapper module.
@@ -20,6 +21,7 @@ type WrapperIssue struct {
 	Target          string              `json:"target"`
 	Description     string              `json:"description"`
 	Remediation     string              `json:"remediation"`
+	Pos             tfconfig.SourcePos  `json:"pos,omitempty"`
 }
 
 // WrapperCompatibilityReport contains the verdict and findings for updating a wrapper module.
@@ -165,6 +167,7 @@ func AnalyzeWrapper(
 					Target:      inp,
 					Description: fmt.Sprintf("Wrapper passes argument '%s' to child module '%s', but '%s' is not an accepted input in target upstream %s", inp, call.Name, inp, targetVersion),
 					Remediation: fmt.Sprintf("Remove argument '%s' from module \"%s\" block in wrapper", inp, call.Name),
+					Pos:         call.Pos,
 				})
 			}
 		}
@@ -181,6 +184,7 @@ func AnalyzeWrapper(
 					Target:      varName,
 					Description: fmt.Sprintf("Target upstream %s requires input '%s' (no default), but wrapper call '%s' does not provide it", targetVersion, varName, call.Name),
 					Remediation: fmt.Sprintf("Add argument '%s = ...' to module \"%s\" block in wrapper", varName, call.Name),
+					Pos:         upVar.Pos,
 				})
 			}
 		}
@@ -200,6 +204,7 @@ func AnalyzeWrapper(
 					Target:      varName,
 					Description: fmt.Sprintf("Wrapper variable '%s' accepts null, but upstream no longer does", varName),
 					Remediation: fmt.Sprintf("Reject null values for variable \"%s\" in the wrapper", varName),
+					Pos:         wVar.Pos,
 				})
 			}
 
@@ -211,6 +216,7 @@ func AnalyzeWrapper(
 					Target:      varName,
 					Description: fmt.Sprintf("Wrapper variable '%s' type '%s' is incompatible with upstream expected type '%s'", varName, wVar.Type, upVar.Type),
 					Remediation: fmt.Sprintf("Update variable \"%s\" in wrapper to type = %s", varName, upVar.Type),
+					Pos:         wVar.Pos,
 				})
 			} else if wVar.Type != upVar.Type {
 				report.Issues = append(report.Issues, WrapperIssue{
@@ -219,6 +225,7 @@ func AnalyzeWrapper(
 					Target:      varName,
 					Description: fmt.Sprintf("Wrapper variable '%s' type '%s' differs from upstream '%s': %s", varName, wVar.Type, upVar.Type, typeCompat.Reason),
 					Remediation: fmt.Sprintf("Align variable \"%s\" with upstream type", varName),
+					Pos:         wVar.Pos,
 				})
 			}
 		}
@@ -240,6 +247,7 @@ func AnalyzeWrapper(
 					Target:      outName,
 					Description: fmt.Sprintf("Wrapper output '%s' references module.%s.%s, but output '%s' was removed in target upstream %s", outName, ref.TargetModule, ref.TargetOutput, ref.TargetOutput, targetVersion),
 					Remediation: fmt.Sprintf("Update or remove output \"%s\" in wrapper outputs.tf", outName),
+					Pos:         wrapperMod.Outputs[outName].Pos,
 				})
 			}
 		}
@@ -273,6 +281,7 @@ func AnalyzeWrapper(
 					Target:      varName,
 					Description: fmt.Sprintf("New optional upstream parameter '%s' (type %s) can be exposed in wrapper", varName, upVar.Type),
 					Remediation: fmt.Sprintf("Consider declaring variable \"%s\" in wrapper and forwarding to upstream", varName),
+					Pos:         upVar.Pos,
 				})
 			}
 		}

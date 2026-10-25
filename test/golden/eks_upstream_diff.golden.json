@@ -15,7 +15,11 @@
       "severity": "BREAKING",
       "confidence_score": 9,
       "description": "Output 'aws_auth_configmap_yaml' was removed in upstream version",
-      "remediation": "Remove or replace references to output 'aws_auth_configmap_yaml' in wrapper or downstream modules"
+      "remediation": "Remove or replace references to output 'aws_auth_configmap_yaml' in wrapper or downstream modules",
+      "pos": {
+        "filename": "<WORKSPACE>/test/fixtures/upstream_eks_v19/outputs.tf",
+        "line": 16
+      }
     },
     {
       "category": "Variable",
@@ -24,7 +28,11 @@
       "confidence_score": 9,
       "description": "Newly introduced variable 'authentication_mode' is required and has no default value",
       "new_value": "type=string (required)",
-      "remediation": "Provide a required value for 'authentication_mode' in wrapper module call"
+      "remediation": "Provide a required value for 'authentication_mode' in wrapper module call",
+      "pos": {
+        "filename": "<WORKSPACE>/test/fixtures/upstream_eks_v20/variables.tf",
+        "line": 30
+      }
     },
     {
       "category": "Variable",
@@ -33,7 +41,11 @@
       "confidence_score": 9,
       "description": "Input variable 'legacy_security_group_id' was removed in upstream version",
       "old_value": "type=string, required=false",
-      "remediation": "Remove variable 'legacy_security_group_id' from wrapper or module callers before upgrading"
+      "remediation": "Remove variable 'legacy_security_group_id' from wrapper or module callers before upgrading",
+      "pos": {
+        "filename": "<WORKSPACE>/test/fixtures/upstream_eks_v19/variables.tf",
+        "line": 34
+      }
     },
     {
       "category": "Variable",
@@ -42,7 +54,11 @@
       "confidence_score": 9,
       "description": "Input variable 'manage_aws_auth_configmap' was removed in upstream version",
       "old_value": "type=bool, required=false",
-      "remediation": "Remove variable 'manage_aws_auth_configmap' from wrapper or module callers before upgrading"
+      "remediation": "Remove variable 'manage_aws_auth_configmap' from wrapper or module callers before upgrading",
+      "pos": {
+        "filename": "<WORKSPACE>/test/fixtures/upstream_eks_v19/variables.tf",
+        "line": 28
+      }
     },
     {
       "category": "VariableDefault",
@@ -52,7 +68,11 @@
       "description": "Default value for variable 'cluster_version' changed",
       "old_value": "1.28",
       "new_value": "1.30",
-      "remediation": "Review callers that omit 'cluster_version'; the default no longer matches"
+      "remediation": "Review callers that omit 'cluster_version'; the default no longer matches",
+      "pos": {
+        "filename": "<WORKSPACE>/test/fixtures/upstream_eks_v19/variables.tf",
+        "line": 6
+      }
     }
   ],
   "new_features": [
@@ -63,7 +83,11 @@
       "confidence_score": 9,
       "description": "New output 'access_entries' available in upstream",
       "new_value": "type=",
-      "remediation": "Consider re-exporting this output in wrapper if useful for downstream consumers"
+      "remediation": "Consider re-exporting this output in wrapper if useful for downstream consumers",
+      "pos": {
+        "filename": "<WORKSPACE>/test/fixtures/upstream_eks_v20/outputs.tf",
+        "line": 17
+      }
     },
     {
       "category": "Variable",
@@ -72,7 +96,11 @@
       "confidence_score": 9,
       "description": "New optional variable 'enable_cluster_creator_admin_permissions' available in upstream",
       "new_value": "type=bool",
-      "remediation": "Consider exposing this new parameter in wrapper if needed"
+      "remediation": "Consider exposing this new parameter in wrapper if needed",
+      "pos": {
+        "filename": "",
+        "line": 0
+      }
     }
   ],
   "warnings": [
@@ -84,7 +112,11 @@
       "description": "Terraform Core version constraint updated from '\u003e= 1.0.0' to '\u003e= 1.3.0'",
       "old_value": "\u003e= 1.0.0",
       "new_value": "\u003e= 1.3.0",
-      "remediation": "Ensure execution environment meets new Terraform Core requirement"
+      "remediation": "Ensure execution environment meets new Terraform Core requirement",
+      "pos": {
+        "filename": "",
+        "line": 0
+      }
     },
     {
       "category": "VariableType",
@@ -94,7 +126,11 @@
       "description": "Type constraint for variable 'subnet_ids' widened: Type converted from list to set (Terraform automatically coerces list to set, but ordering is not preserved)",
       "old_value": "list(string)",
       "new_value": "set(string)",
-      "remediation": "Verify variable values remain valid under widened type"
+      "remediation": "Verify variable values remain valid under widened type",
+      "pos": {
+        "filename": "",
+        "line": 0
+      }
     }
   ],
   "total_breaking": 5,

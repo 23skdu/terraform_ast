@@ -8,6 +8,7 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/policy"
 	"github.com/23skdu/terraform_ast/pkg/recreation"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
+	"github.com/hashicorp/terraform-config-inspect/tfconfig"
 )
 
 // SARIFLog represents the top-level SARIF v2.1.0 log document.
@@ -98,6 +99,8 @@ const (
 	ruleBlastRadius          = "TF-BLAST-RADIUS-CONSUMER"
 	rulePlanRecreationHazard = "TF-GOLDEN-PLAN-RECREATION-HAZARD"
 	ruleUpstreamBreaking     = "TF-UPSTREAM-BREAKING-CHANGE"
+	ruleAddressShift         = "TF-ADDRESS-SHIFT"
+	ruleTaintReachable       = "TF-TAINT-REACHABLE"
 )
 
 // defaultRules is the SARIF rule catalogue. Each document only advertises the subset of rules for
@@ -150,6 +153,18 @@ var defaultRules = []SARIFRule{
 		ShortDescription: SARIFMessageText{Text: "Upstream breaking change detected"},
 		FullDescription:  SARIFMessageText{Text: "The upstream module upgrade introduces a breaking change that the wrapper must accommodate."},
 		DefaultConfig:    SARIFRuleConfig{Level: "error"},
+	},
+	{
+		ID:               ruleAddressShift,
+		ShortDescription: SARIFMessageText{Text: "Resource address shift detected"},
+		FullDescription:  SARIFMessageText{Text: "A resource address shifted between module versions without a state migration, triggering recreation."},
+		DefaultConfig:    SARIFRuleConfig{Level: "error"},
+	},
+	{
+		ID:               ruleTaintReachable,
+		ShortDescription: SARIFMessageText{Text: "Tainted variable reaches a resource attribute"},
+		FullDescription:  SARIFMessageText{Text: "A changed variable propagates to a resource attribute via the taint analysis."},
+		DefaultConfig:    SARIFRuleConfig{Level: "warning"},
 	},
 }
 
@@ -226,18 +241,34 @@ func RenderSARIF(r *diff.DiffReport, findings Findings) []byte {
 
 	artifact := artifactOrDefault(r.ModuleName)
 
-	results := make([]SARIFResult, 0, len(r.BreakingChanges)+len(r.Warnings)+len(r.NewFeatures)+len(findings.RecreationHazards))
+	results := make([]SARIFResult, 0, len(r.BreakingChanges)+len(r.Warnings)+len(r.NewFeatures)+len(findings.RecreationHazards)+len(findings.AddressShifts))
+	lineOf := func(p tfconfig.SourcePos) int {
+		if p.Line > 0 {
+			return p.Line
+		}
+		return 1
+	}
 	for _, item := range r.BreakingChanges {
-		results = append(results, sarifResult(ruleBreaking, "error", artifact,
+		results = append(results, sarifResultWithLine(ruleBreaking, "error", artifact, lineOf(item.Pos),
 			fmt.Sprintf("[%s] %s: %s (Confidence: %s; Remediation: %s)", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore), item.Remediation)))
 	}
 	for _, item := range r.Warnings {
-		results = append(results, sarifResult(ruleWarning, "warning", artifact,
+		results = append(results, sarifResultWithLine(ruleWarning, "warning", artifact, lineOf(item.Pos),
 			fmt.Sprintf("[%s] %s: %s (Confidence: %s; Remediation: %s)", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore), item.Remediation)))
 	}
 	for _, item := range r.NewFeatures {
-		results = append(results, sarifResult(ruleNewFeature, "note", artifact,
+		results = append(results, sarifResultWithLine(ruleNewFeature, "note", artifact, lineOf(item.Pos),
 			fmt.Sprintf("[%s] %s: %s (Confidence: %s)", item.Category, item.Name, item.Description, confidenceText(item.ConfidenceScore))))
+	}
+	for _, s := range findings.AddressShifts {
+		results = append(results, sarifResult(ruleAddressShift, "error", artifact,
+			fmt.Sprintf("%s -> %s (%s)", s.OldAddress.FullAddress(), s.NewAddress.FullAddress(), s.Reason)))
+	}
+	if findings.Taint != nil && !findings.Taint.IsDeadCode {
+		for _, attr := range findings.Taint.AffectedResourceAttributes {
+			results = append(results, sarifResult(ruleTaintReachable, "warning", artifact,
+				fmt.Sprintf("var.%s reaches %s", findings.Taint.TargetVariable, attr)))
+		}
 	}
 	results = appendHazardResults(results, artifact, findings.RecreationHazards)
 	results = appendBlastResults(results, findings.BlastRadius)
@@ -263,7 +294,11 @@ func RenderWrapperSARIF(res *wrapper.WrapperCompatibilityReport, findings Findin
 			level = "warning"
 			ruleID = ruleWarning
 		}
-		results = append(results, sarifResult(ruleID, level, artifact,
+		line := 1
+		if item.Pos.Line > 0 {
+			line = item.Pos.Line
+		}
+		results = append(results, sarifResultWithLine(ruleID, level, artifact, line,
 			fmt.Sprintf("[%s] %s: %s (Confidence: %s). %s", item.Category, item.Target, item.Description, confidenceText(item.ConfidenceScore), item.Remediation)))
 	}
 	results = appendHazardResults(results, artifact, findings.RecreationHazards)
