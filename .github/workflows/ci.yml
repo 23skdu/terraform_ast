@@ -25,7 +25,7 @@ jobs:
           check-latest: true
 
       - name: Lint (govet, errcheck, staticcheck, unused, gosec)
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v1.64.5
 
