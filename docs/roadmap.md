@@ -1,14 +1,14 @@
-# Strategic Product Roadmap — Pass 5
+# Strategic Product Roadmap — Pass 6
 
-**Scope:** 20 numbered improvement items (`#91` – `#110`) covering analysis **accuracy**, analysis **performance**, and an expanded taxonomy of **destructive changes** that must be classified as breaking.
+**Scope:** 20 numbered improvement items (`#111` – `#130`) covering analysis **accuracy**, analysis **performance**, and an expanded taxonomy of **destructive changes** that must be classified as breaking.
 
-**Status:** Delivered (`#91` – `#110` complete). Items are ordered by delivery batch, not by ID.
+**Status:** Open. Items are ordered by delivery batch, not by ID.
 
 ---
 
 ## 0. How this pass was produced
 
-Pass 5 was produced by reading every non-test Go source file in `cmd/`, `pkg/`, and `internal/`, then
+Pass 6 was produced by reading every non-test Go source file in `cmd/`, `pkg/`, and `internal/`, then
 constructing reproductions against a locally built `bin/tfastdiff`. Nothing below is inferred from
 documentation; every gap carries a file/line citation or a command transcript.
 
@@ -18,9 +18,10 @@ Baseline verified before writing this document:
 | :--- | :--- |
 | `go build ./...` | clean |
 | `go vet ./...` | clean |
-| `go test ./pkg/diff/... ./pkg/ast/... ./pkg/blastradius/... ./pkg/report/... ./pkg/wrapper/...` | all `ok` |
-| `test/fixtures/*` | contains **no** `moved {}`, `removed {}` or `check {}` block — the newest HCL constructs are exercised only by struct literals in unit tests, never by a parsed fixture |
-| Working tree | clean |
+| `golangci-lint run ./...` | 0 issues |
+| `./scripts/verify.sh 1` | 100.0% statement coverage across all packages, 30 fuzz targets clean |
+| `python3 scripts/oracle_verify.py --skip-upstream` | `PASSED` (118/118 assertions, mean confidence 8.00/10.0) |
+| Working tree | clean (`ab78380`) |
 
 ### Delivery history (unchanged record)
 
@@ -30,7 +31,8 @@ Baseline verified before writing this document:
 | Pass 2 | `#37` – `#70` | Reproduced false negatives, LSP protocol conformance, cache safety |
 | Pass 3 | `#71` – `#76` | IR evaluation graph, OPA v1, cross-module taint, differential verification |
 | Pass 4 | `#77` – `#90` | Registry subpaths, monorepo tags, golden-plan verification |
-| **Pass 5** | **`#91` – `#110`** | **This document** |
+| Pass 5 | `#91` – `#110` | Resource/modern-block diffing, single-pass AST cache, concurrent upgrade prefetch, LSP debounce |
+| **Pass 6** | **`#111` – `#130`** | **This document** |
 
 ---
 
@@ -40,129 +42,131 @@ Three families of problem, in descending severity.
 
 ### 1.1 Detection blind spots — the tool reports SAFE for destructive transitions
 
-Reproductions (all run as `bin/tfastdiff --old <old> --new <new> --format json`):
+Reproductions (all run as `bin/tfastdiff --old <old> --new <new> --format json --exit-code`):
 
-**R1 — identity violation.** Two byte-identical directories, each holding a soft `removed` block and a
-`check` block:
-
-```
-verdict SAFE  break 0  warn 0  feat 1
-features [('SoftRemovedBlock', 'aws_s3_bucket.legacy')]
-```
-
-`Δ(A -> A)` must be empty. `pkg/diff/diff.go:548-560` walks **`newMod.RemovedBlocks` only** and never
-compares against `oldMod.RemovedBlocks`, so a pre-existing soft `removed` block is re-reported as a
-new feature on every run. The identity property test at `pkg/diff/algebra_test.go:40-46` asserts
-`Verdict`, `TotalBreaking` and `TotalWarnings` but **not** `TotalNewFeatures`, and none of its eight
-fixtures contains a `removed` block — so the invariant is stated in the comment and not enforced by
-the assertion set.
-
-**R2 — an upstream declaring destruction is reported as SAFE.** `new` adds `removed {}` for a bucket
-(`destroy` defaults to `true` in Terraform 1.7+):
+**R1 — unmigrated resource rename is reported as SAFE (`exit 0`).** `old` declares
+`resource "aws_s3_bucket" "old_logs" { bucket = "logs" }`, `new` renames it to
+`resource "aws_s3_bucket" "new_logs" { bucket = "logs" }` with no `moved {}` block:
 
 ```
-verdict SAFE  break 0  warn 0  feat 0
+exit= 0  verdict= SAFE  break= 0  can_safely_update= True  shifts= 1
 ```
 
-`pkg/diff/diff.go:550-559` emits a finding only when `!rb.Destroy`. The destructive case emits
-nothing at all.
+`compareResources` (`pkg/diff/diff.go:1150-1159, 1177-1179`) suppresses any resource whose address
+appears in `ast.DetectAddressShifts` so a rename is not double-counted as a removal plus an addition.
+However, `DetectAddressShifts` (`cmd/tfastdiff/main.go:903`) is attached only to `report.Findings`
+after `diff.Compare` returns, and never participates in `TotalBreaking`, `CanSafelyUpdate`,
+`Verdict`, or `--exit-code`. Suppressing the `Resource` finding without folding `IsRecreation == true`
+address shifts into the verdict turns every unmigrated resource rename into a silent `SAFE` pass.
 
-**R3 — silent behavioural drift.** `old` declares `variable "region" { default = "us-east-1" }`,
-`new` declares `default = "eu-west-1"`; `old` has a `check` block, `new` does not; the output value
-expression changes; the resource body changes:
-
-```
-verdict SAFE  break 0  warn 0  feat 0
-Summary: SAFE TO UPDATE: 100% backward-compatible transition from  to .
-```
-
-`VariableDef.Default` (`pkg/ast/types.go:21`) is captured by the inspector but never compared —
-`pkg/diff/diff.go` contains no reference to `oldVar.Default` — and the output `value` expression is not
-captured at all: `OutputDef` has no value field, and the `output` enrichment
-(`pkg/ast/inspect.go:440-465`) only extracts `module.*` traversals for output delegation.
-
-**R4 — `count`/`for_each` transitions are invisible.** A module changing `count = 2` on a resource to
-`for_each = toset([...])`, while also changing the state backend bucket/region, provider region and
-`default_tags`, dropping `required_version = ">= 1.5.0"`, removing `lifecycle { prevent_destroy }`,
-and moving the provider constraint `~> 4.0` → `~> 6.0` produces:
+**R2 — nested `module {}` calls inside an upstream module are invisible.** `old` declares
+`module "vpc" { source = "terraform-aws-modules/vpc/aws" version = "5.0.0" }` and
+`module "eks" { source = "terraform-aws-modules/eks/aws" count = 2 }`; `new` deletes `module "vpc"`
+entirely and changes `module "eks"` to `source = "./local-eks"` with `for_each = toset(["a"])`:
 
 ```
-verdict WARNINGS_ONLY  break 0  warn 1
-warnings [('ProviderRequirement', 'aws', "constraint updated from '~> 4.0' to '~> 6.0'")]
-address_shifts absent
+exit= 0  verdict= SAFE  break= 0  warn= 0
 ```
 
-`pkg/ast/inspect.go:429-430` discards `count`/`for_each`/`providers`/`depends_on` during enrichment,
-`pkg/ast/ir.go:127-131` builds addresses with no `IndexKey`, and no code path parses `backend`,
-`provider`, `lifecycle` or `terraform.required_providers` major-bump semantics. `docs/features.md`
-section 4 claims singleton ↔ indexed transitions are detected; they are not.
+`ModuleInfo.ModuleCalls` (`pkg/ast/types.go:125`) is populated by `Inspect`, but `diff.Compare`
+(`pkg/diff/diff.go:59-75`) never compares `oldMod.ModuleCalls` against `newMod.ModuleCalls`, and
+`ExtractResourceAddresses` (`pkg/ast/ir.go:112-164`) ignores `ModuleCalls`. Removing a child module
+destroys every resource in its state subtree; swapping its `source` or `count`/`for_each` mode
+displaces every child address.
 
-**R5 — blast radius flags every consumer CRITICAL.** A synthetic monorepo, 3000 root modules each
-passing `name = "prod<i>"` and `project_id` to a wrapper:
+**R3 — instance-count shrinkage, destructive resource attributes, `triggers`, and `lifecycle` list
+mutations are all silent.** `old` declares `resource "aws_db_instance" "main"` with `count = 3`,
+`deletion_protection = true`, `skip_final_snapshot = false`,
+`lifecycle { ignore_changes = [tags, engine_version]; replace_triggered_by = [null_resource.a] }`,
+and `resource "null_resource" "a" { triggers = { version = "1" } }`. `new` changes `count = 1`,
+`deletion_protection = false`, `skip_final_snapshot = true`, `ignore_changes = [tags]`,
+`replace_triggered_by = [null_resource.a, null_resource.b]`, and `triggers = { version = "2" }`:
 
 ```
-scanned 3000  highest CRITICAL  safe_all False
-risk dist Counter({'CRITICAL': 3000})
-sample: recreation_hazards = ["name (Resource names are immutable ...)"]
-        missing_required_inputs = ["ip_range_pods","ip_range_services","network","subnetwork"]
+exit= 0  verdict= SAFE  break= 0  warn= 0
 ```
 
-Two independent defects:
+Five distinct bugs in one reproduction:
+1. `ExtractResourceAddresses` (`pkg/ast/ir.go:127-132`) records the literal string `"count"` or
+   `"for_each"` as `IndexKey`, discarding the expression (`3` vs `1`), so `count = 3` → `count = 1`
+   and `for_each = toset(["a","b"])` → `toset(["a"])` produce identical `FullAddress()` strings.
+2. `enrichFromHCLFiles` (`pkg/ast/inspect.go:623-628`) captures `res.Triggers["triggers"]`, but
+   `compareDestructiveToggles` (`pkg/diff/diff.go:1010-1096`) **never reads `oldRes.Triggers` or
+   `newRes.Triggers`** — the field is write-only dead storage in `diff`.
+3. `enrichFromHCLFiles` (`pkg/ast/inspect.go:617-621`) appends the raw tuple text `"[tags, engine_version]"`
+   as a **single** string element in `res.Lifecycle.IgnoreChanges`, so `len(IgnoreChanges)` is `1`
+   for both `[tags, engine_version]` and `[tags]`. The check at `pkg/diff/diff.go:1060`
+   (`len(oldRes.Lifecycle.IgnoreChanges) > len(newRes.Lifecycle.IgnoreChanges)`) evaluates `1 > 1`
+   (`false`) on every real HCL file.
+4. `pkg/diff/diff.go:1049` checks `len(oldRes.Lifecycle.ReplaceTriggeredBy) == 0 && len(newRes.Lifecycle.ReplaceTriggeredBy) > 0`,
+   so adding a second trigger or changing the target of an existing `replace_triggered_by` is ignored.
+5. Resource-level destruction toggles (`deletion_protection`, `force_destroy`, `skip_final_snapshot`,
+   `purge_protection_enabled`, `triggers_replace`, `keepers`) are never extracted from resource bodies.
 
-* `pkg/blastradius/scanner.go:659-664` flags a **recreation hazard for any passed input whose bare
-  name matches** `genericHazards` (`pkg/recreation/heuristics.go:127-140` = `name`, `location`,
-  `region`) — with no evidence that the attribute changed. Nearly every Terraform module passes one
-  of those names, so the risk score has no discriminating power and `--exit-code` is permanently 1.
-* `pkg/blastradius/scanner.go:609-615` attributes `MissingRequiredInput` issues (whose targets are
-  **upstream** inputs the wrapper itself never declares) to the **consumer** for not passing them.
-  The wrapper is at fault; the consumer cannot pass an input the wrapper does not expose.
+**R4 — `terraform { cloud {} }`, `provider {}` blocks, weakened `check {}` assertions, and modified
+`import {}` IDs are ignored.** `old` configures `terraform { cloud { organization = "acme-prod" } }`,
+`provider "aws" { region = "us-east-1" }`, `check "health" { assert { condition = var.port == 443 } }`,
+and `import { to = aws_s3_bucket.b id = "prod-bucket-1" }`; `new` changes the cloud organization to
+`"acme-dev"`, provider region to `"eu-central-1"`, check condition to `true`, and import ID to
+`"prod-bucket-2"`:
 
-### 1.2 Reporting and gate integrity — findings that never reach a consumer
+```
+exit= 0  verdict= SAFE  break= 0  warn= 0
+```
 
-* **`UpstreamDiff` is JSON-only.** `RenderWrapperText` (`pkg/report/report.go:185`), `RenderWrapperMarkdown`
-  (`:260`) and `RenderWrapperSARIF` (`pkg/report/sarif.go:244`) never reference `res.UpstreamDiff`.
-  A wrapper whose verdict is `UPSTREAM_BREAKING_CHANGES_DETECTED` therefore renders a text, Markdown
-  and SARIF report containing **zero** breaking-change details, and `total_breaking` stays `0` while
-  `can_safely_update` is `false` — inverting the equivalence documented as INV-3 in `docs/gates.md`,
-  which is today asserted only over upgrade-path reports and never over wrapper reports.
-* **SARIF always cites line 1.** `DifferenceItem` (`pkg/diff/models.go:18-27`) carries no `Pos`,
-  although `VariableDef`, `OutputDef` and `ModuleCallDef` all do; `sarifResult` (`pkg/report/sarif.go:270-272`)
-  hard-codes `startLine: 1`. Every code-scanning result lands on line 1 of the module path.
-* **Missing SARIF rules.** Address shifts, taint reachability and upstream breaking changes have no
-  SARIF rule at all, so three of the tool's strongest signals never reach GitHub Code Scanning.
-* **Markdown drops findings.** `RenderMarkdown(r)` takes no `Findings`, so `--format markdown` loses
-  `address_shifts` in compare mode; the wrapper Markdown renderer takes `Findings` but only uses
-  `RecreationHazards` and `GoldenPlan`.
-* **`--fix` does not apply the remediation it reports.** `MissingRequiredInput` is reported as
-  breaking, but `codemod.AddMissingInputs` is reachable only from the LSP
-  (`pkg/lsp/server.go:624`); `cmd/tfastdiff/main.go:511` calls `ApplyRemovedInputs` alone, although
-  the previous roadmap listed "missing required input injection" as delivered under `--fix`.
-* **Confidence is a constant.** `scoreConfidence` (`pkg/diff/diff.go:100-119`) assigns `9` to every
-  breaking change and `9`/`8`/`7`/`6` by category to warnings. The oracle's "mean confidence ≥ 8.0"
-  gate is therefore satisfied by construction, not by evidence.
+`enrichFromHCLFiles` (`pkg/ast/inspect.go:332-347, 659-672`) has no schema for `provider` blocks or
+`terraform { cloud {} }` blocks; `compareModernBlocks` (`pkg/diff/diff.go:735-783`) checks only
+whether a `check` block name or `import.To` address was added or removed, never comparing
+`cb.AssertRules` or `ib.ID` when the block exists in both versions.
+
+**R5 — `--taint` reports `DEAD CODE` for variables used inside nested resource blocks, `dynamic`
+blocks, `data` blocks, or `.tf.json` files.** A wrapper passes `var.machine_type` inside
+`resource "google_container_cluster" "primary" { node_config { machine_type = var.machine_type } }`:
+
+```
+is_dead_code= True  is_reachable= False  affected= None
+```
+
+`AnalyzeVariableTaint` (`pkg/eval/taint.go:57, 121-137`) explicitly skips `.tf.json` files (`:57`),
+ignores `data` blocks, and inspects only top-level `block.Body.Attributes` on `resource` blocks without
+recursing into `block.Body.Blocks` (such as `node_config`, `vpc_config`, or `dynamic "..."` blocks).
+
+### 1.2 Reporting, codemod and gate integrity gaps
+
+* **Markdown drops `AddressShifts`.** `RenderText`, `RenderJSON` and `RenderSARIF` include
+  `findings.AddressShifts`, but `RenderMarkdown` (`pkg/report/report.go:92-145`) and
+  `renderDiffOutput` / `renderWrapperOutput` (`cmd/tfastdiff/main.go:911-943`) omit
+  `findings.AddressShifts` entirely, so GitHub PR comments generated with `--format markdown` never
+  mention resource address shifts.
+* **`--fix` writes string literals for `bool` and `number` inputs and invalid traversals for indexed
+  `moved` blocks.** `cmd/tfastdiff/main.go:547-552` sets `placeholder = "false"` for `bool` and `"0"`
+  for `number`, and `codemod.AddMissingInputs` (`pkg/codemod/apply.go:138`) writes every value with
+  `cty.StringVal(val)` — producing `flag = "false"` and `count = "0"` instead of `false` and `0`.
+  Meanwhile, `FormatMovedBlocks` (`pkg/codemod/apply.go:172-177`) wraps `mb.From` in a single
+  `hcl.TraverseRoot{Name: mb.From}`, which emits `from = aws_instance.web[count]` when an address
+  shift involves `count` or `for_each`.
+* **Wrapper variable renames bypass type and ForceNew checks.** `AnalyzeWrapper`
+  (`pkg/wrapper/analyzer.go:195-232`) matches `wrapperMod.Variables[varName]` against
+  `targetUpstream.Variables[varName]` by identical variable name, never consulting
+  `call.InputExpressions` (`pkg/ast/types.go:45`). When a wrapper declares `variable "cluster_region"`
+  and passes `region = var.cluster_region`, neither `TypeMismatch` nor `AnalyzeWrapperHazardsWithRegistry`
+  (`pkg/recreation/heuristics.go:287-300`, which also ignores `res.UpstreamDiff`) fires.
+* **`FilterTaintedCallSites` uses substring matching.** `pkg/blastradius/scanner.go:193` checks
+  `strings.Contains(expr, "."+outName)`, so a tainted output named `id` falsely matches `var.identity`,
+  `local.id`, or `data.aws_caller_identity.current.id`.
 
 ### 1.3 Performance
 
-Measured on this machine with `bin/tfastdiff`:
-
-| Workload | Wall time |
-| :--- | :--- |
-| 300 tiny consumer modules (≈120 B each), `--blast-radius` | 0.021 s |
-| 3000 tiny consumer modules | 0.153 s |
-| 50 consumer modules totalling **7.1 MB** of HCL (≈14 000 lines each) | **1.629 s** |
-
-Redundant work found in the code:
+Redundant work identified in the current tree:
 
 | Where | Cost |
 | :--- | :--- |
-| `pkg/ast/inspect.go:178-192,305` | Every uncached `Inspect` reads the whole module **three** times: `moduleFingerprint` (`pkg/ast/cache.go:28-51`) hashes full file contents, `tfconfig.LoadModule` parses, `enrichFromHCLFiles` re-reads and re-parses every file with a fresh `hclparse.Parser` |
-| `pkg/ast/cache.go:178-211` | `cacheModule` runs `json.Marshal` on **every** inspection, including pure in-memory hits with no disk cache configured; a hit then re-runs `json.Unmarshal` (`:141`) |
-| `pkg/blastradius/scanner.go:250,257,515` | Every `.tf` file in the walk is parsed **twice** — `hclsyntax.ParseConfig` at `:250`, then `extractModuleReferences` parses the same bytes again — and `refs` is computed before any check that the file contains a `module` block |
-| `cmd/tfastdiff/main.go:318,390,431` | Wrapper mode inspects wrapper → target → pinned **serially**, although `ast.InspectModulesParallel` already exists and is used for two-dir compare (`:732`) |
-| `cmd/tfastdiff/main.go:918-935` | Upgrade-path intermediate versions are **downloaded one at a time**; only the subsequent inspection is parallel (`:938`) |
-| `pkg/lsp/server.go:230,456` + `pkg/ast/inspect.go:35-52` | Every `didChange` creates a temp directory, copies all `.tf` files, runs a full inspection and deletes the directory — with no debounce and no reuse of unchanged sibling files |
-| `pkg/policy/rego.go:249-255` | `rego.New(...).Eval(...)` rebuilds and recompiles the policy module on **every** call, once per upgrade-path step (`cmd/tfastdiff/main.go:776-786`) |
-| `pkg/blastradius/scanner.go:601-631` | `evaluateCallSiteImpact` rescans the full `audit.Issues` slice for every call site — O(call sites × issues) |
+| `pkg/diff/diff.go:1152` + `cmd/tfastdiff/main.go:486,571,608,903` | `ast.DetectAddressShifts` is recomputed up to **three times** per CLI invocation (once inside `compareResources`, once in `cmd/tfastdiff` findings, and once in `--fix`/`--fix-preview`) |
+| `pkg/policy/rego.go:200-209,217-238` | `EvaluateRego` runs `json.Marshal` + `json.Unmarshal` on `input.Report` on every call (despite a comment claiming it is cached per pointer) and then runs the legacy rule loop even when `policy.prepared.Eval` already succeeded |
+| `pkg/ast/inspect.go:35-94` | `inspectOverlay` (`InspectSource`) still calls `os.MkdirTemp`, reads and copies every sibling `.tf` file to disk, and deletes the temp dir on an uncached LSP buffer change, even though `parseAndEnrichModule` already operates on in-memory `*hcl.File` ASTs |
+| `cmd/tfastdiff/main.go:708-789` | `runCompareMode` resolves and downloads `--old` and `--new` **serially** from Registry/Git and never consults `ast.CachedVersionModule` for endpoint versions |
+| `pkg/recreation/autodiscover.go:157-199` | `AutoDiscoverAndRegister` re-reads and re-unmarshals `provider-schema.json` from disk once **per provider** in `RequiredProviders` with no in-memory schema cache |
+| `pkg/eval/taint.go:24-73` | `AnalyzeVariableTaint` re-reads and re-parses every `.tf` file from disk instead of reusing parsed HCL bodies |
 
 ---
 
@@ -170,439 +174,348 @@ Redundant work found in the code:
 
 | ID | Class | Pri | Item |
 | :--- | :--- | :--- | :--- |
-| `#91` | Accuracy | P0 | Diff managed resources and data sources |
-| `#92` | Accuracy | P0 | Instance-graph fidelity: `count`/`for_each`, index keys, nested module paths, deterministic address pairing |
-| `#93` | Accuracy | P0 | Modern-block symmetry: `removed { destroy = true }` is breaking, identity holds, removals are detected |
-| `#94` | Accuracy | P0 | Parse and honour `moved {}` blocks |
-| `#95` | Accuracy | P0 | Compare variable defaults and output value expressions |
-| `#96` | Accuracy | P0 | Blast radius: evidence-gated hazards and correct attribution |
-| `#97` | Accuracy | P0 | Report parity for `UpstreamDiff` across every renderer and gate |
-| `#98` | Accuracy | P1 | Provider and core constraint semantics |
-| `#99` | Accuracy | P1 | SARIF precision: real regions and rules for every finding class |
-| `#100` | Accuracy | P1 | Evidence-based confidence scoring |
-| `#101` | Accuracy | P1 | Destructive-argument and lifecycle value analysis |
-| `#102` | Accuracy | P1 | Close the remediation loop: `--fix` injects missing required inputs |
-| `#103` | Performance | P1 | Single-pass module inspection with a cheap fingerprint and marshal-once cache |
-| `#104` | Performance | P1 | Parallel wrapper-mode inspection |
-| `#105` | Performance | P1 | Concurrent upgrade-path prefetch with a shared archive cache |
-| `#106` | Performance | P1 | Blast-radius scan: parse once, pre-filter candidates, index issue lookups |
-| `#107` | Performance | P1 | Parallel directory walk for blast radius |
-| `#108` | Performance | P1 | LSP: debounce and incremental overlay staging |
-| `#109` | Performance | P2 | Prepare OPA policies once per run |
-| `#110` | Performance | P2 | Performance budget gate: benchmarks in CI |
+| `#111` | Accuracy | P0 | Fold unmigrated `DetectAddressShifts` recreations into `DiffReport` verdict and `TotalBreaking` |
+| `#112` | Accuracy | P0 | Diff nested `module {}` calls: removal, `source` swap, version constraint, and `count`/`for_each` shifts |
+| `#113` | Accuracy | P0 | Instance-cardinality destruction: `count` reduction, `for_each` key-set shrinkage, and expression changes |
+| `#114` | Accuracy | P0 | Resource-body destructive toggles (`deletion_protection`, `force_destroy`, `skip_final_snapshot`, `triggers`, `triggers_replace`, `keepers`) |
+| `#115` | Accuracy | P0 | Resource-body `ForceNew` (`requires_replace`) attribute change detection |
+| `#116` | Accuracy | P0 | Fix `lifecycle` list parsing (`ignore_changes`, `replace_triggered_by`) and `precondition`/`postcondition` blocks |
+| `#117` | Accuracy | P0 | Parse and diff `provider {}` blocks and `terraform { cloud {} }` backend configuration |
+| `#118` | Accuracy | P1 | Compare `check {}` assertions, `import {}` IDs, and prefix-scoped `removed {}`/`moved {}` blocks |
+| `#119` | Accuracy | P1 | `locals` expression drift and `data` source selector/filter change propagation to resources |
+| `#120` | Accuracy | P1 | Full `semverutil` range analysis for provider constraints (upper-bound narrowing, `0.x` breaking bumps, `!=` exclusions) |
+| `#121` | Accuracy | P1 | Trace wrapper `InputExpressions` across renamed variables and fold `UpstreamDiff` into wrapper recreation hazards |
+| `#122` | Accuracy | P1 | Recursive `AnalyzeVariableTaint` (nested blocks, `dynamic`, `data`, `.tf.json`) and traversal-exact `FilterTaintedCallSites` |
+| `#123` | Accuracy | P1 | Typed HCL literal injection in `AddMissingInputs` (`bool`, `number`, `string`) and valid `moved {}` traversals |
+| `#124` | Accuracy | P1 | Render `AddressShifts` in `RenderMarkdown` and `RenderWrapperMarkdown` and honour wrapper `moved {}` blocks |
+| `#125` | Performance | P1 | Compute `DetectAddressShifts` once per comparison and attach directly to `DiffReport` |
+| `#126` | Performance | P1 | In-memory overlay inspection in `parseAndEnrichModule` (eliminate temp-dir file copying for `InspectSource`) |
+| `#127` | Performance | P1 | Concurrent `--old` and `--new` Registry/Git fetch in `runCompareMode` with `CachedVersionModule` reuse |
+| `#128` | Performance | P1 | Cache marshalled report maps in `EvaluateRego` and skip fallback loop when prepared OPA query succeeds |
+| `#129` | Performance | P2 | Memoize `LoadProviderSchema` and `ExtractForceNewDescriptors` across providers and runs |
+| `#130` | Performance | P2 | Share parsed `*hclsyntax.Body` ASTs between `ast.Inspect` and `eval.AnalyzeVariableTaint` |
 
 ---
 
 ## 3. Item detail
 
-### `#91` — Diff managed resources and data sources (Accuracy, P0)
+### `#111` — Fold unmigrated `DetectAddressShifts` recreations into `DiffReport` (Accuracy, P0)
 
-**Gap.** `ModuleInfo.ManagedResources` and `DataResources` are populated (`pkg/ast/inspect.go:261-289`)
-and consumed by the IR, but `diff.Compare` (`pkg/diff/diff.go:41-51`) never looks at them. A resource
-that disappears, changes type, or is reassigned to another provider alias produces an empty interface
-diff; only `DetectAddressShifts` sees part of it, and only when it runs.
+**Gap.** Repro R1: `compareResources` (`pkg/diff/diff.go:1150-1159`) suppresses shifted resources so
+they are not reported twice, while `DetectAddressShifts` (`cmd/tfastdiff/main.go:903`) is only
+attached to `report.Findings`. An unmigrated rename (`aws_s3_bucket.old_logs` → `aws_s3_bucket.new_logs`)
+therefore produces `TotalBreaking == 0`, `Verdict == "SAFE"`, and `--exit-code` `0`.
 
-**Change.** Add `compareResources(oldMod, newMod, report)` to `diff.Compare`: removed managed/data
-resource → `BreakingChanges` (`Category: "Resource"`); added resource → `NewFeatures`; resource type
-or `provider`/alias reassignment → `BreakingChanges` (`Category: "ResourceProvider"`). Derive
-`IsRecreation` from `ast.DetectAddressShifts` so a renamed resource is reported once, not twice.
+**Change.** Compute `AddressShifts` inside `diff.Compare` (storing `AddressShifts` on `DiffReport`),
+and for every shift with `IsRecreation == true` and `NewAddress.FullAddress() != ""` emit a
+`BreakingChanges` item (`Category: "AddressShift"`, `Name: sh.OldAddress.FullAddress()`) while keeping
+`compareResources` suppression for the raw resource removal/addition.
 
-**Acceptance.** Fixture pair with a removed resource yields `TotalBreaking >= 1`; identity diff of a
-resource-bearing module yields zero findings in all four buckets; every new branch covered by
-`scripts/verify.sh`.
+**Acceptance.** Repro R1 yields `TotalBreaking == 1`, `Verdict == "BREAKING_CHANGES"`,
+`CanSafelyUpdate == false`, and `--exit-code` returns `1`; when a matching `moved {}` block is present,
+`IsRecreation == false` and `Verdict == "NEW_FEATURES"` / `"SAFE"` (`CanSafelyUpdate == true`).
 
-### `#92` — Instance-graph fidelity (Accuracy, P0)
+### `#112` — Diff nested `module {}` calls (Accuracy, P0)
 
-**Gap.** `pkg/ast/inspect.go:429-430` explicitly skips `count`, `for_each`, `providers` and
-`depends_on`; `ExtractResourceAddresses` (`pkg/ast/ir.go:119-149`) never sets `IndexKey`. Consequences:
-singleton ↔ indexed, `count` → `for_each`, `for_each` key-set changes and `count` reductions are all
-invisible, and the pairing loop (`pkg/ast/ir.go:215-222`) matches a vanished address to the **first**
-same-type new address in sorted order — an invented, non-deterministic mapping presented as fact.
+**Gap.** Repro R2: `ModuleInfo.ModuleCalls` is never inspected by `diff.Compare` or
+`ExtractResourceAddresses`. Removing a child module, renaming it without `moved { from = module.old to = module.new }`,
+changing its `source`, or switching its `count`/`for_each` mode is completely silent.
 
-**Change.**
-1. Record `count`/`for_each` presence and raw expression on `ResourceDef` and `ModuleCallDef`.
-2. Populate `IndexKey`/instance metadata in the address model so `aws_instance.web[0]` and
-   `aws_instance.web["a"]` are distinguishable from `aws_instance.web`.
-3. Replace first-match pairing with deterministic best-match scoring (type, label, module path,
-   expression similarity); when no candidate scores above a threshold, report
-   `OldAddress → (unknown)` with `IsRecreation: true` and a `confidence` field instead of inventing a
-   target. Include `ModulePath` in the comparison so a resource moved into a child module is
-   classified as a move, not as a deletion.
+**Change.** Add `compareModuleCalls(oldMod, newMod, report)` to `diff.Compare`:
+1. Removed `module` call not covered by `moved {}` or soft `removed { destroy = false }` →
+   `BreakingChanges` (`Category: "ModuleCall"`, description naming the dropped `module.<name>` state subtree).
+2. Added `module` call → `NewFeatures` (`Category: "ModuleCall"`).
+3. Changed `Source` or major `Version` bump on an existing `module` call → `BreakingChanges`
+   (`Category: "ModuleCallSource"`).
+4. Changed `Count`/`ForEach` mode on an existing `module` call → `BreakingChanges`
+   (`Category: "ModuleCallIndex"`).
+5. Include `module.<name>` in `DetectAddressShifts` so a renamed child module covered by
+   `moved { from = module.old to = module.new }` suppresses recreation.
 
-**Acceptance.** Repro R4 reports an address shift for `count = 2` → `for_each`; a module moved into
-`module.x` is classified `relocated`; pairing is stable across 100 randomized key orders (property
-test); identity diff reports zero shifts.
+**Acceptance.** Repro R2 yields `TotalBreaking >= 2` and `--exit-code` `1`; a renamed module call with
+`moved { from = module.a to = module.b }` is non-breaking.
 
-### `#93` — Modern-block symmetry (Accuracy, P0)
+### `#113` — Instance-cardinality destruction (`count` / `for_each` expressions) (Accuracy, P0)
 
-**Gap.** `compareModernBlocks` (`pkg/diff/diff.go:548-619`) reports only *additions*, and for
-`removed` blocks only the non-destructive case. Three consequences, all reproduced above: R1 identity
-violation for `removed`, R2 an upstream declaring `destroy = true` reported as `SAFE`, and R3 removal
-of `check`/`function`/`import`/`encryption` blocks reported as nothing.
+**Gap.** Repro R3: `ExtractResourceAddresses` (`pkg/ast/ir.go:127-132`) sets `IndexKey = "count"` or
+`"for_each"`, discarding the expression text (`r.Count`, `r.ForEach`). Reducing `count = 3` → `1`,
+setting `count = 0`, or shrinking `for_each = toset(["a", "b"])` → `toset(["a"])` is invisible.
 
-**Change.**
-1. Key every modern-block comparison on **both** directions (old set vs new set), matching the fix
-   already applied to `import`/`encryption` in `#39`.
-2. A `removed` block that is new in `newMod` with `Destroy == true` → `BreakingChanges`,
-   `Category: "RemovedDestroy"` ("upstream declares this address will be destroyed").
-3. A `removed` block that disappears → `Warnings` (destruction path no longer declared).
-4. Removal of a `check` block → `Warnings` (validation regression); removal of a custom `function`
-   or of an `encryption` block → `BreakingChanges` (callers referencing it fail; state encryption
-   stops applying); removal of an `import` block → `Warnings`.
+**Change.** In `compareResources` and `compareModuleCalls`, compare `oldRes.Count` vs `newRes.Count`
+and `oldRes.ForEach` vs `newRes.ForEach` when both are non-empty:
+- Literal integer `count` reduction ($n_{\text{new}} < n_{\text{old}}$) or static `for_each` key removal
+  → `BreakingChanges` (`Category: "ResourceCount"` / `"ResourceForEach"`, evidence `2`).
+- Literal integer `count` increase ($n_{\text{new}} > n_{\text{old}}$) → `NewFeatures`.
+- Dynamic `count` or `for_each` expression change → `Warnings` (promoted to `BreakingChanges` when
+  changed to literal `0` or empty collection `[]`/`{}`).
 
-**Acceptance.** Repro R1 → `TotalNewFeatures == 0`; repro R2 → `TotalBreaking == 1`, verdict
-`BREAKING_CHANGES`; the identity property test additionally asserts
-`assert.Empty(t, report.NewFeatures)`.
+**Acceptance.** Repro R3 reports a breaking `ResourceCount` finding for `count = 3` → `1`; increasing
+`count = 1` → `3` reports a new feature; identity diff reports nothing.
 
-### `#94` — Parse and honour `moved {}` (Accuracy, P0)
+### `#114` — Resource-body destructive toggles and `triggers` comparison (Accuracy, P0)
 
-**Gap.** `moved` is absent from the enrichment block schema (`pkg/ast/inspect.go:330-339`), so
-upstream-shipped state migrations are invisible. Two failure modes: an address shift that upstream
-already mitigates with `moved {}` is still reported as ForceNew recreation, and `--fix` synthesises a
-**duplicate** `moved.tf` for a migration that already exists.
-
-**Change.** Add `MovedBlockDef{From, To, Pos}` to `ModuleInfo`; compare old/new sets in
-`compareModernBlocks` (new upstream `moved` → `NewFeatures`; removed upstream `moved` →
-`BreakingChanges` with `Category: "StateMigrationRemoved"`); suppress `IsRecreation` in
-`DetectAddressShifts` when a `moved` block covers the transition, and have
-`codemod.SynthesizeMovedBlocksForShifts` skip addresses already covered.
-
-**Acceptance.** Fixture pair where `new` ships `moved {}` for a renamed resource yields
-`IsRecreation == false` and `--fix` writes no duplicate block; removing a `moved` block from `new`
-yields a breaking finding.
-
-### `#95` — Compare defaults and output values (Accuracy, P0)
-
-**Gap.** Repro R3: `VariableDef.Default` is captured but never compared, and the output `value`
-expression is not captured at all (`OutputDef` has no `Value` field), so upstream silently changes
-behaviour for every caller that relies on a default or on an output's computation.
+**Gap.** Repro R3: `res.Triggers` is captured in `pkg/ast/inspect.go:623-628` and never read in
+`pkg/diff/diff.go`. Resource-level destruction attributes (`deletion_protection`, `force_destroy`,
+`skip_final_snapshot`, `purge_protection_enabled`, `triggers_replace`, `keepers`) are never captured.
 
 **Change.**
-1. Capture the output `value` expression text in `enrichFromHCLFiles` (`output` case,
-   `pkg/ast/inspect.go:440-465`).
-2. In `compareVariables`, compare `Default` with a canonical form (literal values normalised,
-   expressions compared after whitespace folding): changed default → `BreakingChanges` when the
-   wrapper/caller does **not** pass the input (blast radius already knows which inputs are passed —
-   see `#96`), otherwise `Warnings` (`Category: "VariableDefault"`).
-3. Changed output `value` expression → `Warnings` (`Category: "OutputValue"`), promoted to
-   `BreakingChanges` when the declared output type or `sensitive` also changes.
+1. Extend `enrichFromHCLFiles` (`resource` case) to capture `triggers`, `triggers_replace`, `keepers`,
+   and destructive protection attributes (`deletion_protection`, `force_destroy`,
+   `skip_final_snapshot`, `purge_protection_enabled`) on `ResourceDef`.
+2. In `compareDestructiveToggles`:
+   - Changed `triggers`, `triggers_replace`, or `keepers` → `BreakingChanges` (`Category: "ResourceTriggers"`).
+   - Disabling `deletion_protection` / `purge_protection_enabled` (`true` → `false` or removed) or
+     enabling `force_destroy` / `skip_final_snapshot` (`false` → `true`) → `BreakingChanges`
+     (`Category: "DestructiveAttribute"`).
 
-**Acceptance.** Repro R3 yields `TotalBreaking >= 1`; a caller that explicitly passes the input is
-downgraded to a warning (false-positive control); identity still holds.
+**Acceptance.** Repro R3 reports breaking findings for `deletion_protection`, `skip_final_snapshot`,
+and `triggers`.
 
-### `#96` — Blast radius: evidence and attribution (Accuracy, P0)
+### `#115` — Resource-body `ForceNew` (`requires_replace`) attribute change detection (Accuracy, P0)
 
-**Gap.** Repro R5: 3000/3000 consumers `CRITICAL`. Causes are `pkg/blastradius/scanner.go:659-664`
-(name-only hazard lookup, no evidence the attribute changed) and `:609-615` (upstream-only
-`MissingRequiredInput` targets attributed to consumers).
+**Gap.** `AnalyzeHazardsWithRegistry` only checks variable names. Modifying a `ForceNew` attribute
+directly inside a `resource` block body (e.g. changing `cidr_block`, `vpc_id`, `availability_zone`, or
+any schema-confirmed `requires_replace` attribute on a managed resource) is never detected.
 
-**Change.**
-1. Fire a recreation hazard for a consumer only when the attribute is **actually part of the diff**
-   (a `DifferenceItem` on that name in `res.UpstreamDiff`/`res.Issues`) or is confirmed by
-   `DynamicHazardRegistry` for a resource the wrapper declares; a bare `genericHazards` name match
-   with no changed input is downgraded to `LOW` and reported as "watch", not as a hazard.
-2. Attribute `MissingRequiredInput` to a consumer only when the **wrapper declares** that input and
-   the consumer omits it; otherwise the finding belongs to the wrapper audit alone.
-3. Require `AnalysisIncomplete` to be scored separately from `CRITICAL` so incomplete evaluation never
-   inflates the risk distribution.
-4. Emit a risk distribution summary (`counts by risk`) so a user can see discrimination at a glance.
+**Change.** Record top-level resource attribute expressions (`Attributes map[string]string`) on
+`ResourceDef` during `enrichFromHCLFiles`. In `compareResources`, when a managed resource exists in
+both `oldMod` and `newMod`, compare its attributes; if a changed attribute is flagged as `ForceNew` by
+`LookupHazard` or `DynamicHazardRegistry` for that resource type, emit a `BreakingChanges` item
+(`Category: "ResourceForceNew"`) and surface it in `AnalyzeHazardsWithRegistry`.
 
-**Acceptance.** On the R5 corpus, `highest_risk` is no longer uniformly `CRITICAL`; a consumer that
-passes only inert inputs scores `LOW`; a consumer that genuinely passes a removed input or a changed
-immutable attribute still scores `CRITICAL`; `--exit-code` returns 0 for the inert corpus and 1 for
-the seeded-breaking corpus.
+**Acceptance.** Changing `cidr_block = "10.0.0.0/16"` → `"10.1.0.0/16"` on `aws_vpc.main` or changing a
+schema-confirmed `requires_replace` attribute on a resource body yields `TotalBreaking >= 1` and a
+`CRITICAL_HAZARD` recreation hazard.
 
-### `#97` — Report parity for `UpstreamDiff` (Accuracy, P0)
+### `#116` — Fix `lifecycle` list parsing and `precondition`/`postcondition` blocks (Accuracy, P0)
 
-**Gap.** `UpstreamDiff` reaches only JSON. Text, Markdown and SARIF renderers omit it, and
-`WrapperCompatibilityReport.TotalBreaking`/`TotalWarnings` exclude it, so
-`can_safely_update = false` coexists with `total_breaking = 0` — the documented INV-3 equivalence
-fails for every `UPSTREAM_BREAKING_CHANGES_DETECTED` report.
+**Gap.** Repro R3: `enrichFromHCLFiles` (`pkg/ast/inspect.go:614-621`) stores the raw tuple string
+`"[tags, engine_version]"` as a single slice element in `ReplaceTriggeredBy` and `IgnoreChanges`, so
+element-count comparisons (`len(old) > len(new)`) and element-level diffs never fire on real HCL files.
+`lifecycle { precondition {} }` and `postcondition {}` blocks are not parsed at all.
 
-**Change.** Render an `UPSTREAM BREAKING CHANGES (n):` section in `RenderWrapperText`,
-`RenderWrapperMarkdown` and a `TF-UPSTREAM-BREAKING-CHANGE` rule in `RenderWrapperSARIF`; add
-`UpstreamBreaking`/`UpstreamWarnings` counters **and** fold them into `TotalBreaking`/`TotalWarnings`
-(keeping the sub-counts for detail); assert `total_breaking == 0 <=> can_safely_update` over wrapper
-reports in the accuracy gate.
+**Change.** Parse list/tuple expressions in `replace_triggered_by` and `ignore_changes` into individual
+normalized elements (handling `ignore_changes = all` as `["all"]`); in `compareDestructiveToggles`,
+report any added or modified element in `ReplaceTriggeredBy` as `BreakingChanges`, any removed element
+in `IgnoreChanges` (or `all` → subset) as `Warnings` (promoted to `BreakingChanges` if the un-ignored
+attribute is `ForceNew`), and parse `precondition`/`postcondition` blocks on resources, data sources,
+and outputs.
 
-**Acceptance.** A wrapper report with upstream breakage renders the same finding count in text,
-Markdown, JSON and SARIF; `total_breaking > 0` whenever `verdict == "UPSTREAM_BREAKING_CHANGES_DETECTED"`.
+**Acceptance.** Repro R3 reports both the `ignore_changes` narrowing and the `replace_triggered_by`
+addition from parsed HCL files.
 
-### `#98` — Provider and core constraint semantics (Accuracy, P1)
+### `#117` — Parse and diff `provider {}` blocks and `terraform { cloud {} }` (Accuracy, P0)
 
-**Gap.** `~> 4.0` → `~> 6.0` is a generic warning at confidence 7 (`pkg/diff/diff.go:466-478`); a
-provider major migration routinely forces resource replacement and state/provider-address migration.
-Conversely, `required_version` is only reported when the new constraint is **non-empty**
-(`pkg/diff/diff.go:404`), so deleting `required_version = ">= 1.5.0"` is silent.
+**Gap.** Repro R4: `provider "aws" { region = ...; assume_role { ... } }` and
+`terraform { cloud { organization = ... } }` are absent from `enrichFromHCLFiles`, so changing a
+provider's target region/account or HCP Terraform / Terraform Cloud workspace/organization is silent.
 
-**Change.** Parse both constraints with `semverutil`, classify provider constraint transitions as
-`major`/`minor`/`patch`/`widened`/`narrowed`/`removed`; a major bump or a source change →
-`BreakingChanges` (`Category: "ProviderMajorUpgrade"`) carrying the migration note; a removed
-`required_version` → `Warnings` (`Category: "TerraformCore"`); keep narrowing as a warning with the
-specific excluded versions named.
+**Change.** Add `ProviderConfigs map[string]ProviderConfigDef` and `Cloud *BackendConfig` to
+`ModuleInfo`; populate them in `enrichFromHCLFiles`; in `compareDestructiveToggles`, report changes to
+`terraform { cloud {} }` as `BreakingChanges` (`Category: "StateBackendChange"`) and changes to
+`provider` block attributes (`region`, `project`, `subscription_id`, `assume_role`) as
+`BreakingChanges` (`Category: "ProviderConfig"`).
 
-**Acceptance.** Repro R4 reports a breaking provider-major finding in addition to the existing
-warning; deleting `required_version` produces a warning; constraint-only-noise cases (whitespace,
-ordering of a multi-constraint list) produce nothing.
+**Acceptance.** Repro R4 reports breaking findings for both `terraform { cloud {} }` and
+`provider "aws" { region }`.
 
-### `#99` — SARIF precision (Accuracy, P1)
+### `#118` — Compare `check {}` assertions, `import {}` IDs, and prefix-scoped migrations (Accuracy, P1)
 
-**Gap.** `sarifResult` hard-codes `startLine: 1` (`pkg/report/sarif.go:270-272`) because
-`DifferenceItem` has no `Pos`, although `VariableDef.Pos`, `OutputDef.Pos` and `ModuleCallDef.Pos`
-exist. No rule exists for address shifts, taint, or upstream breakage.
+**Gap.** Repro R4: `compareModernBlocks` (`pkg/diff/diff.go:735-783`) only checks whether a `check`
+block name or `import.To` address was added or removed. Weakening `check` assertions (`var.port == 443`
+→ `true`) or changing an `import` block's `id` (`"prod-bucket-1"` → `"prod-bucket-2"`) is silent.
 
-**Change.** Add `Pos tfconfig.SourcePos` to `DifferenceItem` and `WrapperIssue`, populated from the
-old (removed) or new (added) declaration; emit real `startLine`; add rules
-`TF-ADDRESS-SHIFT`, `TF-TAINT-REACHABLE`, `TF-UPSTREAM-BREAKING-CHANGE`; emit one result per address
-shift with the old artifact URI and line. Drop `Locations` only when no position can be resolved, and
-say so in the message rather than defaulting to line 1.
+**Change.** Compare `cb.AssertRules` for matching `check` blocks (removed or altered assertion →
+`Warnings`, `Category: "CheckBlockModified"`); compare `ib.ID` for matching `import` blocks (changed
+`ID` → `BreakingChanges`, `Category: "ImportBlockModified"`); support module-prefix matching when
+`moved {}` or `removed {}` targets `module.<name>`.
 
-**Acceptance.** `grep -c '"startLine": 1'` over SARIF from a fixture diff is less than the result
-count; a removed variable points at its declaration line; `gosec`/SARIF schema validation still pass.
+**Acceptance.** Repro R4 reports `CheckBlockModified` and `ImportBlockModified`.
 
-### `#100` — Evidence-based confidence (Accuracy, P1)
+### `#119` — `locals` expression drift and `data` source selector propagation (Accuracy, P1)
 
-**Gap.** Confidence is a constant (`pkg/diff/diff.go:100-119`, `pkg/wrapper/analyzer.go:358-367`).
-The oracle gate "mean confidence ≥ 8.0" is satisfiable by the constant alone, so the number carries no
-information for a consumer ranking findings.
+**Gap.** `enrichFromHCLFiles` ignores `locals {}` and `data` block attributes (`filter`, `most_recent`,
+`owners`), so changing a local value or data-source selector that feeds a managed resource attribute
+is invisible to `diff.Compare`.
 
-**Change.** Score from evidence: +3 provider-schema-confirmed `requires_replace`; +3 structural
-identity (removed symbol, absent symbol); +2 parsed-literal value comparison; +1 heuristic name match
-(`genericHazards`); −1 when the finding depends on unevaluated dynamic input. Clamp to `[1,10]`,
-require `>= 7` for breaking as INV-6 already does, and document the table in
-`docs/testing_methodology.md`.
+**Change.** Capture `Locals map[string]string` on `ModuleInfo` and `Attributes map[string]string` on
+`DataResources`; when a `local.<name>` or `data.<type>.<name>` expression changes and is referenced by
+a managed resource attribute, emit a `Warnings` finding (`Category: "LocalValue"` / `"DataSelector"`),
+promoted to `BreakingChanges` when the target resource attribute is `ForceNew`.
 
-**Acceptance.** No category keeps a fixed score; a schema-confirmed hazard scores strictly higher than
-a bare name match; INV-6 still holds on the accuracy gate; the oracle report shows a spread rather
-than a spike.
+**Acceptance.** Changing a `locals` value that feeds `aws_vpc.main.cidr_block` yields a breaking
+finding; changing an unreferenced local or a non-ForceNew target yields a warning.
 
-### `#101` — Destructive-argument and lifecycle value analysis (Accuracy, P1)
+### `#120` — Full `semverutil` range analysis for provider constraints (Accuracy, P1)
 
-**Gap.** The diff is entirely **name-based**. Toggles that control destruction are carried in
-*values* and in blocks no code path parses: `lifecycle { prevent_destroy / create_before_destroy /
-replace_triggered_by / ignore_changes }`, `deletion_protection`, `force_destroy`, `triggers`,
-`provisioner` blocks (especially `when = destroy`), and `backend {}` configuration. Repro R4 confirms
-the `prevent_destroy` removal is silent.
+**Gap.** `majorFromConstraint` (`pkg/diff/diff.go:884-897`) extracts only the first integer in a
+constraint string, missing upper-bound narrowings (`>= 4.0, < 6.0` → `>= 4.0, < 5.0`), `0.x` breaking
+minor jumps (`~> 0.12` → `~> 0.15`), and `!=` exclusions.
 
-**Change.** Extend `enrichFromHCLFiles` with schemas for `resource`/`data`/`module`/`terraform`
-sub-blocks; record `lifecycle` flags, provisioner presence and `when`, backend type and its literal
-attributes, and `triggers`. Compare them: removing `prevent_destroy`/`deletion_protection` →
-`BreakingChanges`; adding `replace_triggered_by` or a destroy-time provisioner → `BreakingChanges`;
-`ignore_changes` narrowing → `Warnings`; `backend` bucket/key/region change → `BreakingChanges`
-(`Category: "StateBackendChange"`).
+**Change.** Add constraint-interval parsing in `pkg/semverutil` (`ParseConstraintRange`) computing the
+minimum and maximum allowed versions and excluded versions; classify upper-bound major drops and `0.x`
+minor bumps as `BreakingChanges` (`Category: "ProviderMajorUpgrade"`) and report the exact excluded
+version range on narrowings.
 
-**Acceptance.** Repro R4 (minus the provider/core parts handled by `#98`) yields
-`TotalBreaking >= 2`; a backend key change is reported for a root module; a fixture with no
-lifecycle/provisioner blocks is unchanged.
+**Acceptance.** Narrowing `>= 4.0, < 6.0` → `>= 4.0, < 5.0` and bumping `~> 0.12.0` → `~> 0.15.0`
+both report `ProviderMajorUpgrade`.
 
-### `#102` — Close the remediation loop (Accuracy, P1)
+### `#121` — Trace wrapper `InputExpressions` and `UpstreamDiff` hazards (Accuracy, P1)
 
-**Gap.** `codemod.AddMissingInputs` is reachable only from the LSP (`pkg/lsp/server.go:624`).
-`--fix` (`cmd/tfastdiff/main.go:504-544`) removes obsolete arguments but never inserts the required
-ones it just reported, so a user must hand-edit the file the tool diagnosed.
+**Gap.** `AnalyzeWrapper` (`pkg/wrapper/analyzer.go:195-232`) only compares wrapper variables whose
+names are identical to upstream variables, ignoring `call.InputExpressions` (`region = var.my_region`).
+`AnalyzeWrapperHazardsWithRegistry` (`pkg/recreation/heuristics.go:287-300`) ignores `res.UpstreamDiff`.
 
-**Change.** In `runWrapperMode`, collect `MissingRequiredInput` issues from `res.Issues`, map them to
-placeholder values from the upstream variable's `Default`/type, and call `codemod.AddMissingInputs`;
-mirror it in `--fix-preview` with a unified diff. Refuse (exit 2) when no safe placeholder can be
-derived rather than writing `null` into a required input.
+**Change.** Resolve `var.<wrapper_var>` references in `call.InputExpressions[upstreamInput]` so type
+and nullability checks compare `wrapperMod.Variables[wrapper_var]` against
+`targetUpstream.Variables[upstreamInput]`; include `res.UpstreamDiff` breaking and warning items in
+`AnalyzeWrapperHazardsWithRegistry`.
 
-**Acceptance.** `--fix` on a wrapper missing a required input writes the argument and the subsequent
-audit reports `MissingRequiredInput == 0`; `--fix-preview` changes no files; the value-fallback
-failure path returns 2 with an actionable message.
+**Acceptance.** A wrapper passing `region = var.custom_region` where `custom_region` has an
+incompatible type is flagged with `TypeMismatch`; an upstream `VariableDefault` change on `location`
+surfaces in wrapper `RecreationHazards`.
 
-### `#103` — Single-pass inspection (Performance, P1)
+### `#122` — Recursive `AnalyzeVariableTaint` and traversal-exact `FilterTaintedCallSites` (Accuracy, P1)
 
-**Gap.** Each uncached `Inspect` reads the module three times and parses it twice (§1.3), and
-`cacheModule` marshals JSON even when no disk cache is configured.
+**Gap.** Repro R5: `AnalyzeVariableTaint` (`pkg/eval/taint.go:57, 105-155`) skips `.tf.json`, ignores
+`data` and `check` blocks, and never recurses into nested resource sub-blocks (`node_config {}`,
+`dynamic {}`). `FilterTaintedCallSites` (`pkg/blastradius/scanner.go:193`) uses substring matching
+(`strings.Contains(expr, "."+outName)`).
 
-**Change.** Parse once: reuse the `hclparse.Parser` output already produced by `enrichFromHCLFiles`
-for the enrichment pass, or derive both `tfconfig`-level and enrichment-level facts from one file
-read; make `moduleFingerprint` a stat-based fast path (`name + size + mtime`) that falls back to full
-content hashing only when a stat-derived key is absent or the stat set changed; skip
-`json.Marshal` when neither the in-memory nor the disk cache will be written.
+**Change.** Recurse through nested `hclsyntax.Blocks` (including `dynamic` blocks), `data` blocks, and
+`.tf.json` files in `AnalyzeVariableTaint`; in `FilterTaintedCallSites`, parse HCL traversals from
+passed input expressions (or match `module.<name>.<outName>` token boundaries) rather than substring
+matching `".id"`.
 
-**Acceptance.** Benchmark `BenchmarkInspectModule` shows a ≥30 % reduction in `B/op` and `ns/op` on a
-30-file module; a cache hit still invalidates on content change with equal mtime+size (test writes the
-same size with different bytes and asserts a miss); behavior of `Inspect` is unchanged on all
-fixtures.
+**Acceptance.** Repro R5 reports `is_dead_code == false`, `is_reachable == true`, and includes
+`google_container_cluster.primary.node_config.machine_type` in `AffectedResourceAttributes`; a consumer
+passing `var.identity` is not matched by a tainted output named `id`.
 
-### `#104` — Parallel wrapper-mode inspection (Performance, P1)
+### `#123` — Typed HCL literal injection in `--fix` and valid indexed `moved {}` traversals (Accuracy, P1)
 
-**Gap.** Wrapper, target and pinned inspections run serially (`cmd/tfastdiff/main.go:318,390,431`).
+**Gap.** `codemod.AddMissingInputs` (`pkg/codemod/apply.go:138`) writes every value with
+`cty.StringVal(val)` (turning `false` into `"false"` and `0` into `"0"`), and `FormatMovedBlocks`
+(`:172-177`) emits invalid traversals when `IndexKey` is `"count"` or `"for_each"`.
 
-**Change.** Inspect wrapper and target concurrently; once the target version is known, inspect the
-pinned version concurrently with the wrapper inspection. Keep registry downloads on their own
-goroutines (they are I/O bound) with the existing context cancellation.
+**Change.** Parse `false`/`true` as `cty.BoolVal`, numeric literals as `cty.NumberIntVal`, and strings
+as `cty.StringVal` in `AddMissingInputs`; strip synthetic `[count]`/`[for_each]` markers when
+synthesizing resource-level `moved {}` blocks while preserving concrete index keys (`[0]`, `["a"]`).
 
-**Acceptance.** Wall time for wrapper mode with two local fixture modules drops; ordering of reports
-is unchanged (assert against golden files); `-race` clean.
+**Acceptance.** `--fix` on a missing `bool` and `number` input writes `flag = false` and `count = 0`
+(unquoted) which passes `terraform validate`; `FormatMovedBlocks` never emits `[count]` or `[for_each]`.
 
-### `#105` — Concurrent upgrade-path prefetch (Performance, P1)
+### `#124` — Render `AddressShifts` in Markdown and honour wrapper `moved {}` blocks (Accuracy, P1)
 
-**Gap.** `cmd/tfastdiff/main.go:918-935` resolves each intermediate version sequentially; only the
-later `InspectModulesParallel` call is concurrent. For a 20-step path at ~300 ms per registry fetch,
-the dominant term is serial network time. Extracted archives are discarded afterwards, so a second
-run repeats every download.
+**Gap.** `RenderMarkdown` and `RenderWrapperMarkdown` (`pkg/report/report.go:92-145, 270-332`) omit
+`findings.AddressShifts`, and `cmd/tfastdiff/main.go:490, 575, 608` checks only `targetInfo.MovedBlocks`,
+ignoring `moved {}` blocks already present in the wrapper (`wInfo.MovedBlocks`).
 
-**Change.** Prefetch intermediate versions with a bounded worker pool (default
-`min(8, GOMAXPROCS)`) feeding the existing parallel inspection; add a content-addressed archive cache
-under `--cache-dir` keyed `source@version` so a repeated CI run starts from disk; keep
-`registry-timeout` as a whole-operation bound by deriving a per-fetch deadline from the remaining
-context budget.
+**Change.** Render a `### Resource Address Shifts` table in `RenderMarkdown` and `RenderWrapperMarkdown`
+when `len(findings.AddressShifts) > 0`; union `wInfo.MovedBlocks` with `targetInfo.MovedBlocks` when
+computing `covered` migrations in wrapper mode.
 
-**Acceptance.** A mock registry with 100 ms latency and 12 intermediate versions completes prefetch
-in `≤ 2 × latency × ceil(12/pool)`; a second run performs zero network fetches; cancellation during
-prefetch leaves no temp directories (assert empty `tfastdiff_upgrade_step_*`).
+**Acceptance.** `--format markdown` includes `### Resource Address Shifts` whenever shifts exist; a
+wrapper that already contains `moved.tf` for a shift is not told to re-create `moved.tf` on a second
+run.
 
-### `#106` — Blast-radius scan internals (Performance, P1)
+### `#125` — Compute `DetectAddressShifts` once per comparison (Performance, P1)
 
-**Gap.** Every `.tf` file is parsed twice and reference extraction runs even for files that contain no
-`module` block (`pkg/blastradius/scanner.go:250,257,515`); `evaluateCallSiteImpact` rescans all
-issues per call site (`:601-631`).
+**Gap.** `ast.DetectAddressShifts(oldMod, newMod)` runs inside `compareResources` (`pkg/diff/diff.go:1152`)
+and then runs a second time in `cmd/tfastdiff/main.go:608, 881` (and a third time in `--fix`).
 
-**Change.** Parse each file once and derive both block structure and `module.x.y` references from the
-same `*hclsyntax.Body`; pre-filter with a cheap byte scan for `module`/`inputs`/`terragrunt` before
-parsing; reuse one `hclparse.Parser` per walk instead of per file; index `audit.Issues` by
-`(category, target)` once before the loop.
+**Change.** Store `AddressShifts []ast.ResourceAddressShift` on `DiffReport` during `diff.Compare` and
+reuse `diffReport.AddressShifts` across `compareResources`, `cmd/tfastdiff`, and `AnalyzeWrapper`.
 
-**Acceptance.** Benchmark on the 7.1 MB corpus shows ≥35 % wall-time reduction; call-site discovery
-output is byte-identical to today's (golden compare on `test/fixtures/downstream_consumer`); no
-behavior change in risk scores.
+**Acceptance.** `DetectAddressShifts` executes once per `diff.Compare` call; `BenchmarkDiffCompare`
+allocations and `ns/op` decrease.
 
-### `#107` — Parallel directory walk (Performance, P1)
+### `#126` — In-memory overlay inspection for `InspectSource` (Performance, P1)
 
-**Gap.** `filepath.WalkDir` in `discoverCallSites` reads and parses files on one goroutine.
+**Gap.** `inspectOverlay` (`pkg/ast/inspect.go:35-94`) creates a temp directory on disk and copies all
+`.tf` files on every uncached `InspectSource` call.
 
-**Change.** Two-phase walk: collect candidate paths on the walker, then process them through a
-bounded worker pool preserving deterministic ordering by sorting results on `(file, block position)`
-before returning. Respect the existing skip rules (`.terraform`, `vendor`, dot-directories) and
-propagate the first read error.
+**Change.** Thread `overlay map[string][]byte` directly into `parseAndEnrichModule` when staging is not
+required (or bypass disk reads for overlaid buffers and reuse cached sibling `*hcl.File` ASTs), while
+preserving the existing `stageModuleFiles` error semantics for unreadable directories.
 
-**Acceptance.** Output ordering is identical across 20 runs (determinism test); wall time on the
-7.1 MB corpus improves; `RACE=1 make test` is clean.
+**Acceptance.** `BenchmarkInspectSource` avoids copying unchanged sibling `.tf` files and reduces
+`ns/op` and `B/op` by ≥40% on a 30-file module.
 
-### `#108` — LSP debounce and incremental overlay (Performance, P1)
+### `#127` — Concurrent `--old` and `--new` fetch in `runCompareMode` (Performance, P1)
 
-**Gap.** Every `didChange` stages a temp directory and re-inspects the whole module
-(`pkg/ast/inspect.go:35-52`, `pkg/lsp/server.go:456`) with no debounce — O(module size) per keystroke.
+**Gap.** `runCompareMode` (`cmd/tfastdiff/main.go:708-789`) downloads `--old` and `--new` sequentially
+and ignores `ast.CachedVersionModule` for the endpoint versions.
 
-**Change.** Debounce diagnostics (default 200 ms, configurable via `initializationOptions`); reuse
-the last inspection for unchanged sibling files by caching per-file parse results keyed on content
-hash, staging only the edited file into an in-memory overlay instead of copying the directory; publish
-only when the diagnostic set actually changes.
+**Change.** Check `ast.CachedVersionModule` for both endpoints when `--cache-dir` is set, and resolve/fetch
+`--old` and `--new` concurrently using a `sync.WaitGroup` before `InspectModulesParallel`.
 
-**Acceptance.** A burst of 100 `didChange` notifications for the same document results in ≤ 5
-inspections; diagnostics content is unchanged for a saved document; a save-only client still works
-(existing test preserved).
+**Acceptance.** Comparing two Registry versions against a mock server with 50ms latency completes both
+downloads in `< 1.5 × latency` and performs zero downloads on a second run with `--cache-dir`.
 
-### `#109` — Prepare OPA policies once (Performance, P2)
+### `#128` — Cache marshalled report maps in `EvaluateRego` (Performance, P1)
 
-**Gap.** `EvaluateRegoArbitrary` calls `rego.New(...).Eval(...)` per invocation
-(`pkg/policy/rego.go:249-255`), i.e. recompiles the policy for every upgrade-path step and re-marshals
-the full report for every call (`pkg/policy/rego.go:196`).
+**Gap.** `EvaluateRego` (`pkg/policy/rego.go:200-209, 217-238`) runs `json.Marshal` + `json.Unmarshal`
+on `input.Report` on every call and runs the fallback rule loop even when `policy.prepared` evaluated
+cleanly.
 
-**Change.** Prepare the query once per `RegoPolicy` (`rego.PrepareForEval`) with the prepared object
-stored on the policy, cache the marshalled report map per `DiffReport` pointer, and reuse both across
-the step loop; keep the fail-closed behaviour on compile errors.
+**Change.** Cache the `map[string]any` representation of `input.Report` in a `sync.Map` (or bounded LRU
+keyed by report pointer) and return immediately when `EvaluateRegoArbitrary` succeeds (`err == nil`).
 
-**Acceptance.** A 20-step upgrade path with one Rego file shows ≥50 % lower policy-eval time in a
-benchmark; identical violation sets before/after (golden compare); compile-error path still fails
-closed.
+**Acceptance.** Benchmark of `EvaluateRego` over a 20-step upgrade path shows ≥40% reduction in
+`B/op` and `allocs/op`.
 
-### `#110` — Performance budget gate (Performance, P2)
+### `#129` — Memoize provider schema loading and descriptor extraction (Performance, P2)
 
-**Gap.** `scripts/verify.sh` gates correctness (format, vet, lint, 100 % coverage, fuzz) but nothing
-stops a performance regression; the measurements in §1.3 are ad hoc.
+**Gap.** `AutoDiscoverAndRegister` (`pkg/recreation/autodiscover.go:157-199`) re-reads and re-parses
+`provider-schema.json` once per provider in `RequiredProviders`.
 
-**Change.** Add `TestBenchmark*` benchmarks for `ast.Inspect`, `diff.Compare`,
-`blastradius.ScanDirectory*` and `report.Render*`, plus a `make perf` target running
-`go test -bench . -benchtime=... -count=5` with `benchstat`, storing a checked-in baseline for the
-three fixture corpora and failing on a >15 % regression in `ns/op`; wire it into CI as a non-blocking
-job for the first release, blocking afterwards.
+**Change.** Cache parsed `*ProviderSchemas` and extracted `map[string]HazardDescriptor` in memory keyed
+by cleaned file path and mtime+size, loading `mod.Path/provider-schema.json` at most once per module.
 
-**Acceptance.** `make perf` runs in CI, the baseline is committed, and a deliberate 2× slowdown in a
-seeding commit is caught by the gate.
+**Acceptance.** A module declaring 5 providers with a local `provider-schema.json` parses the file once
+instead of 5 times.
+
+### `#130` — Share parsed HCL ASTs with `AnalyzeVariableTaint` (Performance, P2)
+
+**Gap.** `AnalyzeVariableTaint` (`pkg/eval/taint.go:24-73`) re-reads and re-parses every `.tf` file from
+disk right after `ast.Inspect(wrapperPath)` already read and parsed the exact same directory.
+
+**Change.** Cache parsed `*hclsyntax.Body` ASTs per directory fingerprint in `pkg/ast` (or expose an
+AST-backed taint entry point) so `AnalyzeVariableTaint` reuses the already-parsed syntax trees.
+
+**Acceptance.** Running `--wrapper <dir> --taint <var>` reads `.tf` files in `<dir>` once; taint output
+is identical.
 
 ---
 
-## 4. Expanded destructive-change taxonomy
+## 4. Expanded destructive-change taxonomy (Pass 6 additions)
 
-The current destructive-change vocabulary is effectively two things: immutable-attribute hazards
-(`pkg/recreation`) and resource address shifts (`pkg/ast/ir.go`). This pass widens the definition of
-**breaking** to the classes below. Severity is assigned per class, and each class names the roadmap
-item that implements it.
+Pass 5 established Classes I–VI. Pass 6 closes the remaining intra-module, resource-body, and
+child-module gaps across those six classes plus a new **Class VII (Child Module & Composition
+Destruction)**:
 
-### Class I — State address displacement (destroy + recreate)
-
-| # | Change | Severity | Status today | Item |
+| Class | Change | Severity | Status before Pass 6 | Item |
 | :--- | :--- | :--- | :--- | :--- |
-| I.1 | Resource label rename at the same type | Breaking (recreation) | Detected, arbitrary pairing | `#92` |
-| I.2 | Resource type change at the same label | Breaking (recreation) | Detected, arbitrary pairing | `#92` |
-| I.3 | Resource moved into/out of a child module | Breaking (recreation) | Reported as "removed"; module path ignored | `#92` |
-| I.4 | Singleton ↔ indexed: `count` added/removed, `count` ↔ `for_each` | Breaking (recreation) | **Not detected** | `#92` |
-| I.5 | `for_each` key-set removal or `count` reduction (instance loss) | Breaking (destruction) | **Not detected** | `#92` |
-| I.6 | Nested `module { source }` swap inside the upstream module | Breaking (all child addresses) | **Not detected** (`ModuleCalls` unused by `diff`) | `#91`, `#92` |
-| I.7 | Loss of an upstream `moved {}` migration | Breaking (state migration missing) | **Not detected** | `#94` |
-
-### Class II — Immutable-attribute (ForceNew) changes
-
-| # | Change | Severity | Status today | Item |
-| :--- | :--- | :--- | :--- | :--- |
-| II.1 | Wrapper input mapped to a `requires_replace` attribute | Breaking | Detected, but name-keyed → CRITICAL flood | `#96`, `#100` |
-| II.2 | Resource-body attribute change on a `requires_replace` field | Breaking | **Not detected** (resource bodies are never read) | `#91`, `#101` |
-| II.3 | Provider major upgrade reclassifying attribute mutability | Breaking | Warning only | `#98` |
-| II.4 | `replace_triggered_by` / `triggers` added or narrowed | Breaking | **Not detected** | `#101` |
-| II.5 | `ignore_changes` narrowed (previously ignored attrs now applied) | Warning → Breaking if the attribute is ForceNew | **Not detected** | `#101` |
-
-### Class III — Explicit destruction and lifecycle gates
-
-| # | Change | Severity | Status today | Item |
-| :--- | :--- | :--- | :--- | :--- |
-| III.1 | New `removed { from = … }` with `destroy = true` (Terraform default) | **Breaking — destruction declared** | **Silent** (repro R2) | `#93` |
-| III.2 | Soft `removed { destroy = false }` reported on an identity diff | must not be a finding | **False positive** (repro R1) | `#93` |
-| III.3 | `lifecycle { prevent_destroy }` removed | Breaking | **Not detected** (repro R4) | `#101` |
-| III.4 | `create_before_destroy` removed | Warning (downtime window) | **Not detected** | `#101` |
-| III.5 | `deletion_protection` / `force_destroy` input default flipped to permissive | Breaking when the caller does not set it | **Not detected** | `#95`, `#101` |
-| III.6 | Destroy-time `provisioner` added or removed | Breaking (side effects change) | **Not detected** | `#101` |
-
-### Class IV — Provider, backend and state-migration changes
-
-| # | Change | Severity | Status today | Item |
-| :--- | :--- | :--- | :--- | :--- |
-| IV.1 | Provider source change | Breaking | Detected | — |
-| IV.2 | Provider constraint **major** bump (`~> 4.0` → `~> 6.0`) | Breaking (schema/state migration) | Warning, confidence 7 | `#98` |
-| IV.3 | Resource `provider`/alias reassignment | Breaking | **Not detected** | `#91` |
-| IV.4 | `required_version` tightening / **removal** | Warning; Breaking when removed and previously enforced | Removal **silent** (`newCore != ""` guard) | `#98` |
-| IV.5 | `backend {}` type or bucket/key/region change | Breaking (state location moves) | **Not detected** | `#101` |
-| IV.6 | `encryption {}` key provider change or removal (OpenTofu) | Breaking; removal = encryption off | Addition only; removal **silent** | `#93` |
-| IV.7 | New required `configuration_aliases` | Breaking | Detected | — |
-
-### Class V — Silent behaviour changes (no interface change)
-
-| # | Change | Severity | Status today | Item |
-| :--- | :--- | :--- | :--- | :--- |
-| V.1 | Variable `default` value change | Breaking if the caller omits the input, else Warning | **Silent** (repro R3) | `#95` |
-| V.2 | Output `value` expression change | Warning; Breaking if type/sensitivity changes | **Not detected** (`OutputDef` has no value) | `#95` |
-| V.3 | Validation rule tightened to reject previously valid input | Warning → Breaking when a literal comparison proves rejection | Warning only | `#95`, `#100` |
-| V.4 | Wrapper-passed input **value** change reaching an immutable attribute | Breaking | Names compared only | `#96`, `#101` |
-| V.5 | Data-source selector change (`most_recent`, filters) feeding replacements | Warning → Breaking on resource association | **Not detected** | `#91` |
-| V.6 | `locals` change feeding a resource argument | Warning (with taint trace when `--taint` is set) | Not detected in `diff` | `#95`, `#101` |
-
-### Class VI — Validation and operational regressions
-
-| # | Change | Severity | Status today | Item |
-| :--- | :--- | :--- | :--- | :--- |
-| VI.1 | `check {}` assertion removed or weakened | Warning | **Silent** (repro R3) | `#93` |
-| VI.2 | Custom `function {}` removed (callers fail at plan) | Breaking | **Silent** | `#93` |
-| VI.3 | `import {}` block removed | Warning (re-import required) | **Silent** | `#93` |
-| VI.4 | `removed {}` block removed (destruction path undeclared again) | Warning | **Silent** | `#93` |
-
-**Severity policy.** One rule governs the whole table: a finding is `BREAKING` iff applying the new
-version to an unchanged caller changes what Terraform would create, update-in-place, or destroy; it is
-`WARNING` when the change alters behaviour a caller can observe but does not move state; it is a
-`NEW_FEATURE` only when it strictly adds capability. Class V.1 and II.5 are decided per caller, using
-the blast-radius input set, so a value change that a caller overrides is never reported as breaking —
-that is the false-positive control keeping `#95` from regressing into the `#96` failure mode.
+| **I.8** | Unmigrated resource rename (`DetectAddressShifts` with `IsRecreation = true`) | **Breaking (recreation)** | Suppressed in `compareResources`, omitted from `Verdict` (`SAFE`, exit 0 — repro R1) | `#111`, `#125` |
+| **I.9** | `count` integer reduction ($n_{\text{new}} < n_{\text{old}}$) or `count = 0` | **Breaking (instance destruction)** | **Not detected** (`IndexKey` hardcoded to `"count"` — repro R3) | `#113` |
+| **I.10** | `for_each` static key-set shrinkage (`toset(["a","b"])` → `toset(["a"])`) | **Breaking (instance destruction)** | **Not detected** (`IndexKey` hardcoded to `"for_each"` — repro R3) | `#113` |
+| **II.6** | Resource-body attribute change on a `ForceNew` (`requires_replace`) field | **Breaking (recreation)** | **Not detected** (resource attributes not stored) | `#115` |
+| **II.7** | `triggers`, `triggers_replace` (`terraform_data`), or `keepers` (`random_*`) modified | **Breaking (recreation)** | `Triggers` captured in `inspect.go`, **never compared in `diff.go`** (repro R3) | `#114` |
+| **II.8** | `lifecycle { replace_triggered_by }` expanded or target changed | **Breaking (recreation)** | Only `0 → >0` checked; mutations ignored (repro R3) | `#116` |
+| **II.9** | `lifecycle { ignore_changes }` narrowed on real HCL tuple or `all` → subset | **Warning → Breaking if ForceNew** | Tuple stored as 1 string (`len == 1`), never fires on real HCL (repro R3) | `#116` |
+| **III.7** | Resource-body `deletion_protection` / `purge_protection_enabled` disabled or removed | **Breaking (destruction guard removed)** | **Not detected** (repro R3) | `#114` |
+| **III.8** | Resource-body `force_destroy` or `skip_final_snapshot` flipped to `true` | **Breaking (data loss on destroy)** | **Not detected** (repro R3) | `#114` |
+| **IV.8** | `terraform { cloud {} }` organization or workspace changed/removed | **Breaking (state backend move)** | **Not detected** (repro R4) | `#117` |
+| **IV.9** | `provider {}` block `region`, `project`, `subscription_id`, or `assume_role` changed | **Breaking (provider target shift)** | **Not detected** (repro R4) | `#117` |
+| **IV.10** | Provider constraint upper-bound major drop (`< 6.0` → `< 5.0`) or `0.x` minor bump | **Breaking** | First-integer regex misses upper bound and skips `0.x` | `#120` |
+| **V.7** | `locals` expression change feeding a resource `ForceNew` attribute | **Breaking** (Warning if mutable) | **Not detected** | `#119` |
+| **V.8** | `data` source filter/selector change (`most_recent`, `filter`, `owners`) feeding a resource | **Warning → Breaking if ForceNew** | **Not detected** | `#119` |
+| **V.9** | Wrapper passes renamed variable (`region = var.custom_region`) with incompatible type | **Breaking** | Missed (matched by identical variable name only) | `#121` |
+| **VI.5** | `check {}` assertion condition weakened or removed while block name stays | **Warning** | **Not detected** (repro R4) | `#118` |
+| **VI.6** | `import {}` block `id` changed for the same `to` address | **Breaking** | **Not detected** (repro R4) | `#118` |
+| **VII.1** | Nested `module "..." {}` call removed from upstream module | **Breaking (subtree destruction)** | **Not detected** (repro R2) | `#112` |
+| **VII.2** | Nested `module "..." {}` `source` changed or major `version` bumped | **Breaking** | **Not detected** (repro R2) | `#112` |
+| **VII.3** | Nested `module "..." {}` `count` ↔ `for_each` or singleton ↔ indexed transition | **Breaking (subtree recreation)** | **Not detected** (repro R2) | `#112` |
 
 ---
 
@@ -610,18 +523,15 @@ that is the false-positive control keeping `#95` from regressing into the `#96` 
 
 ```mermaid
 flowchart TD
-    A["Batch A: False negatives<br/>#91 #92 #93 #94 #95 #96 #97"] --> B["Batch B: Precision<br/>#98 #99 #100 #101 #102"]
-    B --> C["Batch C: Performance<br/>#103 #104 #105 #106 #107"]
-    C --> D["Batch D: Tooling<br/>#108 #109 #110"]
-    D --> E["Pass 6 gap analysis<br/>reopen only from reproductions"]
+    A["Batch A: Core Breaking Blind Spots<br/>#111 #112 #113 #114 #115 #116 #117"] --> B["Batch B: Semantic & Wrapper Precision<br/>#118 #119 #120 #121 #122 #123 #124"]
+    B --> C["Batch C: Performance & Caching<br/>#125 #126 #127 #128 #129 #130"]
 ```
 
 | Batch | Items | Rationale |
 | :--- | :--- | :--- |
-| A — False negatives | `#91`–`#97` | Each item starts from a reproduction that currently reports `SAFE`; these are the changes that stop silent destruction |
-| B — Precision | `#98`–`#102` | Improves what a reported finding says and whether it should have been reported |
-| C — Performance | `#103`–`#107` | Removes duplicated work; measurable against the §1.3 baseline |
-| D — Tooling | `#108`–`#110` | Sustains A–C after delivery |
+| A — Core breaking blind spots | `#111`–`#117` | Eliminates the `SAFE` false negatives reproduced in R1–R4 |
+| B — Semantic & wrapper precision | `#118`–`#124` | Fixes taint recursion (R5), wrapper expression tracing, typed `--fix` codemods, and Markdown parity |
+| C — Performance & caching | `#125`–`#130` | Eliminates duplicate shift computation, temp-dir overlay copies, serial compare fetches, and repeated JSON/HCL parsing |
 
 ---
 
@@ -629,36 +539,17 @@ flowchart TD
 
 Every item, without exception:
 
-1. **Reproduction → regression test.** The reproduction in §1.3/§1 is committed as a test that fails
-   on today's tree and passes after the change (Pass 2 standing rule, item 3).
-2. **100 % statement coverage**, both module-wide and per package, enforced by `scripts/verify.sh:40-57`.
-3. **Reachability.** Any new exported symbol is reachable from a production entry point
-   (`cmd/tfastdiff` or `pkg/lsp`), verified with a reachability tool over `./cmd/...`.
-4. **Fuzz target** added for every new parser (`moved`, `lifecycle`, `backend`, `count`/`for_each`),
-   bringing the target count above the current 29 (`docs/gates.md` still says 28 — correct it in the
-   same change).
-5. **Fixture coverage.** At least one committed fixture under `test/fixtures/` contains `moved {}`,
-   `removed {}`, `check {}`, `count`, `for_each`, `lifecycle` and `backend` — today none does.
-6. **Invariant strengthening.** `Δ(A -> A)` additionally asserts zero new features; INV-3
-   (`total_breaking == 0 <=> can_safely_update`) is asserted over wrapper reports as well as upgrade
-   paths.
-7. **Performance items** land with a benchmark and are measured against the §1.3 baseline via `#110`.
-8. **Documentation** (`docs/cli_usage.md`, `docs/features.md`, `README.md`) is updated in the same
-   change; any claim found unimplemented during Pass 5 analysis is corrected — in particular the
-   `docs/features.md` section 4 claim about singleton ↔ indexed detection, and the `--fix` claim about
-   missing required input injection (`#102`).
-9. **No emoji** anywhere in sources, fixtures, goldens, documentation or workflow files; typographic
+1. **Reproduction → regression test.** Each reproduction R1–R5 in §1.1 is committed as a unit test that
+   fails before the change and passes after.
+2. **100 % statement coverage**, both module-wide and per package (including `test/docker`), enforced
+   by `scripts/verify.sh`.
+3. **Reachability.** Every new exported symbol is reachable from a production entry point
+   (`cmd/tfastdiff` or `pkg/lsp`).
+4. **Fuzz target** coverage maintained or expanded across all new parsers (`provider`, `cloud`,
+   `locals`, constraint intervals), keeping all fuzz targets green in `scripts/verify.sh`.
+5. **Golden & Oracle verification.** `test/golden/*` and `scripts/oracle_verify.py --skip-upstream` pass
+   with 100% accuracy and calibrated confidence scores.
+6. **Documentation** (`docs/architecture.md`, `docs/compatibility_rules.md`, `docs/cli_usage.md`,
+   `docs/features.md`, `docs/gates.md`, `docs/testing_methodology.md`) updated in the same change.
+7. **No emoji** anywhere in sources, fixtures, goldens, documentation, or workflow files; typographic
    arrows (`→`, `↔`) remain permitted.
-
-## 7. Standing rules carried forward
-
-1. 100 % statement coverage is necessary but **not sufficient**. Pair it with a reachability check.
-2. **A green report is not the same as a correct report.** Coverage proves a line ran; it cannot prove
-   the line reached the verdict. Every Pass 5 false negative (R1–R5) sat behind a fully covered
-   function.
-3. **Any analysis that cannot complete must say so**, and a missing input must surface as a failure,
-   not as silence.
-4. **Every gate must consume every finding.** `#97` and `#99` exist because three renderers silently
-   dropped a finding class that the verdict had already acted on.
-5. **A verdict with no discriminating power is a false negative in disguise.** `#96` exists because a
-   risk score that marks 100 % of consumers `CRITICAL` teaches its users to ignore it.
