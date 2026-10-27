@@ -54,9 +54,40 @@ A breaking change is any modification that will prevent existing wrapper code or
   ```
 - **Remediation**: Update downstream references to use successor attributes or remove delegations.
 
-### Incompatible Output Types
-- **Condition**: An output's type signature changes incompatibly (e.g. from `string` to `list(string)`).
-- **Impact**: Downstream modules expecting a scalar receive a collection, failing interpolations.
+### Incompatible Output Types & Value Expressions
+- **Condition**: An output's type signature changes incompatibly (e.g. from `string` to `list(string)`), or its `value` expression changes alongside a type or `sensitive` transition (`OutputValue`).
+- **Impact**: Downstream modules expecting a scalar receive a collection, or observe altered semantics alongside a contract shift.
+- **Note**: When only the output `value` expression changes while its declared `type` and `sensitive` flags remain identical, it is reported as a `WARNING` (`OutputValue`).
+
+### Changed Variable Defaults (`VariableDefault`)
+- **Condition**: An optional input variable's `default` value changes between version $N$ and version $N+1$.
+- **Impact**: Callers that omit the input silently receive a different value (such as a different region, disk size, or Kubernetes version).
+- **Verdict**: `BREAKING` (`ConfidenceScore = 9/10`).
+
+### Managed & Data Resource Removals and Provider Reassignments (`Resource`, `ResourceProvider`)
+- **Condition**: A `resource` or `data` block is removed, changes resource type, or is reassigned to a different `provider` alias.
+- **Impact**: Existing state instances are destroyed or fail provider resolution unless migrated.
+- **Verdict**: `BREAKING`.
+
+### Lifecycle, Provisioner & State Backend Changes (`Lifecycle`, `Provisioner`, `Triggers`, `StateBackendChange`)
+- **Condition**:
+  - `lifecycle { prevent_destroy = true }` is removed (`Lifecycle`).
+  - `lifecycle { replace_triggered_by = [...] }` is added (`Lifecycle`).
+  - A destroy-time `provisioner` (`when = destroy`) is added (`Provisioner`), or resource `triggers` change (`Triggers`).
+  - `terraform { backend "..." { ... } }` changes backend type or key attributes (`bucket`, `key`, `region`) (`StateBackendChange`).
+- **Verdict**: `BREAKING`. (Removing `create_before_destroy` or narrowing `ignore_changes` is classified as `WARNING`).
+
+### Modern HCL & OpenTofu Block Transitions (`RemovedDestroy`, `StateMigrationRemoved`, `Function`, `Encryption`)
+- **Condition**:
+  - A new `removed {}` block is introduced with `destroy = true` (Terraform 1.7+ default) (`RemovedDestroy` → `BREAKING`).
+  - A soft `removed { lifecycle { destroy = false } }` block is newly added (`SoftRemovedBlock` → `NEW_FEATURE`).
+  - An upstream `moved {}` block is removed (`StateMigrationRemoved` → `BREAKING`), or newly added (`MovedBlock` → `NEW_FEATURE`).
+  - A custom `function {}` or OpenTofu `encryption {}` block is removed (`BREAKING`).
+  - A `check {}`, `import {}`, or `removed {}` block is removed (`WARNING`).
+
+### Multi-Step Upgrade Path & Safe-Harbor Pin Selection (`pkg/planner`)
+- **Condition**: When evaluating a multi-version upgrade path $v_0 \to v_1 \to \dots \to v_k$ via `--upgrade-path`, each adjacent step $(v_i, v_{i+1})$ is evaluated independently by `diff.Compare`.
+- **Safe-Harbor Pin Rule**: The plan executor advances `RecommendedVersion` through every contiguous step with `CanSafelyUpdate == true` (`TotalBreaking == 0`) and stops at $v_i$ of the first step $(v_i \to v_{i+1})$ where `TotalBreaking > 0`. If all steps are safe, `RecommendedVersion == TargetVersion` and `CanSafelyUpdateAll == true`.
 
 ---
 
@@ -99,13 +130,18 @@ Subtle behavioral shifts that do not break the HCL parser but may require operat
 - **Note**: Terraform emits deprecation warnings; planned migration to recommended alternatives is advised before future major releases.
 
 ### Provider & Core Requirement Shifts
-- **Condition**: Upstream updates minimum Terraform core version (e.g. `>= 1.3.0` to `>= 1.5.0`) or updates provider constraint boundaries.
-- A newly declared `configuration_aliases` entry or provider source change is treated as breaking because callers may need different provider mappings.
+- **Condition**: Upstream updates or removes minimum Terraform core version (`required_version`, category `TerraformCore`) or updates provider constraint boundaries.
+- **Provider Major Upgrade (`ProviderMajorUpgrade`)**: A major version jump in a required provider constraint (e.g. `~> 4.0` → `~> 6.0`) is classified as `BREAKING` (`ConfidenceScore = 9/10`) because provider major upgrades routinely require state and schema migrations.
+- **Aliases & Sources**: A newly declared `configuration_aliases` entry (`ProviderConfigurationAlias`) or provider `source` change (`ProviderSource`) is treated as `BREAKING`.
 
-### Confidence Scores
-- Every diff and wrapper finding includes a `confidence_score` from 1 to 10 in machine-readable reports and human-readable output.
-- Scores estimate certainty that the analyzer's extracted declaration change is real, not the operational impact of the finding.
-- Exact input/output API changes are scored 9/10; type compatibility judgments are 8/10; provider and Terraform Core constraint shifts are 7/10 because the effective result depends on the consumer's selected versions; arbitrary validation-rule changes are scored 6/10 because static analysis cannot determine their full acceptance set.
+### Evidence-Based Confidence Scores
+- Every diff and wrapper finding includes a `confidence_score` clamped to `[1, 10]` in machine-readable reports and human-readable output.
+- Scores are computed from concrete AST and schema evidence rather than fixed category constants:
+  - `10/10`: Provider-schema-confirmed `requires_replace` combined with structural and literal evidence (`Evidence >= 3`).
+  - `9/10`: Parsed-literal value comparisons (`VariableDefault`, `ProviderMajorUpgrade`, `StateBackendChange`, `Lifecycle`, `RemovedDestroy`, `StateMigrationRemoved`) and wrapper symbol mismatches.
+  - `8/10`: Structural declaration removals/additions and type compatibility judgments (`Variable`, `Output`, `VariableType`, `VariableRequirement`, `ProviderSource`).
+  - `7/10`: Non-major `ProviderRequirement` and `TerraformCore` constraint updates.
+  - `6/10` – `8/10`: `VariableValidation` expression changes, scaled by available evidence.
 
 ---
 

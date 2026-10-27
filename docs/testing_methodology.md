@@ -141,9 +141,18 @@ The container test suite in `test/docker/` enforces compliance with cloud securi
 - **Exit Code Enforcement**: Verifies that breaking changes propagate as exit code 1 inside the container runtime.
 - **Attack Surface Neutralization**: Directly confirms that no shell (`/bin/sh` or `/bin/bash`) exists within the container.
 
-Run the container test suite:
+Run the container test suite (which executes both unit tests over `test/docker/dockerfile.go` policy validators at 100% statement coverage and dynamic `docker build`/`docker run` container checks):
 ```bash
-go test -v ./test/docker
+go test -v -cover ./test/docker
+```
+
+---
+
+## 4.5 Performance Budget Gate (`make perf`)
+
+Benchmark suites across `pkg/ast` (`BenchmarkInspectModule`), `pkg/diff` (`BenchmarkDiffCompare`), `pkg/blastradius` (`BenchmarkScanDirectory`), and `pkg/report` (`BenchmarkRenderReports`) guard against throughput and allocation regressions:
+```bash
+make perf
 ```
 
 ---

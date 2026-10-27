@@ -178,7 +178,11 @@ Compares two versions of an upstream module directly:
 - `--registry-timeout <duration>`: Timeout for Terraform Registry operations (default: `2m`).
 - `--verbose`, `-v`: Enable verbose progress and diagnostic logging to stderr.
 - `--version`: Print CLI version (`0.9.0`) and exit.
-- `--upgrade-path`: Inspects each intermediate semantic-version Git tag or Registry release and reports adjacent compatibility transitions. Requires both version flags, the same source for `--old` and `--new`, and text, Markdown, or JSON output. For local directories, only the supplied endpoint snapshots are available. Git repositories are downloaded once and reused for every intermediate tag, so stepping across a major version does not re-clone per release.
+- `--upgrade-path`: Executes the multi-version upgrade plan executor (`pkg/planner`) across intermediate semantic-version Git tags (including monorepo `//subpath`-scoped tags) or Terraform Registry releases between `--old-version` and `--new-version`:
+  - Prunes candidate versions to major `.0.0` boundaries and the latest patch of each `MAJOR.MINOR` series (`pruneToSafeHarbor`).
+  - Prefetches intermediate versions concurrently using a bounded worker pool (`min(8, GOMAXPROCS)`) under the shared `--registry-timeout` budget.
+  - Caches inspected version snapshots in `--cache-dir` keyed by `source@version` (`<sha256>.json`), so repeated CI runs execute with zero network fetches.
+  - Inspects intermediate modules in parallel (`InspectModulesParallel`), evaluates prepared OPA/JSON policies across every step, and computes `recommended_version` (the highest contiguous safe-harbor version pin reachable before the first breaking step).
 
 ---
 
@@ -415,22 +419,36 @@ tfastdiff \
 
 ---
 
-### Use Case 5: Multi-Version Upgrade Planning across Intermediate Releases
-When planning an upgrade across multiple major versions (e.g. GKE `v25.0.0` to `v31.0.0`), inspect intermediate release boundaries:
+### Use Case 5: Multi-Version Upgrade Path & Safe-Harbor Pin Update Plan Execution
+When planning a pin update across multiple major or minor versions (e.g. GKE `v25.0.0` to `v31.0.0`), run the upgrade-path plan executor with `--cache-dir` to prefetch intermediate releases concurrently, evaluate adjacent transitions, and determine the safest version pin:
 
 ```bash
+# Step 1: Compute the multi-version upgrade path and safe-harbor pin recommendation
 tfastdiff \
   --old https://github.com/terraform-google-modules/terraform-google-kubernetes-engine.git \
   --new https://github.com/terraform-google-modules/terraform-google-kubernetes-engine.git \
   --old-version v25.0.0 \
   --new-version v31.0.0 \
   --upgrade-path \
+  --cache-dir ~/.cache/tfastdiff \
   --format markdown
+
+# Step 2: Audit the wrapper against the recommended pin and verify against a golden plan
+tfastdiff \
+  --wrapper ./modules/gke-wrapper \
+  --upstream https://github.com/terraform-google-modules/terraform-google-kubernetes-engine.git \
+  --old-version v25.0.0 \
+  --new-version v30.0.0 \
+  --golden-plan ./golden-plan.json \
+  --cache-dir ~/.cache/tfastdiff \
+  --format markdown \
+  --exit-code
 ```
 **Outcome**:
-- Evaluates each intermediate semantic version transition.
-- Identifies the highest contiguous "safe harbor" version reachable without breaking changes.
-- Aggregates deprecation warnings introduced in intermediate versions before removal.
+- Discovers and prunes intermediate semantic versions (including monorepo `//subpath` tags), prefetching uncached releases in parallel across a bounded worker pool (`min(8, GOMAXPROCS)`).
+- Persists `source@version` AST snapshots in `--cache-dir` so subsequent runs require zero network fetches.
+- Identifies the highest contiguous "safe harbor" version pin (`recommended_version`) reachable without breaking changes.
+- Verifies the wrapper pin update against both the upstream AST diff (`UpstreamDiff`) and the Terraform execution plan (`--golden-plan`) to confirm zero `ForceNew` resource replacements or unmigrated address shifts.
 
 ---
 
