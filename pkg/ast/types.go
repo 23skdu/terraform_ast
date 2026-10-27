@@ -39,6 +39,8 @@ type ModuleCallDef struct {
 	Name             string             `json:"name"`
 	Source           string             `json:"source"`
 	Version          string             `json:"version,omitempty"`
+	Count            string             `json:"count,omitempty"`
+	ForEach          string             `json:"for_each,omitempty"`
 	PassedInputs     []string           `json:"passed_inputs"`
 	InputExpressions map[string]string  `json:"input_expressions,omitempty"`
 	Pos              tfconfig.SourcePos `json:"pos"`
@@ -107,6 +109,8 @@ type ResourceDef struct {
 	Type         string             `json:"type"`
 	Name         string             `json:"name"`
 	Provider     string             `json:"provider,omitempty"`
+	Count        string             `json:"count,omitempty"`
+	ForEach      string             `json:"for_each,omitempty"`
 	Lifecycle    LifecycleFlags     `json:"lifecycle,omitempty"`
 	Provisioners []string           `json:"provisioners,omitempty"`
 	Triggers     map[string]string  `json:"triggers,omitempty"`

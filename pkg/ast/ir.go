@@ -124,10 +124,17 @@ func ExtractResourceAddresses(mod *ModuleInfo) []ResourceAddress {
 	sort.Strings(managedKeys)
 	for _, k := range managedKeys {
 		r := mod.ManagedResources[k]
+		indexKey := ""
+		if r.Count != "" {
+			indexKey = "count"
+		} else if r.ForEach != "" {
+			indexKey = "for_each"
+		}
 		addresses = append(addresses, ResourceAddress{
-			Mode: "managed",
-			Type: r.Type,
-			Name: r.Name,
+			Mode:     "managed",
+			Type:     r.Type,
+			Name:     r.Name,
+			IndexKey: indexKey,
 		})
 	}
 
@@ -139,10 +146,17 @@ func ExtractResourceAddresses(mod *ModuleInfo) []ResourceAddress {
 	sort.Strings(dataKeys)
 	for _, k := range dataKeys {
 		r := mod.DataResources[k]
+		indexKey := ""
+		if r.Count != "" {
+			indexKey = "count"
+		} else if r.ForEach != "" {
+			indexKey = "for_each"
+		}
 		addresses = append(addresses, ResourceAddress{
-			Mode: "data",
-			Type: r.Type,
-			Name: r.Name,
+			Mode:     "data",
+			Type:     r.Type,
+			Name:     r.Name,
+			IndexKey: indexKey,
 		})
 	}
 
@@ -210,26 +224,46 @@ func DetectAddressShifts(oldMod, newMod *ModuleInfo) []ResourceAddressShift {
 			continue
 		}
 
-		// Resource disappeared from its old address.
-		// Check if a resource of the same type exists in new under a different name or module
-		var candidate *ResourceAddress
+		// Best-match candidate scoring for deterministic pairing.
+		type scored struct {
+			addr  ResourceAddress
+			score int
+		}
+		var best *scored
 		for _, newAddr := range newAddrs {
-			if _, inOld := oldMap[newAddr.FullAddress()]; !inOld && newAddr.Type == oldAddr.Type && newAddr.Mode == oldAddr.Mode {
-				c := newAddr
-				candidate = &c
-				break
+			if _, inOld := oldMap[newAddr.FullAddress()]; inOld {
+				continue
+			}
+			if newAddr.Type != oldAddr.Type || newAddr.Mode != oldAddr.Mode {
+				continue
+			}
+			sc := 1
+			if newAddr.Name == oldAddr.Name && oldAddr.Name != "" {
+				sc += 2
+			}
+			if newAddr.ModulePath == oldAddr.ModulePath {
+				sc += 1
+			}
+			if newAddr.IndexKey == oldAddr.IndexKey && oldAddr.IndexKey != "" {
+				sc += 1
+			}
+			c := newAddr
+			s := &scored{addr: c, score: sc}
+			if best == nil || s.score > best.score {
+				best = s
 			}
 		}
 
-		if candidate != nil {
+		if best != nil && best.score >= 1 {
+			candidate := best.addr
+			reason := fmt.Sprintf("Resource address shifted from %s to %s without state migration (triggers ForceNew recreation)", oldKey, candidate.FullAddress())
 			shifts = append(shifts, ResourceAddressShift{
 				OldAddress:   oldAddr,
-				NewAddress:   *candidate,
+				NewAddress:   candidate,
 				IsRecreation: true,
-				Reason:       fmt.Sprintf("Resource address shifted from %s to %s without state migration (triggers ForceNew recreation)", oldKey, candidate.FullAddress()),
+				Reason:       reason,
 			})
 		} else {
-			// Resource was removed or relocated into a child module
 			shifts = append(shifts, ResourceAddressShift{
 				OldAddress:   oldAddr,
 				NewAddress:   ResourceAddress{},

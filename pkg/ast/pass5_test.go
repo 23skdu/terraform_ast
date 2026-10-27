@@ -140,6 +140,211 @@ terraform {
 	}
 }
 
+func TestPass5_EnrichCountForEach(t *testing.T) {
+	dir := t.TempDir()
+	src := `resource "aws_instance" "web" {
+  count = 2
+}
+
+resource "aws_instance" "app" {
+  for_each = toset(["a", "b"])
+}
+`
+	if err := os.WriteFile(dir+"/main.tf", []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	info := &ModuleInfo{
+		Variables:               make(map[string]VariableDef),
+		Outputs:                 make(map[string]OutputDef),
+		ModuleCalls:             make(map[string]ModuleCallDef),
+		WrapperOutputReferences: make(map[string][]OutputReference),
+		ManagedResources:        make(map[string]ResourceDef),
+		DataResources:           make(map[string]ResourceDef),
+		CheckBlocks:             make(map[string]CheckBlockDef),
+		Functions:               make(map[string]FunctionDef),
+	}
+	enrichFromHCLFiles(dir, info)
+	if info.ManagedResources["aws_instance.web"].Count == "" {
+		t.Fatal("count not captured")
+	}
+	if info.ManagedResources["aws_instance.app"].ForEach == "" {
+		t.Fatal("for_each not captured")
+	}
+}
+
+func TestPass5_ExtractAddressesCountForEachData(t *testing.T) {
+	mod := &ModuleInfo{
+		DataResources: map[string]ResourceDef{
+			"data.aws_ami.ubuntu": {Mode: "data", Type: "aws_ami", Name: "ubuntu", Count: "2"},
+		},
+	}
+	addrs := ExtractResourceAddresses(mod)
+	if len(addrs) != 1 || addrs[0].IndexKey != "count" {
+		t.Fatalf("expected count index key for data, got %v", addrs)
+	}
+	mod2 := &ModuleInfo{
+		DataResources: map[string]ResourceDef{
+			"data.aws_region.current": {Mode: "data", Type: "aws_region", Name: "current", ForEach: "toset([])"},
+		},
+	}
+	addrs2 := ExtractResourceAddresses(mod2)
+	if len(addrs2) != 1 || addrs2[0].IndexKey != "for_each" {
+		t.Fatalf("expected for_each index key for data, got %v", addrs2)
+	}
+}
+
+func TestPass5_ExtractAddressesCountForEach(t *testing.T) {
+	mod := &ModuleInfo{
+		ManagedResources: map[string]ResourceDef{
+			"aws_instance.web": {Mode: "managed", Type: "aws_instance", Name: "web", Count: "2"},
+		},
+	}
+	addrs := ExtractResourceAddresses(mod)
+	if len(addrs) != 1 || addrs[0].IndexKey != "count" {
+		t.Fatalf("expected count index key, got %v", addrs)
+	}
+	mod2 := &ModuleInfo{
+		ManagedResources: map[string]ResourceDef{
+			"aws_instance.web": {Mode: "managed", Type: "aws_instance", Name: "web", ForEach: "toset([])"},
+		},
+	}
+	addrs2 := ExtractResourceAddresses(mod2)
+	if len(addrs2) != 1 || addrs2[0].IndexKey != "for_each" {
+		t.Fatalf("expected for_each index key, got %v", addrs2)
+	}
+}
+
+func TestPass5_DetectAddressShiftsSameIndexKey(t *testing.T) {
+	oldMod := &ModuleInfo{
+		ManagedResources: map[string]ResourceDef{
+			"aws_instance.a": {Mode: "managed", Type: "aws_instance", Name: "a", Count: "2"},
+		},
+	}
+	newMod := &ModuleInfo{
+		ManagedResources: map[string]ResourceDef{
+			"aws_instance.b": {Mode: "managed", Type: "aws_instance", Name: "b", Count: "3"},
+		},
+	}
+	shifts := DetectAddressShifts(oldMod, newMod)
+	if len(shifts) != 1 {
+		t.Fatalf("expected 1 shift, got %d", len(shifts))
+	}
+}
+
+func TestPass5_DetectAddressShiftsModulePath(t *testing.T) {
+	oldMod2 := &ModuleInfo{
+		ManagedResources: map[string]ResourceDef{
+			"aws_vpc.main": {Mode: "managed", Type: "aws_vpc", Name: "main"},
+		},
+	}
+	newMod2 := &ModuleInfo{
+		ManagedResources: map[string]ResourceDef{
+			"aws_vpc.moved": {Mode: "managed", Type: "aws_vpc", Name: "moved"},
+		},
+	}
+	shifts := DetectAddressShifts(oldMod2, newMod2)
+	if len(shifts) != 1 {
+		t.Fatalf("expected 1 shift, got %d", len(shifts))
+	}
+}
+
+func TestPass5_ModuleProvidersDependsOn(t *testing.T) {
+	dir := t.TempDir()
+	src := `module "child" {
+  source       = "./child"
+  count        = 2
+  for_each     = toset(["a"])
+  providers    = { aws = aws.west }
+  depends_on   = [null_resource.x]
+}
+`
+	if err := os.WriteFile(dir+"/main.tf", []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	info := &ModuleInfo{
+		Variables:               make(map[string]VariableDef),
+		Outputs:                 make(map[string]OutputDef),
+		ModuleCalls:             make(map[string]ModuleCallDef),
+		WrapperOutputReferences: make(map[string][]OutputReference),
+		ManagedResources:        make(map[string]ResourceDef),
+		DataResources:           make(map[string]ResourceDef),
+		CheckBlocks:             make(map[string]CheckBlockDef),
+		Functions:               make(map[string]FunctionDef),
+	}
+	enrichFromHCLFiles(dir, info)
+	mc := info.ModuleCalls["child"]
+	if mc.Count == "" || mc.ForEach == "" {
+		t.Fatalf("count/for_each not captured: %+v", mc)
+	}
+}
+
+func TestPass5_DataResourceCountForEach(t *testing.T) {
+	dir := t.TempDir()
+	src := `data "aws_ami" "ubuntu" {
+  count = 2
+}
+data "aws_region" "current" {
+  for_each = toset(["a"])
+}
+`
+	if err := os.WriteFile(dir+"/main.tf", []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	info := &ModuleInfo{
+		Variables:               make(map[string]VariableDef),
+		Outputs:                 make(map[string]OutputDef),
+		ModuleCalls:             make(map[string]ModuleCallDef),
+		WrapperOutputReferences: make(map[string][]OutputReference),
+		ManagedResources:        make(map[string]ResourceDef),
+		DataResources:           make(map[string]ResourceDef),
+		CheckBlocks:             make(map[string]CheckBlockDef),
+		Functions:               make(map[string]FunctionDef),
+	}
+	enrichFromHCLFiles(dir, info)
+	if info.DataResources["data.aws_ami.ubuntu"].Count == "" {
+		t.Fatal("data count not captured")
+	}
+	if info.DataResources["data.aws_region.current"].ForEach == "" {
+		t.Fatal("data for_each not captured")
+	}
+}
+
+func TestPass5_DetectAddressShiftsMultiAndCountForEach(t *testing.T) {
+	// multi-resource: one unchanged, one renamed -> covers continue (newAddr in oldMap)
+	oldMod := &ModuleInfo{
+		ManagedResources: map[string]ResourceDef{
+			"aws_vpc.stable": {Mode: "managed", Type: "aws_vpc", Name: "stable"},
+			"aws_vpc.old":    {Mode: "managed", Type: "aws_vpc", Name: "old"},
+		},
+	}
+	newMod := &ModuleInfo{
+		ManagedResources: map[string]ResourceDef{
+			"aws_vpc.stable": {Mode: "managed", Type: "aws_vpc", Name: "stable"},
+			"aws_vpc.new":    {Mode: "managed", Type: "aws_vpc", Name: "new"},
+		},
+	}
+	shifts := DetectAddressShifts(oldMod, newMod)
+	if len(shifts) != 1 {
+		t.Fatalf("expected 1 shift, got %d", len(shifts))
+	}
+
+	// count -> for_each: same name, different index key -> sc += 2 and sc += 1
+	oldMod2 := &ModuleInfo{
+		ManagedResources: map[string]ResourceDef{
+			"aws_instance.web": {Mode: "managed", Type: "aws_instance", Name: "web", Count: "2"},
+		},
+	}
+	newMod2 := &ModuleInfo{
+		ManagedResources: map[string]ResourceDef{
+			"aws_instance.web": {Mode: "managed", Type: "aws_instance", Name: "web", ForEach: "toset([])"},
+		},
+	}
+	shifts2 := DetectAddressShifts(oldMod2, newMod2)
+	if len(shifts2) != 1 {
+		t.Fatalf("expected 1 shift for count->for_each, got %d", len(shifts2))
+	}
+}
+
 func TestPass5_EnrichMovedBlocks(t *testing.T) {
 	dir := t.TempDir()
 	src := `moved {

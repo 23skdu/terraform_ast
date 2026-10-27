@@ -433,7 +433,13 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 						mc.Source = strings.Trim(exprStr, `"'`)
 					case "version":
 						mc.Version = strings.Trim(exprStr, `"'`)
-					case "count", "for_each", "providers", "depends_on":
+					case "count":
+						mc.Count = exprStr
+						continue
+					case "for_each":
+						mc.ForEach = exprStr
+						continue
+					case "providers", "depends_on":
 						continue
 					default:
 						passed = append(passed, attrName)
@@ -604,6 +610,14 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 				}
 				if !exists {
 					res = ResourceDef{Mode: mode, Type: block.Labels[0], Name: block.Labels[1]}
+				}
+				// capture count/for_each
+				rAttrs, _ := block.Body.JustAttributes()
+				if cAttr, ok := rAttrs["count"]; ok {
+					res.Count = strings.TrimSpace(string(src[cAttr.Expr.Range().Start.Byte:cAttr.Expr.Range().End.Byte]))
+				}
+				if fAttr, ok := rAttrs["for_each"]; ok {
+					res.ForEach = strings.TrimSpace(string(src[fAttr.Expr.Range().Start.Byte:fAttr.Expr.Range().End.Byte]))
 				}
 				// lifecycle block
 				lcContent, _, _ := block.Body.PartialContent(&hcl.BodySchema{
