@@ -21,6 +21,9 @@ verify:
 fuzz:
 	bash scripts/verify.sh 30
 
+perf:
+	go test -bench . -benchtime=3s -count=5 -run '^$' ./pkg/ast/ ./pkg/diff/ ./pkg/report/ ./pkg/blastradius/ 2>&1 | tee perf.out
+
 lint:
 	gofmt -l .
 	go vet ./...
