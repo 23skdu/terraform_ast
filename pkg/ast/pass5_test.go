@@ -411,3 +411,27 @@ func TestPass5_CacheInvalidatesOnEqualMtimeAndSize(t *testing.T) {
 		t.Fatalf("expected cache miss and number type on equal mtime+size, got %s", second.Variables["name"].Type)
 	}
 }
+
+func TestPass5_VersionModuleCache(t *testing.T) {
+	SetPersistentCacheDir("")
+	if _, ok := CachedVersionModule("hashicorp/consul/aws", "1.1.0"); ok {
+		t.Fatal("expected miss when persistent cache dir is unset")
+	}
+	CacheVersionModule("hashicorp/consul/aws", "1.1.0", &ModuleInfo{Path: "x"})
+
+	cacheDir := t.TempDir()
+	SetPersistentCacheDir(cacheDir)
+	defer SetPersistentCacheDir("")
+
+	if _, ok := CachedVersionModule("hashicorp/consul/aws", "1.1.0"); ok {
+		t.Fatal("expected miss before caching")
+	}
+	CacheVersionModule("hashicorp/consul/aws", "1.1.0", &ModuleInfo{
+		Path:      "hashicorp/consul/aws",
+		Variables: map[string]VariableDef{"a": {Name: "a", Type: "string"}},
+	})
+	cached, ok := CachedVersionModule("hashicorp/consul/aws", "1.1.0")
+	if !ok || cached.Variables["a"].Type != "string" {
+		t.Fatalf("expected cache hit, got ok=%v cached=%+v", ok, cached)
+	}
+}

@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -387,16 +389,25 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		targetDir = tmpTarget
 	}
 
-	vlog("Inspecting target upstream module %s", targetDir)
-	targetInfo, err := ast.Inspect(targetDir)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "Error inspecting target upstream module %s: %v\n", targetDir, err)
-		return 1
-	}
+	var (
+		targetInfo *ast.ModuleInfo
+		targetErr  error
+		pinnedInfo *ast.ModuleInfo
+		pinnedErr  error
+		pinnedDir  string
+		inspectWG  sync.WaitGroup
+	)
+	defer inspectWG.Wait()
 
-	var pinnedInfo *ast.ModuleInfo
+	vlog("Inspecting target upstream module %s", targetDir)
+	inspectWG.Add(1)
+	go func() {
+		defer inspectWG.Done()
+		targetInfo, targetErr = ast.Inspect(targetDir)
+	}()
+
 	if oldVersion != "" {
-		pinnedDir := upstreamPath
+		pinnedDir = upstreamPath
 		if registry.IsRegistrySource(upstreamPath) {
 			tmpPinned, err := mkdirTemp("", "tf_registry_pinned_*")
 			if err != nil {
@@ -429,11 +440,17 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 			pinnedDir = tmpPinned
 		}
 		vlog("Inspecting pinned upstream module %s", pinnedDir)
-		pinnedInfo, err = ast.Inspect(pinnedDir)
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "Error inspecting pinned upstream module %s: %v\n", pinnedDir, err)
-			return 1
-		}
+		pinnedInfo, pinnedErr = ast.Inspect(pinnedDir)
+	}
+
+	inspectWG.Wait()
+	if targetErr != nil {
+		_, _ = fmt.Fprintf(stderr, "Error inspecting target upstream module %s: %v\n", targetDir, targetErr)
+		return 1
+	}
+	if pinnedErr != nil {
+		_, _ = fmt.Fprintf(stderr, "Error inspecting pinned upstream module %s: %v\n", pinnedDir, pinnedErr)
+		return 1
 	}
 
 	vlog("Analyzing wrapper compatibility against target upstream")
@@ -966,13 +983,6 @@ func analyzeUpgradePathVersions(ctx context.Context, registryTimeout time.Durati
 	}
 	snapshots := make([]planner.VersionSnapshot, len(versions))
 	var intermediateIndices []int
-	var intermediateDirs []string
-	var cleanupDirs []string
-	defer func() {
-		for _, d := range cleanupDirs {
-			_ = os.RemoveAll(d)
-		}
-	}()
 
 	for i, version := range versions {
 		switch {
@@ -981,20 +991,58 @@ func analyzeUpgradePathVersions(ctx context.Context, registryTimeout time.Durati
 		case semverutil.Compare(version, newVersion) == 0:
 			snapshots[i] = planner.VersionSnapshot{Version: version, Module: newInfo}
 		default:
-			dir, isTemp, err := resolveModuleVersionDir(ctx, registryTimeout, source, version)
-			if err != nil {
-				return nil, fmt.Errorf("retrieve intermediate version %s: %w", version, err)
-			}
-			if isTemp {
-				cleanupDirs = append(cleanupDirs, dir)
+			if cached, ok := ast.CachedVersionModule(source, version); ok {
+				snapshots[i] = planner.VersionSnapshot{Version: version, Module: cached}
+				continue
 			}
 			intermediateIndices = append(intermediateIndices, i)
-			intermediateDirs = append(intermediateDirs, dir)
 		}
 	}
 
-	if len(intermediateDirs) > 0 {
-		inspected, err := inspectModulesParallel(ctx, intermediateDirs, 4)
+	if len(intermediateIndices) > 0 {
+		intermediateDirs := make([]string, len(intermediateIndices))
+		var cleanupMu sync.Mutex
+		var cleanupDirs []string
+		defer func() {
+			for _, d := range cleanupDirs {
+				_ = os.RemoveAll(d)
+			}
+		}()
+
+		workers := min(8, runtime.GOMAXPROCS(0))
+		sem := make(chan struct{}, workers)
+		var wg sync.WaitGroup
+		var firstErr error
+		var errOnce sync.Once
+
+		for idx, origIdx := range intermediateIndices {
+			ver := versions[origIdx]
+			wg.Add(1)
+			go func(slot int, v string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				dir, isTemp, err := resolveModuleVersionDir(regCtx, registryTimeout, source, v)
+				if err != nil {
+					errOnce.Do(func() {
+						firstErr = fmt.Errorf("retrieve intermediate version %s: %w", v, err)
+					})
+					return
+				}
+				if isTemp {
+					cleanupMu.Lock()
+					cleanupDirs = append(cleanupDirs, dir)
+					cleanupMu.Unlock()
+				}
+				intermediateDirs[slot] = dir
+			}(idx, ver)
+		}
+		wg.Wait()
+		if firstErr != nil {
+			return nil, firstErr
+		}
+
+		inspected, err := inspectModulesParallel(ctx, intermediateDirs, workers)
 		if err != nil {
 			for idx, dir := range intermediateDirs {
 				if strings.Contains(err.Error(), dir) {
@@ -1007,6 +1055,7 @@ func analyzeUpgradePathVersions(ctx context.Context, registryTimeout time.Durati
 		for idx, mod := range inspected {
 			origIdx := intermediateIndices[idx]
 			snapshots[origIdx] = planner.VersionSnapshot{Version: versions[origIdx], Module: mod}
+			ast.CacheVersionModule(source, versions[origIdx], mod)
 		}
 	}
 

@@ -2,10 +2,18 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/23skdu/terraform_ast/pkg/ast"
+	"github.com/23skdu/terraform_ast/pkg/registry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -148,4 +156,85 @@ module "my_wrapper" {
 	}, &stdout, &stderr)
 	assert.Contains(t, stdout.String(), "total_call_sites_scanned")
 	_ = code
+}
+
+func TestExecute_UpgradePathConcurrentPrefetchAndCache(t *testing.T) {
+	tarData := createTestModuleArchive(t)
+	var intermediateDownloads int32
+	latency := 40 * time.Millisecond
+
+	var versionItems []string
+	versionItems = append(versionItems, `{"version":"1.0.0"}`)
+	for i := 1; i <= 12; i++ {
+		versionItems = append(versionItems, fmt.Sprintf(`{"version":"1.%d.0"}`, i))
+	}
+	versionItems = append(versionItems, `{"version":"2.0.0"}`)
+	versionsPayload := fmt.Sprintf(`{"modules":[{"versions":[%s]}]}`, strings.Join(versionItems, ","))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/versions") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(versionsPayload))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/download") {
+			if !strings.Contains(r.URL.Path, "/1.0.0/") && !strings.Contains(r.URL.Path, "/2.0.0/") {
+				atomic.AddInt32(&intermediateDownloads, 1)
+				time.Sleep(latency)
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(tarData)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	origClient := newRegistryClient
+	newRegistryClient = func() *registry.Client {
+		c := registry.NewClient(server.Client())
+		c.BaseURL = server.URL
+		c.RetryMaxElapsedTime = 200 * time.Millisecond
+		return c
+	}
+	defer func() { newRegistryClient = origClient }()
+
+	cacheDir := t.TempDir()
+	defer ast.SetPersistentCacheDir("")
+
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	code := Execute([]string{
+		"--old", "hashicorp/consul/aws",
+		"--new", "hashicorp/consul/aws",
+		"--old-version", "1.0.0",
+		"--new-version", "2.0.0",
+		"--upgrade-path",
+		"--cache-dir", cacheDir,
+		"--format", "json",
+	}, &stdout, &stderr)
+	elapsed := time.Since(start)
+	require.Equal(t, 0, code, stderr.String())
+	assert.Equal(t, int32(12), atomic.LoadInt32(&intermediateDownloads))
+	// 12 serial downloads at 40ms would take >= 480ms; concurrent prefetch finishes much faster.
+	assert.Less(t, elapsed, 400*time.Millisecond)
+
+	// Second run with the same --cache-dir must perform zero intermediate downloads.
+	atomic.StoreInt32(&intermediateDownloads, 0)
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", "hashicorp/consul/aws",
+		"--new", "hashicorp/consul/aws",
+		"--old-version", "1.0.0",
+		"--new-version", "2.0.0",
+		"--upgrade-path",
+		"--cache-dir", cacheDir,
+		"--format", "json",
+	}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+	assert.Equal(t, int32(0), atomic.LoadInt32(&intermediateDownloads))
+
+	matches, _ := filepath.Glob(filepath.Join(os.TempDir(), "tfastdiff_upgrade_step_*"))
+	assert.Empty(t, matches)
 }

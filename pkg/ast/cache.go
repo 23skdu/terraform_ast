@@ -272,3 +272,27 @@ func cacheModule(path, fingerprint string, info *ModuleInfo) error {
 	}
 	return nil
 }
+
+func versionCacheKey(source, version string) string {
+	sum := sha256.Sum256([]byte("version:" + source + "@" + version))
+	return hex.EncodeToString(sum[:])
+}
+
+// CachedVersionModule loads a cached ModuleInfo for a versioned module source from the persistent cache.
+func CachedVersionModule(source, version string) (*ModuleInfo, bool) {
+	if GetPersistentCacheDir() == "" {
+		return nil, false
+	}
+	fp := versionCacheKey(source, version)
+	info, found, _ := cachedModule("version:"+source+"@"+version, fp)
+	return info, found
+}
+
+// CacheVersionModule stores a ModuleInfo for a versioned module source in the persistent cache.
+func CacheVersionModule(source, version string, info *ModuleInfo) {
+	if GetPersistentCacheDir() == "" {
+		return
+	}
+	fp := versionCacheKey(source, version)
+	_ = cacheModule("version:"+source+"@"+version, fp, info)
+}
