@@ -26,6 +26,7 @@ type DifferenceItem struct {
 	NewValue        string             `json:"new_value,omitempty"`
 	Remediation     string             `json:"remediation,omitempty"`
 	Pos             tfconfig.SourcePos `json:"pos,omitempty"`
+	Evidence        int                `json:"evidence,omitempty"`
 }
 
 // DiffReport contains the full comparison between two Terraform module versions.

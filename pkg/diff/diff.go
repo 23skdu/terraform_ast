@@ -122,22 +122,36 @@ func recommendSafePin(report *DiffReport) {
 
 func scoreConfidence(report *DiffReport) {
 	for i := range report.BreakingChanges {
-		report.BreakingChanges[i].ConfidenceScore = 9
+		ev := report.BreakingChanges[i].Evidence
+		if ev < 1 {
+			ev = 1
+		}
+		score := 8 + (ev - 1)
+		report.BreakingChanges[i].ConfidenceScore = score
 	}
 	for i := range report.NewFeatures {
-		report.NewFeatures[i].ConfidenceScore = 9
+		ev := report.NewFeatures[i].Evidence
+		if ev < 1 {
+			ev = 1
+		}
+		score := 8 + (ev - 1)
+		report.NewFeatures[i].ConfidenceScore = score
 	}
 	for i := range report.Warnings {
+		ev := report.Warnings[i].Evidence
+		var base int
 		switch report.Warnings[i].Category {
 		case "TerraformCore", "ProviderRequirement":
-			report.Warnings[i].ConfidenceScore = 7
+			base = 7
 		case "VariableValidation":
-			report.Warnings[i].ConfidenceScore = 6
+			base = 6
 		case "VariableType", "OutputType":
-			report.Warnings[i].ConfidenceScore = 8
+			base = 8
 		default:
-			report.Warnings[i].ConfidenceScore = 9
+			base = 9
 		}
+		score := base + ev
+		report.Warnings[i].ConfidenceScore = score
 	}
 }
 

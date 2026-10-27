@@ -13,18 +13,18 @@
 
 | Category | Name | Description | Confidence | Remediation |
 | :--- | :--- | :--- | :--- | :--- |
-| `Output` | `legacy_network_tag` | Output 'legacy_network_tag' was removed in upstream version | 9/10 | Remove or replace references to output 'legacy_network_tag' in wrapper or downstream modules |
-| `Variable` | `cluster_autoscaling_profile` | Newly introduced variable 'cluster_autoscaling_profile' is required and has no default value | 9/10 | Provide a required value for 'cluster_autoscaling_profile' in wrapper module call |
-| `Variable` | `ip_range_services` | Input variable 'ip_range_services' was removed in upstream version | 9/10 | Remove variable 'ip_range_services' from wrapper or module callers before upgrading |
-| `VariableRequirement` | `grant_registry_access` | Variable 'grant_registry_access' was optional (had default) but is now required with no default | 9/10 | Explicitly supply a value for 'grant_registry_access' in the wrapper module call |
-| `VariableType` | `ip_range_pods` | Type constraint for variable 'ip_range_pods' changed: Type constraint changed incompatibly from 'string' to 'list(string)' | 9/10 | Update variable type definition in wrapper to 'list(string)' |
+| `Output` | `legacy_network_tag` | Output 'legacy_network_tag' was removed in upstream version | 8/10 | Remove or replace references to output 'legacy_network_tag' in wrapper or downstream modules |
+| `Variable` | `cluster_autoscaling_profile` | Newly introduced variable 'cluster_autoscaling_profile' is required and has no default value | 8/10 | Provide a required value for 'cluster_autoscaling_profile' in wrapper module call |
+| `Variable` | `ip_range_services` | Input variable 'ip_range_services' was removed in upstream version | 8/10 | Remove variable 'ip_range_services' from wrapper or module callers before upgrading |
+| `VariableRequirement` | `grant_registry_access` | Variable 'grant_registry_access' was optional (had default) but is now required with no default | 8/10 | Explicitly supply a value for 'grant_registry_access' in the wrapper module call |
+| `VariableType` | `ip_range_pods` | Type constraint for variable 'ip_range_pods' changed: Type constraint changed incompatibly from 'string' to 'list(string)' | 8/10 | Update variable type definition in wrapper to 'list(string)' |
 
 ### New Features (2)
 
 | Category | Name | Description | Confidence |
 | :--- | :--- | :--- | :--- |
-| `Output` | `cost_allocation_status` | New output 'cost_allocation_status' available in upstream | 9/10 |
-| `Variable` | `enable_cost_allocation` | New optional variable 'enable_cost_allocation' available in upstream | 9/10 |
+| `Output` | `cost_allocation_status` | New output 'cost_allocation_status' available in upstream | 8/10 |
+| `Variable` | `enable_cost_allocation` | New optional variable 'enable_cost_allocation' available in upstream | 8/10 |
 
 ### Warnings (2)
 

@@ -237,7 +237,7 @@ func TestCompare_NullabilityAndOutputTypeChanges(t *testing.T) {
 	report := Compare(oldMod, newMod, "1.0.0", "1.1.0")
 	require.Equal(t, 1, report.TotalBreaking)
 	assert.Equal(t, "VariableNullability", report.BreakingChanges[0].Category)
-	assert.Equal(t, 9, report.BreakingChanges[0].ConfidenceScore)
+	assert.Equal(t, 8, report.BreakingChanges[0].ConfidenceScore)
 	assert.Equal(t, 2, report.TotalWarnings)
 	assert.Equal(t, "OutputType", report.Warnings[0].Category)
 	assert.Equal(t, 8, report.Warnings[0].ConfidenceScore)
@@ -303,7 +303,7 @@ func TestCompare_ValidationAndProviderAliasChanges(t *testing.T) {
 	report := Compare(oldMod, newMod, "1.0.0", "1.1.0")
 	require.Equal(t, 1, report.TotalBreaking)
 	assert.Equal(t, "ProviderConfigurationAlias", report.BreakingChanges[0].Category)
-	assert.Equal(t, 9, report.BreakingChanges[0].ConfidenceScore)
+	assert.Equal(t, 8, report.BreakingChanges[0].ConfidenceScore)
 	require.Equal(t, 1, report.TotalWarnings)
 	assert.Equal(t, "VariableValidation", report.Warnings[0].Category)
 	assert.Equal(t, 6, report.Warnings[0].ConfidenceScore)
@@ -374,7 +374,7 @@ func TestCompare_ProviderAliasRemovedAndSourceChanged(t *testing.T) {
 	assert.Equal(t, "aws", breaking.Name)
 	assert.Equal(t, "hashicorp/aws", breaking.OldValue)
 	assert.Equal(t, "hashicorp/aws-fork", breaking.NewValue)
-	assert.Equal(t, 9, breaking.ConfidenceScore)
+	assert.Equal(t, 8, breaking.ConfidenceScore)
 
 	var aliasWarning *DifferenceItem
 	for i := range report.Warnings {
