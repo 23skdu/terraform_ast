@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/23skdu/terraform_ast/pkg/codemod"
@@ -152,9 +153,25 @@ const (
 // it must not be quoted with a v prefix, which the LSP client displays verbatim.
 const serverVersion = "0.9.0"
 
+// DefaultDebounceWindow is the default minimum interval between AST inspections triggered by
+// rapid textDocument/didChange notifications for the same document.
+const DefaultDebounceWindow = 200 * time.Millisecond
+
+// InitializeParams carries optional client initialization settings.
+type InitializeParams struct {
+	InitializationOptions *struct {
+		DebounceMs *int `json:"debounceMs,omitempty"`
+	} `json:"initializationOptions,omitempty"`
+}
+
 // buffer is the latest in-editor content for an open document.
 type buffer struct {
 	text string
+}
+
+type cachedOverlayAST struct {
+	text string
+	info *ast.ModuleInfo
 }
 
 // Server is a Language Server Protocol daemon for terraform_ast.
@@ -165,7 +182,16 @@ type Server struct {
 	// document path with the file:// scheme stripped. Diagnostics are computed from this
 	// buffer when present so they describe what the user is looking at rather than what
 	// was last written to disk.
-	buffers sync.Map
+	buffers      sync.Map
+	lastChangeAt sync.Map
+	cachedAST    sync.Map
+
+	// DebounceWindow bounds how frequently rapid didChange notifications for the same URI
+	// trigger full module re-inspection.
+	DebounceWindow time.Duration
+
+	// Inspections counts how many underlying AST inspections the server has performed.
+	Inspections atomic.Int64
 
 	// ShuttingDown records that shutdown or exit has been received, so Serve can stop
 	// reading. Without it the daemon only ever terminated on stdin EOF, and the LSP
@@ -175,7 +201,10 @@ type Server struct {
 
 // NewServer creates a new LSP server instance.
 func NewServer(writer io.Writer) *Server {
-	return &Server{Writer: writer}
+	return &Server{
+		Writer:         writer,
+		DebounceWindow: DefaultDebounceWindow,
+	}
 }
 
 // HandleRequest processes an incoming JSON-RPC message.
@@ -191,6 +220,11 @@ func (s *Server) HandleRequest(req Request) (*Response, *Notification) {
 
 	switch req.Method {
 	case "initialize":
+		var initParams InitializeParams
+		if len(req.Params) > 0 && json.Unmarshal(req.Params, &initParams) == nil &&
+			initParams.InitializationOptions != nil && initParams.InitializationOptions.DebounceMs != nil {
+			s.DebounceWindow = time.Duration(*initParams.InitializationOptions.DebounceMs) * time.Millisecond
+		}
 		caps := map[string]interface{}{
 			"capabilities": map[string]interface{}{
 				// Full sync: the client sends the whole document on open and change, so
@@ -230,6 +264,7 @@ func (s *Server) HandleRequest(req Request) (*Response, *Notification) {
 	case "textDocument/didSave", "textDocument/didOpen", "textDocument/didChange":
 		var params DidChangeTextDocumentParams
 		if err := json.Unmarshal(req.Params, &params); err == nil && params.TextDocument.URI != "" {
+			uri := params.TextDocument.URI
 			// With Full sync the change event carries the new text, so the buffer is the
 			// source of truth. Falling back to disk when it is absent keeps save-only clients
 			// working instead of silently dropping their diagnostics.
@@ -237,9 +272,18 @@ func (s *Server) HandleRequest(req Request) (*Response, *Notification) {
 				// Key the buffer by the filesystem path, which is what the diagnostics lookup
 				// uses. Keying by the raw URI left every buffer stranded behind a "file://"
 				// prefix and diagnostics silently fell back to disk.
-				s.buffers.Store(strings.TrimPrefix(params.TextDocument.URI, "file://"), buffer{text: *text})
+				s.buffers.Store(strings.TrimPrefix(uri, "file://"), buffer{text: *text})
 			}
-			return nil, s.publish(params.TextDocument.URI)
+			if req.Method == "textDocument/didChange" && s.DebounceWindow > 0 {
+				now := time.Now()
+				if prev, ok := s.lastChangeAt.Load(uri); ok {
+					if now.Sub(prev.(time.Time)) < s.DebounceWindow {
+						return nil, nil
+					}
+				}
+				s.lastChangeAt.Store(uri, now)
+			}
+			return nil, s.publish(uri)
 		}
 		return nil, nil
 
@@ -453,8 +497,16 @@ func (s *Server) inspect(filePath, dir string) (*ast.ModuleInfo, error) {
 	if content, ok := s.buffers.Load(filePath); ok {
 		buffered, isBuffer := content.(buffer)
 		if isBuffer {
+			if cached, ok := s.cachedAST.Load(filePath); ok {
+				entry := cached.(cachedOverlayAST)
+				if entry.text == buffered.text {
+					return entry.info, nil
+				}
+			}
+			s.Inspections.Add(1)
 			info, err := ast.InspectSource(dir, filePath, buffered.text)
 			if err == nil {
+				s.cachedAST.Store(filePath, cachedOverlayAST{text: buffered.text, info: info})
 				return info, nil
 			}
 			// An unsaved buffer that cannot be parsed is expected mid-edit; fall through to
@@ -462,6 +514,7 @@ func (s *Server) inspect(filePath, dir string) (*ast.ModuleInfo, error) {
 			// keystroke.
 		}
 	}
+	s.Inspections.Add(1)
 	return ast.Inspect(dir)
 }
 

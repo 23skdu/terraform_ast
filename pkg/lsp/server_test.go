@@ -797,3 +797,54 @@ removed {
 	require.Len(t, caExt, 2)
 	assert.Equal(t, "unpinned", caExt[1].Command.Arguments[0].(AddMissingInputsArgs).Module)
 }
+
+func TestLSP_DidChangeDebounceAndOverlayCache(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.tf")
+	require.NoError(t, os.WriteFile(mainPath, []byte(`variable "a" { type = string }`), 0o600))
+	uri := "file://" + mainPath
+
+	server := NewServer(&bytes.Buffer{})
+	resp, _ := server.HandleRequest(Request{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "initialize",
+		Params:  mustJSON(t, map[string]any{"initializationOptions": map[string]any{"debounceMs": 500}}),
+	})
+	require.NotNil(t, resp)
+	assert.Equal(t, 500*time.Millisecond, server.DebounceWindow)
+
+	// Burst of 100 didChange notifications for the same document.
+	for i := 0; i < 100; i++ {
+		text := fmt.Sprintf("variable \"a_%d\" {\n  type = string\n  deprecated = \"dep-%d\"\n}\n", i, i)
+		_, _ = server.HandleRequest(Request{
+			JSONRPC: "2.0",
+			Method:  "textDocument/didChange",
+			Params: mustJSON(t, map[string]any{
+				"textDocument":   map[string]string{"uri": uri},
+				"contentChanges": []map[string]string{{"text": text}},
+			}),
+		})
+	}
+	assert.LessOrEqual(t, server.Inspections.Load(), int64(5), "burst of 100 didChange notifications must result in <= 5 inspections")
+
+	// Saving flushes and inspects the final buffer revision.
+	_, notif := server.HandleRequest(Request{
+		JSONRPC: "2.0",
+		Method:  "textDocument/didSave",
+		Params:  mustJSON(t, map[string]any{"textDocument": map[string]string{"uri": uri}}),
+	})
+	require.NotNil(t, notif)
+	published := notif.Params.(PublishDiagnosticsParams)
+	require.Len(t, published.Diagnostics, 1)
+	assert.Contains(t, published.Diagnostics[0].Message, "dep-99")
+
+	// Re-inspecting with unchanged buffer text hits the overlay AST cache without a new inspection.
+	before := server.Inspections.Load()
+	_ = server.codeActionsFor(CodeActionParams{
+		TextDocument: struct {
+			URI string `json:"uri"`
+		}{URI: uri},
+	})
+	assert.Equal(t, before, server.Inspections.Load())
+}
