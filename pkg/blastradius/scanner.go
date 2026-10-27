@@ -1,12 +1,15 @@
 package blastradius
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/23skdu/terraform_ast/pkg/diff"
@@ -113,8 +116,9 @@ func ScanDirectoryWithTaint(
 		RiskDistribution:      make(map[string]int),
 	}
 
+	idx := buildAuditIndex(wrapperAudit)
 	for _, cs := range callSites {
-		impact := evaluateCallSiteImpact(cs, wrapperMod, wrapperAudit, registry)
+		impact := evaluateCallSiteImpactIndexed(cs, wrapperMod, wrapperAudit, registry, idx)
 		if !impact.CanSafelyUpdate {
 			report.CanSafelyUpdateAll = false
 		}
@@ -210,8 +214,8 @@ func FilterTaintedCallSites(callSites []CallSite, taintReport *eval.TaintReport)
 }
 
 func discoverCallSites(searchDir, wrapperIdentifier string) ([]CallSite, error) {
-	var callSites []CallSite
 	normTarget := filepath.Clean(wrapperIdentifier)
+	var candidates []string
 
 	err := filepath.WalkDir(searchDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -227,78 +231,108 @@ func discoverCallSites(searchDir, wrapperIdentifier string) ([]CallSite, error) 
 			}
 			return nil
 		}
-		isTerragrunt := d.Name() == "terragrunt.hcl"
-		isJSON := strings.HasSuffix(d.Name(), ".tf.json")
-		if !isTerragrunt && !isJSON && !strings.HasSuffix(d.Name(), ".tf") {
-			return nil
+		name := d.Name()
+		if name == "terragrunt.hcl" || strings.HasSuffix(name, ".tf.json") || strings.HasSuffix(name, ".tf") {
+			candidates = append(candidates, path)
 		}
-
-		// #nosec G122, G304 -- directory entries traversed within validated search directory
-		src, err := os.ReadFile(filepath.Clean(path))
-		if err != nil {
-			return nil
-		}
-
-		if isTerragrunt {
-			if callSite, ok := parseTerragruntCallSite(src, path, normTarget); ok {
-				callSites = append(callSites, callSite)
-			}
-			return nil
-		}
-		if isJSON {
-			callSites = append(callSites, discoverJSONCallSites(src, path, normTarget)...)
-			return nil
-		}
-
-		file, diags := hclsyntax.ParseConfig(src, path, hcl.Pos{Line: 1, Column: 1})
-		if diags.HasErrors() || file == nil {
-			return nil
-		}
-
-		if body, ok := file.Body.(*hclsyntax.Body); ok {
-			// Extract all module.<name>.<output> references in this file
-			refs := extractModuleReferences(src)
-
-			for _, block := range body.Blocks {
-				if block.Type != "module" || len(block.Labels) == 0 {
-					continue
-				}
-				modName := block.Labels[0]
-
-				srcAttr, exists := block.Body.Attributes["source"]
-				if !exists {
-					continue
-				}
-
-				sourceVal := extractSourceVal(src, srcAttr.Expr)
-				if !isMatchingSource(path, sourceVal, normTarget) {
-					continue
-				}
-
-				passedInputs := make(map[string]string)
-				for attrName, attr := range block.Body.Attributes {
-					if attrName == "source" || attrName == "version" || attrName == "count" || attrName == "for_each" || attrName == "providers" || attrName == "depends_on" {
-						continue
-					}
-					passedInputs[attrName] = string(src[attr.Expr.Range().Start.Byte:attr.Expr.Range().End.Byte])
-				}
-
-				cs := CallSite{
-					Dir:               filepath.Dir(path),
-					File:              path,
-					ModuleName:        modName,
-					Source:            sourceVal,
-					PassedInputs:      passedInputs,
-					OutputsReferenced: refs[modName],
-				}
-				callSites = append(callSites, cs)
-			}
-		}
-
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 
-	return callSites, err
+	perFile := make([][]CallSite, len(candidates))
+	workers := min(8, runtime.GOMAXPROCS(0))
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	for i, path := range candidates {
+		wg.Add(1)
+		go func(idx int, p string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			perFile[idx] = discoverFileCallSites(p, normTarget)
+		}(i, path)
+	}
+	wg.Wait()
+
+	var callSites []CallSite
+	for _, sites := range perFile {
+		callSites = append(callSites, sites...)
+	}
+	return callSites, nil
+}
+
+func discoverFileCallSites(path, normTarget string) []CallSite {
+	// #nosec G122, G304 -- directory entries traversed within validated search directory
+	src, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		return nil
+	}
+
+	base := filepath.Base(path)
+	if base == "terragrunt.hcl" {
+		if callSite, ok := parseTerragruntCallSite(src, path, normTarget); ok {
+			return []CallSite{callSite}
+		}
+		return nil
+	}
+	if strings.HasSuffix(base, ".tf.json") {
+		return discoverJSONCallSites(src, path, normTarget)
+	}
+
+	if !bytes.Contains(src, []byte("module")) {
+		return nil
+	}
+
+	file, diags := hclsyntax.ParseConfig(src, path, hcl.Pos{Line: 1, Column: 1})
+	if diags.HasErrors() || file == nil {
+		return nil
+	}
+
+	body := file.Body.(*hclsyntax.Body)
+	var refs map[string][]string
+	var callSites []CallSite
+
+	for _, block := range body.Blocks {
+		if block.Type != "module" || len(block.Labels) == 0 {
+			continue
+		}
+		modName := block.Labels[0]
+
+		srcAttr, exists := block.Body.Attributes["source"]
+		if !exists {
+			continue
+		}
+
+		sourceVal := extractSourceVal(src, srcAttr.Expr)
+		if !isMatchingSource(path, sourceVal, normTarget) {
+			continue
+		}
+
+		if refs == nil {
+			refs = extractModuleReferencesFromBody(body)
+		}
+
+		passedInputs := make(map[string]string)
+		for attrName, attr := range block.Body.Attributes {
+			if attrName == "source" || attrName == "version" || attrName == "count" || attrName == "for_each" || attrName == "providers" || attrName == "depends_on" {
+				continue
+			}
+			passedInputs[attrName] = string(src[attr.Expr.Range().Start.Byte:attr.Expr.Range().End.Byte])
+		}
+
+		callSites = append(callSites, CallSite{
+			Dir:               filepath.Dir(path),
+			File:              path,
+			ModuleName:        modName,
+			Source:            sourceVal,
+			PassedInputs:      passedInputs,
+			OutputsReferenced: refs[modName],
+		})
+	}
+
+	return callSites
 }
 
 // discoverJSONCallSites extracts wrapper call sites from Terraform JSON syntax. Files that cannot
@@ -429,7 +463,7 @@ func parseTerragruntCallSite(src []byte, path, targetIdentifier string) (CallSit
 		ModuleName:              filepath.Base(filepath.Dir(path)),
 		Source:                  source,
 		PassedInputs:            passedInputs,
-		OutputsReferenced:       extractModuleReferences(src)[filepath.Base(filepath.Dir(path))],
+		OutputsReferenced:       extractModuleReferencesFromBody(body)[filepath.Base(filepath.Dir(path))],
 		InputAnalysisIncomplete: inputAnalysisIncomplete,
 	}, true
 }
@@ -514,23 +548,26 @@ func extractSourceVal(src []byte, expr hcl.Expression) string {
 }
 
 func extractModuleReferences(src []byte) map[string][]string {
-	res := make(map[string][]string)
 	file, diags := hclsyntax.ParseConfig(src, "references.tf", hcl.Pos{Line: 1, Column: 1})
 	if diags.HasErrors() || file == nil {
-		return res
+		return make(map[string][]string)
 	}
+	return extractModuleReferencesFromBody(file.Body.(*hclsyntax.Body))
+}
 
+func extractModuleReferencesFromBody(body *hclsyntax.Body) map[string][]string {
+	res := make(map[string][]string)
 	seen := make(map[string]map[string]struct{})
 	var visit func(*hclsyntax.Body)
-	visit = func(body *hclsyntax.Body) {
-		for _, attr := range body.Attributes {
+	visit = func(b *hclsyntax.Body) {
+		for _, attr := range b.Attributes {
 			addModuleReferencesWithSeen(res, seen, attr.Expr.Variables())
 		}
-		for _, block := range body.Blocks {
+		for _, block := range b.Blocks {
 			visit(block.Body)
 		}
 	}
-	visit(file.Body.(*hclsyntax.Body))
+	visit(body)
 	for moduleName := range res {
 		sort.Strings(res[moduleName])
 	}
@@ -577,11 +614,66 @@ func addModuleReferencesWithSeen(refs map[string][]string, seen map[string]map[s
 	}
 }
 
+type auditIndex struct {
+	removedInputs   []string
+	missingRequired []string
+	removedOutputs  []string
+	breakingInputs  map[string]struct{}
+	changedAttrs    map[string]struct{}
+}
+
+func buildAuditIndex(audit *wrapper.WrapperCompatibilityReport) *auditIndex {
+	if audit == nil {
+		return nil
+	}
+	idx := &auditIndex{
+		breakingInputs: make(map[string]struct{}),
+		changedAttrs:   make(map[string]struct{}),
+	}
+	for _, issue := range audit.Issues {
+		idx.changedAttrs[issue.Target] = struct{}{}
+		if issue.Category == "PassedRemovedInput" || (strings.HasPrefix(issue.Category, "Variable") && strings.Contains(issue.Description, "removed")) {
+			idx.removedInputs = append(idx.removedInputs, issue.Target)
+		}
+		if issue.Category == "MissingRequiredInput" || (strings.HasPrefix(issue.Category, "Variable") && strings.Contains(issue.Description, "required")) {
+			idx.missingRequired = append(idx.missingRequired, issue.Target)
+		}
+		if issue.Category == "BrokenOutputDelegation" || strings.HasPrefix(issue.Category, "Output") {
+			idx.removedOutputs = append(idx.removedOutputs, issue.Target)
+		}
+		if (issue.Category == "TypeMismatch" || issue.Category == "VariableNullability" || (strings.HasPrefix(issue.Category, "Variable") && (strings.Contains(issue.Description, "type") || strings.Contains(issue.Description, "incompatible")))) && issue.Severity == diff.SeverityBreaking {
+			idx.breakingInputs[issue.Target] = struct{}{}
+		}
+	}
+	if audit.UpstreamDiff != nil {
+		for _, bc := range audit.UpstreamDiff.BreakingChanges {
+			idx.changedAttrs[bc.Name] = struct{}{}
+		}
+		for _, w := range audit.UpstreamDiff.Warnings {
+			idx.changedAttrs[w.Name] = struct{}{}
+		}
+		for _, nf := range audit.UpstreamDiff.NewFeatures {
+			idx.changedAttrs[nf.Name] = struct{}{}
+		}
+	}
+	return idx
+}
+
 func evaluateCallSiteImpact(
 	cs CallSite,
 	wrapperMod *ast.ModuleInfo,
 	audit *wrapper.WrapperCompatibilityReport,
 	registry *recreation.DynamicHazardRegistry,
+) RootModuleImpact {
+	return evaluateCallSiteImpactIndexed(cs, wrapperMod, audit, registry, buildAuditIndex(audit))
+}
+
+func evaluateCallSiteImpactIndexed(
+	cs CallSite,
+	wrapperMod *ast.ModuleInfo,
+	audit *wrapper.WrapperCompatibilityReport,
+	registry *recreation.DynamicHazardRegistry,
+	idx *auditIndex,
 ) RootModuleImpact {
 	impact := RootModuleImpact{
 		Dir:                cs.Dir,
@@ -602,40 +694,38 @@ func evaluateCallSiteImpact(
 	}
 
 	// 1. Check for removed inputs passed by this caller
-	for _, issue := range audit.Issues {
-		if issue.Category == "PassedRemovedInput" || (strings.HasPrefix(issue.Category, "Variable") && strings.Contains(issue.Description, "removed")) {
-			if _, passed := cs.PassedInputs[issue.Target]; passed {
-				impact.RemovedInputsPassed = append(impact.RemovedInputsPassed, issue.Target)
+	for _, target := range idx.removedInputs {
+		if _, passed := cs.PassedInputs[target]; passed {
+			impact.RemovedInputsPassed = append(impact.RemovedInputsPassed, target)
+			impact.CanSafelyUpdate = false
+		}
+	}
+	// 2. Check for missing required inputs. Attribute to this consumer only when the
+	// wrapper actually exposes the input (otherwise the wrapper, not the consumer, is at fault).
+	for _, target := range idx.missingRequired {
+		if wrapperMod != nil {
+			if _, exposed := wrapperMod.Variables[target]; !exposed {
+				continue
+			}
+		}
+		if _, passed := cs.PassedInputs[target]; !passed {
+			impact.MissingRequiredInputs = append(impact.MissingRequiredInputs, target)
+			impact.CanSafelyUpdate = false
+		}
+	}
+	// 3. Check for removed outputs referenced by this caller from wrapper issues
+	for _, target := range idx.removedOutputs {
+		for _, ref := range cs.OutputsReferenced {
+			if ref == target {
+				impact.RemovedOutputsReferenced = append(impact.RemovedOutputsReferenced, target)
 				impact.CanSafelyUpdate = false
 			}
 		}
-		// 2. Check for missing required inputs. Attribute to this consumer only when the
-		// wrapper actually exposes the input (otherwise the wrapper, not the consumer, is at fault).
-		if issue.Category == "MissingRequiredInput" || (strings.HasPrefix(issue.Category, "Variable") && strings.Contains(issue.Description, "required")) {
-			if wrapperMod != nil {
-				if _, exposed := wrapperMod.Variables[issue.Target]; !exposed {
-					continue
-				}
-			}
-			if _, passed := cs.PassedInputs[issue.Target]; !passed {
-				impact.MissingRequiredInputs = append(impact.MissingRequiredInputs, issue.Target)
-				impact.CanSafelyUpdate = false
-			}
-		}
-		// 3. Check for removed outputs referenced by this caller from wrapper issues
-		if issue.Category == "BrokenOutputDelegation" || strings.HasPrefix(issue.Category, "Output") {
-			for _, ref := range cs.OutputsReferenced {
-				if ref == issue.Target {
-					impact.RemovedOutputsReferenced = append(impact.RemovedOutputsReferenced, issue.Target)
-					impact.CanSafelyUpdate = false
-				}
-			}
-		}
-		// 4. Check for other breaking modifications on passed inputs (e.g. type changes or nullability)
-		if (issue.Category == "TypeMismatch" || issue.Category == "VariableNullability" || (strings.HasPrefix(issue.Category, "Variable") && (strings.Contains(issue.Description, "type") || strings.Contains(issue.Description, "incompatible")))) && issue.Severity == diff.SeverityBreaking {
-			if _, passed := cs.PassedInputs[issue.Target]; passed {
-				impact.CanSafelyUpdate = false
-			}
+	}
+	// 4. Check for other breaking modifications on passed inputs (e.g. type changes or nullability)
+	for target := range idx.breakingInputs {
+		if _, passed := cs.PassedInputs[target]; passed {
+			impact.CanSafelyUpdate = false
 		}
 	}
 
@@ -676,7 +766,8 @@ func evaluateCallSiteImpact(
 		// Evidence gate: only fire a recreation hazard when the attribute is actually part
 		// of the upstream diff or confirmed by the dynamic hazard registry. A bare name
 		// match with no changed input is downgraded (no hazard, LOW risk).
-		evidenceConfirmed := fromRegistry || attributeChangedInAudit(audit, inputName)
+		_, changed := idx.changedAttrs[inputName]
+		evidenceConfirmed := fromRegistry || changed
 		if !evidenceConfirmed {
 			continue
 		}
@@ -704,32 +795,12 @@ func evaluateCallSiteImpact(
 }
 
 func attributeChangedInAudit(audit *wrapper.WrapperCompatibilityReport, name string) bool {
-	if audit == nil {
+	idx := buildAuditIndex(audit)
+	if idx == nil {
 		return false
 	}
-	for _, iss := range audit.Issues {
-		if iss.Target == name {
-			return true
-		}
-	}
-	if audit.UpstreamDiff != nil {
-		for _, bc := range audit.UpstreamDiff.BreakingChanges {
-			if bc.Name == name {
-				return true
-			}
-		}
-		for _, w := range audit.UpstreamDiff.Warnings {
-			if w.Name == name {
-				return true
-			}
-		}
-		for _, nf := range audit.UpstreamDiff.NewFeatures {
-			if nf.Name == name {
-				return true
-			}
-		}
-	}
-	return false
+	_, ok := idx.changedAttrs[name]
+	return ok
 }
 
 func dedupeSorted(s []string) []string {

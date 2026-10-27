@@ -1332,3 +1332,58 @@ module "gke" {
 	assert.False(t, resBreaking.CanSafelyUpdateAll)
 	assert.Contains(t, resBreaking.Summary, "detected breaking impacts")
 }
+
+func TestScanDirectory_Determinism(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 16; i++ {
+		sub := filepath.Join(root, "env-"+strconv.Itoa(i))
+		require.NoError(t, os.MkdirAll(sub, 0o750))
+		require.NoError(t, os.WriteFile(filepath.Join(sub, "main.tf"), []byte(`
+module "gke_a" {
+  source = "../modules/gke_wrapper"
+  name   = "a"
+}
+module "gke_b" {
+  source = "../modules/gke_wrapper"
+  name   = "b"
+}
+`), 0o600))
+	}
+
+	first, err := ScanDirectory(root, "gke_wrapper", nil, &wrapper.WrapperCompatibilityReport{})
+	require.NoError(t, err)
+	firstJSON := string(first.RenderJSON())
+
+	for run := 0; run < 20; run++ {
+		rep, err := ScanDirectory(root, "gke_wrapper", nil, &wrapper.WrapperCompatibilityReport{})
+		require.NoError(t, err)
+		assert.Equal(t, firstJSON, string(rep.RenderJSON()))
+	}
+}
+
+func BenchmarkScanDirectory(b *testing.B) {
+	root := b.TempDir()
+	for i := 0; i < 30; i++ {
+		sub := filepath.Join(root, "env-"+strconv.Itoa(i))
+		_ = os.MkdirAll(sub, 0o750)
+		_ = os.WriteFile(filepath.Join(sub, "main.tf"), []byte(`
+module "gke" {
+  source = "../modules/gke_wrapper"
+  name   = "cluster"
+}
+`), 0o600)
+		_ = os.WriteFile(filepath.Join(sub, "resources.tf"), []byte(`
+resource "null_resource" "noop" {}
+`), 0o600)
+	}
+	audit := &wrapper.WrapperCompatibilityReport{
+		TargetModuleName: "gke",
+		Issues: []wrapper.WrapperIssue{
+			{Category: "PassedRemovedInput", Target: "obsolete", Severity: diff.SeverityBreaking},
+		},
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = ScanDirectory(root, "gke_wrapper", nil, audit)
+	}
+}
