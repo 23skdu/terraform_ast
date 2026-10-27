@@ -373,3 +373,41 @@ func TestPass5_EnrichMovedBlocks(t *testing.T) {
 		t.Fatalf("unexpected from: %s", info.MovedBlocks[0].From)
 	}
 }
+
+func TestPass5_CacheInvalidatesOnEqualMtimeAndSize(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/variables.tf"
+	v1 := []byte(`variable "name" { type = string }`)
+	v2 := []byte(`variable "name" { type = number }`)
+	if len(v1) != len(v2) {
+		t.Fatalf("expected equal sizes: %d vs %d", len(v1), len(v2))
+	}
+	if err := os.WriteFile(path, v1, 0644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := Inspect(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Variables["name"].Type != "string" {
+		t.Fatalf("expected string, got %s", first.Variables["name"].Type)
+	}
+
+	if err := os.WriteFile(path, v2, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, st.ModTime(), st.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Inspect(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Variables["name"].Type != "number" {
+		t.Fatalf("expected cache miss and number type on equal mtime+size, got %s", second.Variables["name"].Type)
+	}
+}

@@ -192,11 +192,6 @@ func inspectDir(dir string, overlay map[string][]byte) (info *ModuleInfo, err er
 		return cached, nil
 	}
 
-	tfMod, diags := tfconfig.LoadModule(dir)
-	if diags.HasErrors() {
-		return nil, fmt.Errorf("diagnostics error loading module %s: %s", dir, diags.Error())
-	}
-
 	info = &ModuleInfo{
 		Path:                    dir,
 		Variables:               make(map[string]VariableDef),
@@ -210,106 +205,107 @@ func inspectDir(dir string, overlay map[string][]byte) (info *ModuleInfo, err er
 		DataResources:           make(map[string]ResourceDef),
 	}
 
-	if tfMod != nil {
-		info.RequiredCore = tfMod.RequiredCore
-
-		// Variables
-		for name, v := range tfMod.Variables {
-			tStr := v.Type
-			if strings.TrimSpace(tStr) == "" {
-				tStr = "any"
-			}
-			info.Variables[name] = VariableDef{
-				Name:        v.Name,
-				Type:        tStr,
-				Description: v.Description,
-				Required:    v.Required,
-				Default:     v.Default,
-				HasDefault:  v.Default != nil || !v.Required,
-				Sensitive:   v.Sensitive,
-				Deprecated:  v.Deprecated,
-				Pos:         v.Pos,
-			}
-		}
-
-		// Outputs
-		for name, o := range tfMod.Outputs {
-			info.Outputs[name] = OutputDef{
-				Name:        o.Name,
-				Description: o.Description,
-				Sensitive:   o.Sensitive,
-				Type:        o.Type,
-				Deprecated:  o.Deprecated,
-				Pos:         o.Pos,
-			}
-		}
-
-		// Providers
-		for name, req := range tfMod.RequiredProviders {
-			var aliases []string
-			for _, alias := range req.ConfigurationAliases {
-				if alias.Alias != "" {
-					aliases = append(aliases, alias.Name+"."+alias.Alias)
-				}
-			}
-			sort.Strings(aliases)
-			info.RequiredProviders[name] = ProviderRequirement{
-				Name:                 name,
-				Source:               req.Source,
-				VersionConstraints:   req.VersionConstraints,
-				ConfigurationAliases: aliases,
-			}
-		}
-
-		// Managed Resources
-		for name, res := range tfMod.ManagedResources {
-			prov := res.Provider.Name
-			if res.Provider.Alias != "" {
-				prov = prov + "." + res.Provider.Alias
-			}
-			info.ManagedResources[name] = ResourceDef{
-				Mode:     "managed",
-				Type:     res.Type,
-				Name:     res.Name,
-				Provider: prov,
-				Pos:      res.Pos,
-			}
-		}
-
-		// Data Resources
-		for name, res := range tfMod.DataResources {
-			prov := res.Provider.Name
-			if res.Provider.Alias != "" {
-				prov = prov + "." + res.Provider.Alias
-			}
-			info.DataResources[name] = ResourceDef{
-				Mode:     "data",
-				Type:     res.Type,
-				Name:     res.Name,
-				Provider: prov,
-				Pos:      res.Pos,
-			}
-		}
-
-		// Base Module Calls
-		for name, mc := range tfMod.ModuleCalls {
-			info.ModuleCalls[name] = ModuleCallDef{
-				Name:             mc.Name,
-				Source:           mc.Source,
-				Version:          mc.Version,
-				PassedInputs:     []string{},
-				InputExpressions: make(map[string]string),
-				Pos:              mc.Pos,
-			}
-		}
+	if err := parseAndEnrichModule(dir, info, true); err != nil {
+		return nil, err
 	}
-
-	// Deep HCL parsing to extract passed arguments to child modules and wrapper output delegations
-	enrichFromHCLFiles(dir, info)
 
 	// The inspection cache is an optimisation, so a write failure must not invalidate the result.
 	_ = cacheModule(cachePath, fingerprint, info)
 	return info, nil
+}
+
+func populateFromTFModule(tfMod *tfconfig.Module, info *ModuleInfo) {
+	info.RequiredCore = tfMod.RequiredCore
+
+	// Variables
+	for name, v := range tfMod.Variables {
+		tStr := v.Type
+		if strings.TrimSpace(tStr) == "" {
+			tStr = "any"
+		}
+		info.Variables[name] = VariableDef{
+			Name:        v.Name,
+			Type:        tStr,
+			Description: v.Description,
+			Required:    v.Required,
+			Default:     v.Default,
+			HasDefault:  v.Default != nil || !v.Required,
+			Sensitive:   v.Sensitive,
+			Deprecated:  v.Deprecated,
+			Pos:         v.Pos,
+		}
+	}
+
+	// Outputs
+	for name, o := range tfMod.Outputs {
+		info.Outputs[name] = OutputDef{
+			Name:        o.Name,
+			Description: o.Description,
+			Sensitive:   o.Sensitive,
+			Type:        o.Type,
+			Deprecated:  o.Deprecated,
+			Pos:         o.Pos,
+		}
+	}
+
+	// Providers
+	for name, req := range tfMod.RequiredProviders {
+		var aliases []string
+		for _, alias := range req.ConfigurationAliases {
+			if alias.Alias != "" {
+				aliases = append(aliases, alias.Name+"."+alias.Alias)
+			}
+		}
+		sort.Strings(aliases)
+		info.RequiredProviders[name] = ProviderRequirement{
+			Name:                 name,
+			Source:               req.Source,
+			VersionConstraints:   req.VersionConstraints,
+			ConfigurationAliases: aliases,
+		}
+	}
+
+	// Managed Resources
+	for name, res := range tfMod.ManagedResources {
+		prov := res.Provider.Name
+		if res.Provider.Alias != "" {
+			prov = prov + "." + res.Provider.Alias
+		}
+		info.ManagedResources[name] = ResourceDef{
+			Mode:     "managed",
+			Type:     res.Type,
+			Name:     res.Name,
+			Provider: prov,
+			Pos:      res.Pos,
+		}
+	}
+
+	// Data Resources
+	for name, res := range tfMod.DataResources {
+		prov := res.Provider.Name
+		if res.Provider.Alias != "" {
+			prov = prov + "." + res.Provider.Alias
+		}
+		info.DataResources[name] = ResourceDef{
+			Mode:     "data",
+			Type:     res.Type,
+			Name:     res.Name,
+			Provider: prov,
+			Pos:      res.Pos,
+		}
+	}
+
+	// Base Module Calls
+	for name, mc := range tfMod.ModuleCalls {
+		info.ModuleCalls[name] = ModuleCallDef{
+			Name:             mc.Name,
+			Source:           mc.Source,
+			Version:          mc.Version,
+			PassedInputs:     []string{},
+			InputExpressions: make(map[string]string),
+			Pos:              mc.Pos,
+		}
+	}
 }
 
 // recoverParseError converts a panic raised while parsing untrusted Terraform source into a normal
@@ -320,15 +316,29 @@ func recoverParseError(dir string, err *error) {
 	}
 }
 
+type parsedHCLFile struct {
+	filePath string
+	src      []byte
+	file     *hcl.File
+}
+
 // enrichFromHCLFiles scans top-level Terraform files for module inputs, nullable settings,
 // and output delegations that are not exposed by terraform-config-inspect.
 func enrichFromHCLFiles(dir string, info *ModuleInfo) {
+	_ = parseAndEnrichModule(dir, info, false)
+}
+
+func parseAndEnrichModule(dir string, info *ModuleInfo, loadTFConfig bool) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return
+		return err
 	}
 
 	parser := hclparse.NewParser()
+	var tfMod *tfconfig.Module
+	if loadTFConfig {
+		tfMod = tfconfig.NewModule(dir)
+	}
 	schema := &hcl.BodySchema{
 		Blocks: []hcl.BlockHeaderSchema{
 			{Type: "variable", LabelNames: []string{"name"}},
@@ -346,6 +356,7 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 		},
 	}
 
+	var parsedFiles []parsedHCLFile
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -370,10 +381,24 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 		} else {
 			file, diags = parser.ParseHCL(src, filePath)
 		}
-		if diags.HasErrors() || file == nil {
+		if !diags.HasErrors() && loadTFConfig {
+			diags = append(diags, tfconfig.LoadModuleFromFile(file, tfMod)...)
+		}
+		if diags.HasErrors() {
+			if loadTFConfig {
+				return fmt.Errorf("diagnostics error loading module %s: %s", dir, diags.Error())
+			}
 			continue
 		}
+		parsedFiles = append(parsedFiles, parsedHCLFile{filePath: filePath, src: src, file: file})
+	}
 
+	if loadTFConfig {
+		populateFromTFModule(tfMod, info)
+	}
+
+	for _, pf := range parsedFiles {
+		filePath, src, file := pf.filePath, pf.src, pf.file
 		content, _, diags := file.Body.PartialContent(schema)
 		if diags.HasErrors() || content == nil {
 			continue
@@ -692,4 +717,5 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 			}
 		}
 	}
+	return nil
 }

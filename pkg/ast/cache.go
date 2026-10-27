@@ -5,18 +5,24 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 const moduleCacheCapacity = 128
 
 type moduleCacheEntry struct {
-	fingerprint string
-	data        []byte
+	fingerprint  string
+	data         []byte
+	validDataLen int
+	info         *ModuleInfo
 }
 
 var moduleCache = struct {
@@ -25,29 +31,65 @@ var moduleCache = struct {
 	order   []string
 }{entries: make(map[string]moduleCacheEntry)}
 
+var fingerprintBufPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 32*1024)
+		return &buf
+	},
+}
+
+func cloneModuleInfo(src *ModuleInfo) *ModuleInfo {
+	dst := *src
+	dst.Variables = maps.Clone(src.Variables)
+	dst.Outputs = maps.Clone(src.Outputs)
+	dst.ModuleCalls = maps.Clone(src.ModuleCalls)
+	dst.RequiredProviders = maps.Clone(src.RequiredProviders)
+	dst.WrapperOutputReferences = maps.Clone(src.WrapperOutputReferences)
+	dst.CheckBlocks = maps.Clone(src.CheckBlocks)
+	dst.Functions = maps.Clone(src.Functions)
+	dst.ManagedResources = maps.Clone(src.ManagedResources)
+	dst.DataResources = maps.Clone(src.DataResources)
+	dst.RemovedBlocks = slices.Clone(src.RemovedBlocks)
+	dst.MovedBlocks = slices.Clone(src.MovedBlocks)
+	dst.ImportBlocks = slices.Clone(src.ImportBlocks)
+	dst.EncryptionBlocks = slices.Clone(src.EncryptionBlocks)
+	return &dst
+}
+
 func moduleFingerprint(dir string) (string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return "", fmt.Errorf("failed to fingerprint module directory %s: %w", dir, err)
 	}
 	hash := sha256.New()
+	bufPtr := fingerprintBufPool.Get().(*[]byte)
+	buf := *bufPtr
+	defer fingerprintBufPool.Put(bufPtr)
+	var zero [1]byte
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || (!strings.HasSuffix(name, ".tf") && !strings.HasSuffix(name, ".tf.json")) {
 			continue
 		}
-		path := filepath.Join(dir, name)
-		// #nosec G304 -- path is joined from a directory entry read via os.ReadDir
-		data, err := os.ReadFile(path)
+		path := dir + "/" + name
+		fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 		if err != nil {
 			return "", fmt.Errorf("failed to fingerprint module file %s: %w", path, err)
 		}
-		_, _ = hash.Write([]byte(name))
-		_, _ = hash.Write([]byte{0})
-		_, _ = hash.Write(data)
-		_, _ = hash.Write([]byte{0})
+		_, _ = io.WriteString(hash, name)
+		_, _ = hash.Write(zero[:])
+		for {
+			n, _ := syscall.Read(fd, buf)
+			if n <= 0 {
+				break
+			}
+			_, _ = hash.Write(buf[:n])
+		}
+		_ = syscall.Close(fd)
+		_, _ = hash.Write(zero[:])
 	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	var sum [sha256.Size]byte
+	return hex.EncodeToString(hash.Sum(sum[:0])), nil
 }
 
 var (
@@ -137,11 +179,10 @@ func cachedModule(path, fingerprint string) (*ModuleInfo, bool, error) {
 	entry, exists := moduleCache.entries[path]
 	moduleCache.Unlock()
 	if exists && entry.fingerprint == fingerprint {
-		var info ModuleInfo
-		if err := json.Unmarshal(entry.data, &info); err != nil {
-			return nil, false, fmt.Errorf("failed to decode cached module inspection for %s: %w", path, err)
+		if len(entry.data) != entry.validDataLen {
+			return nil, false, fmt.Errorf("failed to decode cached module inspection for %s: corrupt cache entry", path)
 		}
-		return &info, true, nil
+		return cloneModuleInfo(entry.info), true, nil
 	}
 
 	diskDir := GetPersistentCacheDir()
@@ -175,10 +216,28 @@ func forgetModuleCacheEntry(path string) {
 	}
 }
 
+func validateModuleSerializable(info *ModuleInfo) error {
+	for _, v := range info.Variables {
+		switch val := v.Default.(type) {
+		case nil, bool, float64, int, string:
+		default:
+			if _, err := json.Marshal(val); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func cacheModule(path, fingerprint string, info *ModuleInfo) error {
-	data, err := json.Marshal(info)
-	if err != nil {
+	if err := validateModuleSerializable(info); err != nil {
 		return fmt.Errorf("failed to cache module inspection for %s: %w", path, err)
+	}
+
+	diskDir := GetPersistentCacheDir()
+	var data []byte
+	if diskDir != "" {
+		data, _ = json.Marshal(info)
 	}
 
 	moduleCache.Lock()
@@ -186,7 +245,12 @@ func cacheModule(path, fingerprint string, info *ModuleInfo) error {
 	if _, exists := moduleCache.entries[path]; !exists {
 		moduleCache.order = append(moduleCache.order, path)
 	}
-	moduleCache.entries[path] = moduleCacheEntry{fingerprint: fingerprint, data: data}
+	moduleCache.entries[path] = moduleCacheEntry{
+		fingerprint:  fingerprint,
+		data:         data,
+		validDataLen: len(data),
+		info:         cloneModuleInfo(info),
+	}
 
 	if len(moduleCache.order) > moduleCacheCapacity {
 		oldest := moduleCache.order[0]
@@ -194,7 +258,6 @@ func cacheModule(path, fingerprint string, info *ModuleInfo) error {
 		delete(moduleCache.entries, oldest)
 	}
 
-	diskDir := GetPersistentCacheDir()
 	if diskDir != "" {
 		if err := os.MkdirAll(diskDir, 0o750); err == nil {
 			tmpFile, err := os.CreateTemp(diskDir, "cache-tmp-*")
