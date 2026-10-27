@@ -435,3 +435,53 @@ func TestPass5_VersionModuleCache(t *testing.T) {
 		t.Fatalf("expected cache hit, got ok=%v cached=%+v", ok, cached)
 	}
 }
+
+func TestPass6_EnrichCloudProviderLocalsAndListLifecycle(t *testing.T) {
+	dir := t.TempDir()
+	src := `terraform {
+  cloud {
+    organization = "acme-prod"
+  }
+}
+
+provider "aws" {
+  alias  = "west"
+  region = "us-west-2"
+}
+
+locals {
+  vpc_cidr = "10.0.0.0/16"
+}
+
+resource "aws_db_instance" "main" {
+  deletion_protection = true
+  lifecycle {
+    ignore_changes       = [tags, engine_version]
+    replace_triggered_by = [null_resource.a, null_resource.b]
+  }
+}
+`
+	if err := os.WriteFile(dir+"/main.tf", []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := Inspect(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Backend == nil || info.Backend.Type != "cloud" || info.Backend.Attributes["organization"] != `"acme-prod"` {
+		t.Fatalf("cloud backend not captured: %+v", info.Backend)
+	}
+	if info.ProviderConfigs["aws.west"]["region"] != `"us-west-2"` {
+		t.Fatalf("provider config not captured: %+v", info.ProviderConfigs)
+	}
+	if info.Locals["vpc_cidr"] != `"10.0.0.0/16"` {
+		t.Fatalf("locals not captured: %+v", info.Locals)
+	}
+	db := info.ManagedResources["aws_db_instance.main"]
+	if len(db.Lifecycle.IgnoreChanges) != 2 || len(db.Lifecycle.ReplaceTriggeredBy) != 2 {
+		t.Fatalf("lifecycle tuple not split into elements: %+v", db.Lifecycle)
+	}
+	if db.Attributes["deletion_protection"] != "true" {
+		t.Fatalf("resource attribute not captured: %+v", db.Attributes)
+	}
+}

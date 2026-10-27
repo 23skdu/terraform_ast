@@ -297,6 +297,34 @@ func AnalyzeWrapperHazardsWithRegistry(res *wrapper.WrapperCompatibilityReport, 
 			})
 		}
 	}
+	if res.UpstreamDiff != nil {
+		for _, item := range res.UpstreamDiff.BreakingChanges {
+			if desc, ok := lookup(item.Name); ok {
+				hazards = append(hazards, RecreationHazard{
+					Variable:    item.Name,
+					Resource:    desc.Resource,
+					HazardType:  item.Category,
+					Severity:    "CRITICAL_HAZARD",
+					Description: fmt.Sprintf("Upstream breaking change on immutable variable '%s': %s (%s)", item.Name, item.Description, desc.Impact),
+					Impact:      desc.Impact,
+					Remediation: desc.Remediation,
+				})
+			}
+		}
+		for _, item := range res.UpstreamDiff.Warnings {
+			if desc, ok := lookup(item.Name); ok {
+				hazards = append(hazards, RecreationHazard{
+					Variable:    item.Name,
+					Resource:    desc.Resource,
+					HazardType:  item.Category,
+					Severity:    "CRITICAL_HAZARD",
+					Description: fmt.Sprintf("Upstream warning on immutable variable '%s': %s (%s)", item.Name, item.Description, desc.Impact),
+					Impact:      desc.Impact,
+					Remediation: desc.Remediation,
+				})
+			}
+		}
+	}
 	return hazards
 }
 

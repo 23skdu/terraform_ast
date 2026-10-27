@@ -1,7 +1,9 @@
 package semverutil
 
 import (
+	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/mod/semver"
@@ -141,4 +143,59 @@ func DetermineBumpType(oldVer, newVer string) BumpType {
 	}
 
 	return BumpPatch
+}
+
+// ConstraintRange describes the version bounds and exclusions of a constraint string.
+type ConstraintRange struct {
+	Raw        string   `json:"raw"`
+	MinVersion string   `json:"min_version,omitempty"`
+	MaxVersion string   `json:"max_version,omitempty"`
+	Excluded   []string `json:"excluded,omitempty"`
+}
+
+// ParseConstraintRange computes the minimum, maximum, and excluded versions from a constraint.
+func ParseConstraintRange(constraint string) ConstraintRange {
+	cr := ConstraintRange{Raw: strings.TrimSpace(constraint)}
+	parts := strings.Split(constraint, ",")
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "!=") {
+			ver := strings.TrimSpace(strings.TrimPrefix(trimmed, "!="))
+			cr.Excluded = append(cr.Excluded, ver)
+		} else if strings.HasPrefix(trimmed, ">=") {
+			cr.MinVersion = strings.TrimSpace(strings.TrimPrefix(trimmed, ">="))
+		} else if strings.HasPrefix(trimmed, ">") {
+			cr.MinVersion = strings.TrimSpace(strings.TrimPrefix(trimmed, ">"))
+		} else if strings.HasPrefix(trimmed, "<=") {
+			cr.MaxVersion = strings.TrimSpace(strings.TrimPrefix(trimmed, "<="))
+		} else if strings.HasPrefix(trimmed, "<") {
+			cr.MaxVersion = strings.TrimSpace(strings.TrimPrefix(trimmed, "<"))
+		} else if strings.HasPrefix(trimmed, "~>") {
+			spec := strings.TrimSpace(strings.TrimPrefix(trimmed, "~>"))
+			cr.MinVersion = spec
+			sub := strings.Split(spec, ".")
+			if len(sub) == 2 {
+				if maj, err := strconv.Atoi(sub[0]); err == nil {
+					cr.MaxVersion = fmt.Sprintf("%d.0.0", maj+1)
+				}
+			} else if len(sub) >= 3 {
+				if maj, err1 := strconv.Atoi(sub[0]); err1 == nil {
+					if min, err2 := strconv.Atoi(sub[1]); err2 == nil {
+						cr.MaxVersion = fmt.Sprintf("%d.%d.0", maj, min+1)
+					}
+				}
+			}
+		} else if strings.HasPrefix(trimmed, "=") {
+			ver := strings.TrimSpace(strings.TrimPrefix(trimmed, "="))
+			cr.MinVersion = ver
+			cr.MaxVersion = ver
+		} else if IsValid(trimmed) {
+			cr.MinVersion = trimmed
+			cr.MaxVersion = trimmed
+		}
+	}
+	return cr
 }

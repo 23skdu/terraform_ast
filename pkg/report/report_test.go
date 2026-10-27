@@ -2,6 +2,7 @@ package report
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
@@ -225,11 +226,34 @@ func TestFindingsAreRenderedInEveryFormat(t *testing.T) {
 	assert.Contains(t, text, "RESOURCE ADDRESS SHIFTS (1):")
 	assert.NotContains(t, text, "recreation_hazards")
 
+	md := RenderMarkdown(d, findings)
+	assert.Contains(t, md, "### Resource Address Shifts (1)")
+	assert.Contains(t, md, "aws_s3_bucket.b1")
+
 	w := sampleWrapperReport()
 	wrapped := RenderWrapperText(w, findings)
 	assert.Contains(t, wrapped, "STATE DESTRUCTION & RECREATION HAZARDS")
 	assert.Contains(t, wrapped, "RESOURCE ADDRESS SHIFTS (1):")
 	assert.Contains(t, wrapped, "BLAST-RADIUS DOWNSTREAM CONSUMER ANALYSIS")
+
+	wmd := RenderWrapperMarkdown(w, findings)
+	assert.Contains(t, wmd, "### Resource Address Shifts (1)")
+	assert.Contains(t, wmd, "aws_s3_bucket.b1")
+
+	// Fallback to report AddressShifts when findings are empty
+	dWithShifts := sampleDiffReport()
+	dWithShifts.AddressShifts = findings.AddressShifts
+	dShiftsText := RenderText(dWithShifts, Findings{})
+	assert.Contains(t, dShiftsText, "RESOURCE ADDRESS SHIFTS (1):")
+	dShiftsMd := RenderMarkdown(dWithShifts)
+	assert.Contains(t, dShiftsMd, "### Resource Address Shifts (1)")
+
+	wWithDiff := sampleWrapperReport()
+	wWithDiff.UpstreamDiff = dWithShifts
+	wShiftsText := RenderWrapperText(wWithDiff, Findings{})
+	assert.Contains(t, wShiftsText, "RESOURCE ADDRESS SHIFTS (1):")
+	wShiftsMd := RenderWrapperMarkdown(wWithDiff)
+	assert.Contains(t, wShiftsMd, "### Resource Address Shifts (1)")
 
 	dJSON := RenderJSON(d, findings)
 	var decoded map[string]any
@@ -425,6 +449,13 @@ func TestGoldenPlanReporting(t *testing.T) {
 	assert.Contains(t, md, "Golden Plan State Recreation Verification")
 	assert.Contains(t, md, "google_container_cluster.primary")
 	assert.Contains(t, md, "Recreation Hazards")
+
+	diffMd := RenderMarkdown(sampleDiffReport(), findings)
+	assert.Contains(t, diffMd, "Golden Plan State Recreation Verification")
+
+	var sb strings.Builder
+	writeAddressShiftsMarkdown(&sb, nil)
+	assert.Equal(t, "", sb.String())
 
 	// 3. Markdown rendering without findings
 	mdNoFindings := RenderWrapperMarkdown(w)

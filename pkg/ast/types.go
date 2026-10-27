@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/terraform-config-inspect/tfconfig"
 )
 
@@ -114,6 +115,7 @@ type ResourceDef struct {
 	Lifecycle    LifecycleFlags     `json:"lifecycle,omitempty"`
 	Provisioners []string           `json:"provisioners,omitempty"`
 	Triggers     map[string]string  `json:"triggers,omitempty"`
+	Attributes   map[string]string  `json:"attributes,omitempty"`
 	Pos          tfconfig.SourcePos `json:"pos"`
 }
 
@@ -135,6 +137,9 @@ type ModuleInfo struct {
 	ManagedResources        map[string]ResourceDef         `json:"managed_resources,omitempty"`
 	DataResources           map[string]ResourceDef         `json:"data_resources,omitempty"`
 	Backend                 *BackendConfig                 `json:"backend,omitempty"`
+	ProviderConfigs         map[string]map[string]string   `json:"provider_configs,omitempty"`
+	Locals                  map[string]string              `json:"locals,omitempty"`
+	ParsedBodies            map[string]*hclsyntax.Body     `json:"-"`
 }
 
 // TypeCompatibilityResult describes the compatibility between two type constraints.

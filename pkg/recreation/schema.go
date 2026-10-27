@@ -8,13 +8,27 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 )
 
 // ProviderSchemas represents the top-level structure of 'terraform providers schema -json'.
 type ProviderSchemas struct {
-	FormatVersion   string                    `json:"format_version"`
-	ProviderSchemas map[string]ProviderSchema `json:"provider_schemas"`
+	FormatVersion   string                      `json:"format_version"`
+	ProviderSchemas map[string]ProviderSchema   `json:"provider_schemas"`
+	memoizedDesc    map[string]HazardDescriptor `json:"-"`
 }
+
+type schemaCacheEntry struct {
+	mtime   time.Time
+	size    int64
+	schemas *ProviderSchemas
+}
+
+var (
+	schemaCacheMu sync.Mutex
+	schemaCache   = make(map[string]schemaCacheEntry)
+)
 
 // ProviderSchema contains the resource and data source schemas for a provider.
 type ProviderSchema struct {
@@ -61,24 +75,54 @@ func ParseProviderSchema(reader io.Reader) (*ProviderSchemas, error) {
 	return &ps, nil
 }
 
-// LoadProviderSchema reads and parses a provider schema JSON file.
+// LoadProviderSchema reads and parses a provider schema JSON file, memoized by path and file stats.
 func LoadProviderSchema(path string) (*ProviderSchemas, error) {
+	cleanPath := filepath.Clean(path)
 	// #nosec G304 -- operator specified schema file path
-	file, err := os.Open(filepath.Clean(path))
+	file, err := os.Open(cleanPath)
 	if err != nil {
 		return nil, fmt.Errorf("open provider schema file %s: %w", path, err)
 	}
 	defer func() { _ = file.Close() }()
-	return ParseProviderSchema(file)
+
+	fi, _ := file.Stat()
+	schemaCacheMu.Lock()
+	if fi != nil {
+		if entry, ok := schemaCache[cleanPath]; ok && entry.mtime.Equal(fi.ModTime()) && entry.size == fi.Size() {
+			schemaCacheMu.Unlock()
+			return entry.schemas, nil
+		}
+	}
+	schemaCacheMu.Unlock()
+
+	ps, err := ParseProviderSchema(file)
+	if err != nil {
+		return nil, err
+	}
+
+	if fi != nil {
+		schemaCacheMu.Lock()
+		schemaCache[cleanPath] = schemaCacheEntry{
+			mtime:   fi.ModTime(),
+			size:    fi.Size(),
+			schemas: ps,
+		}
+		schemaCacheMu.Unlock()
+	}
+
+	return ps, nil
 }
 
 // ExtractForceNewDescriptors extracts immutable attributes (requires_replace) from the schema,
 // mapping attribute names to HazardDescriptors for each resource in deterministic order.
 func (ps *ProviderSchemas) ExtractForceNewDescriptors() map[string]HazardDescriptor {
-	descriptors := make(map[string]HazardDescriptor)
 	if ps == nil {
-		return descriptors
+		return make(map[string]HazardDescriptor)
 	}
+	if ps.memoizedDesc != nil {
+		return ps.memoizedDesc
+	}
+	descriptors := make(map[string]HazardDescriptor)
 
 	provKeys := make([]string, 0, len(ps.ProviderSchemas))
 	for k := range ps.ProviderSchemas {
@@ -99,6 +143,7 @@ func (ps *ProviderSchemas) ExtractForceNewDescriptors() map[string]HazardDescrip
 			extractFromBlock(resName, "", resSchema.Block, descriptors)
 		}
 	}
+	ps.memoizedDesc = descriptors
 	return descriptors
 }
 

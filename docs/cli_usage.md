@@ -162,12 +162,12 @@ Compares two versions of an upstream module directly:
 ```
 
 #### Flags:
-- `--old <dir|git-url|registry>`: Old/current upstream module source.
+- `--old <dir|git-url|registry>`: Old/current upstream module source (resolved and downloaded concurrently with `--new` when fetching from Git/Registry, reusing `--cache-dir` snapshots).
 - `--new <dir|git-url|registry>`: New/target upstream module source. Reports, JSON output and SARIF artifact locations are labelled with this source.
 - `--old-version <tag>`: Old Git tag or Registry release version.
 - `--new-version <tag>`: New Git tag or Registry release version.
 - `--check-recreation`: Evaluates immutable resource destruction hazards (default: `true`) and emits them in every output format.
-- `--format <text|markdown|json|sarif>`: Output format (`text`, `markdown`, `json`, `sarif`).
+- `--format <text|markdown|json|sarif>`: Output format (`text`, `markdown`, `json`, `sarif`). Markdown format renders complete GitHub PR tables including `### Resource Address Shifts`.
 - `--output <file>`: Path to file destination.
 - `--exit-code`: Exits with code 1 if breaking changes exist.
 - `--policy <file>`: Applies the same JSON policy gates as wrapper audit mode.

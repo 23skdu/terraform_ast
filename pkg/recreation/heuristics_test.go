@@ -137,6 +137,22 @@ func TestAnalyzeWrapperHazards(t *testing.T) {
 	assert.Len(t, hazards, 1)
 	assert.Equal(t, "vpc_id", hazards[0].Variable)
 	assert.Contains(t, hazards[0].Description, "Wrapper issue on immutable variable")
+
+	auditUpstream := &wrapper.WrapperCompatibilityReport{
+		TargetModuleName: "terraform-aws-modules/eks/aws",
+		UpstreamDiff: &diff.DiffReport{
+			BreakingChanges: []diff.DifferenceItem{
+				{Category: "VariableDefault", Name: "vpc_id"},
+				{Category: "VariableDefault", Name: "not_a_hazard"},
+			},
+			Warnings: []diff.DifferenceItem{
+				{Category: "VariableDefault", Name: "location"},
+				{Category: "VariableDefault", Name: "not_a_hazard_2"},
+			},
+		},
+	}
+	hazardsUp := AnalyzeWrapperHazardsWithRegistry(auditUpstream, nil)
+	assert.NotEmpty(t, hazardsUp)
 }
 
 func TestFormatHazardsText(t *testing.T) {

@@ -6,16 +6,14 @@ import (
 
 func BenchmarkRenderText(b *testing.B) {
 	r := sampleDiffReport()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		RenderText(r, Findings{})
 	}
 }
 
 func BenchmarkRenderJSON(b *testing.B) {
 	r := sampleDiffReport()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		RenderJSON(r, Findings{})
 	}
 }

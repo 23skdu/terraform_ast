@@ -502,3 +502,119 @@ func TestPass5_CompareResourcesTypeReassignmentNoDuplicate(t *testing.T) {
 		assert.NotEqual(t, "google_storage_bucket.x", nf.Name)
 	}
 }
+
+func TestPass6_ModuleCallsCountForEachAndToggles(t *testing.T) {
+	oldMod := &ast.ModuleInfo{
+		ModuleCalls: map[string]ast.ModuleCallDef{
+			"removed_mod": {Name: "removed_mod", Source: "terraform-aws-modules/vpc/aws"},
+			"eks":         {Name: "eks", Source: "terraform-aws-modules/eks/aws", Count: "2"},
+		},
+		ManagedResources: map[string]ast.ResourceDef{
+			"aws_db_instance.main": {
+				Mode:  "managed",
+				Type:  "aws_db_instance",
+				Name:  "main",
+				Count: "3",
+				Attributes: map[string]string{
+					"deletion_protection": "true",
+					"skip_final_snapshot": "false",
+					"cidr_block":          `"10.0.0.0/16"`,
+				},
+				Triggers: map[string]string{"triggers": `{ v = "1" }`},
+			},
+			"aws_s3_bucket.b": {
+				Mode:    "managed",
+				Type:    "aws_s3_bucket",
+				Name:    "b",
+				ForEach: `toset(["a", "b"])`,
+				Count:   "var.n",
+			},
+		},
+		CheckBlocks: map[string]ast.CheckBlockDef{
+			"health": {Name: "health", AssertRules: []string{"var.port == 443"}},
+		},
+		ImportBlocks: []ast.ImportBlockDef{
+			{To: "aws_s3_bucket.b", ID: "bucket-1"},
+		},
+		ProviderConfigs: map[string]map[string]string{
+			"aws": {"region": `"us-east-1"`},
+		},
+		Locals: map[string]string{
+			"cidr": `"10.0.0.0/16"`,
+		},
+		RequiredProviders: map[string]ast.ProviderRequirement{
+			"upper": {Name: "upper", VersionConstraints: []string{">= 4.0, < 6.0"}},
+			"zero":  {Name: "zero", VersionConstraints: []string{"~> 0.12.0"}},
+		},
+	}
+	newMod := &ast.ModuleInfo{
+		ModuleCalls: map[string]ast.ModuleCallDef{
+			"eks":     {Name: "eks", Source: "./local-eks", ForEach: `toset(["a"])`},
+			"new_mod": {Name: "new_mod", Source: "./new"},
+		},
+		ManagedResources: map[string]ast.ResourceDef{
+			"aws_db_instance.main": {
+				Mode:  "managed",
+				Type:  "aws_db_instance",
+				Name:  "main",
+				Count: "1",
+				Attributes: map[string]string{
+					"deletion_protection": "false",
+					"skip_final_snapshot": "true",
+					"cidr_block":          `"10.1.0.0/16"`,
+				},
+				Triggers: map[string]string{"triggers": `{ v = "2" }`},
+			},
+			"aws_s3_bucket.b": {
+				Mode:    "managed",
+				Type:    "aws_s3_bucket",
+				Name:    "b",
+				ForEach: `toset(["a"])`,
+				Count:   "var.m",
+			},
+		},
+		CheckBlocks: map[string]ast.CheckBlockDef{
+			"health": {Name: "health", AssertRules: []string{"true"}},
+		},
+		ImportBlocks: []ast.ImportBlockDef{
+			{To: "aws_s3_bucket.b", ID: "bucket-2"},
+		},
+		ProviderConfigs: map[string]map[string]string{
+			"aws": {"region": `"eu-west-1"`},
+		},
+		Locals: map[string]string{
+			"cidr": `"10.1.0.0/16"`,
+		},
+		RequiredProviders: map[string]ast.ProviderRequirement{
+			"upper": {Name: "upper", VersionConstraints: []string{">= 4.0, < 5.0"}},
+			"zero":  {Name: "zero", VersionConstraints: []string{"~> 0.15.0"}},
+		},
+	}
+
+	report := Compare(oldMod, newMod, "1.0.0", "2.0.0")
+	assert.False(t, report.CanSafelyUpdate)
+	cats := make(map[string]bool)
+	for _, bc := range report.BreakingChanges {
+		cats[bc.Category] = true
+	}
+	for _, w := range report.Warnings {
+		cats[w.Category] = true
+	}
+	for _, nf := range report.NewFeatures {
+		cats["nf:"+nf.Category] = true
+	}
+	assert.True(t, cats["ModuleCall"])
+	assert.True(t, cats["ModuleCallSource"])
+	assert.True(t, cats["ModuleCallIndex"])
+	assert.True(t, cats["nf:ModuleCall"])
+	assert.True(t, cats["ResourceCount"])
+	assert.True(t, cats["ResourceForEach"])
+	assert.True(t, cats["ResourceTriggers"])
+	assert.True(t, cats["DestructiveAttribute"])
+	assert.True(t, cats["ResourceForceNew"])
+	assert.True(t, cats["CheckBlockModified"])
+	assert.True(t, cats["ImportBlockModified"])
+	assert.True(t, cats["ProviderConfig"])
+	assert.True(t, cats["LocalValue"])
+	assert.True(t, cats["ProviderMajorUpgrade"])
+}

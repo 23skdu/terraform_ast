@@ -97,6 +97,9 @@ func TestAddMissingInputsModifiesFileInPlace(t *testing.T) {
 
 	modified, err := AddMissingInputs(dir, "gke", map[string]string{
 		"new_required": "default-val",
+		"flag_true":    "true",
+		"flag_false":   "false",
+		"count_num":    "0",
 		"keep":         "should-not-overwrite",
 	})
 	require.NoError(t, err)
@@ -105,6 +108,9 @@ func TestAddMissingInputsModifiesFileInPlace(t *testing.T) {
 	after, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Contains(t, string(after), `new_required = "default-val"`)
+	assert.Contains(t, string(after), `flag_true    = true`)
+	assert.Contains(t, string(after), `flag_false   = false`)
+	assert.Contains(t, string(after), `count_num    = 0`)
 	assert.Contains(t, string(after), `keep`)
 	assert.Contains(t, string(after), `"val"`)
 }
@@ -167,6 +173,8 @@ func TestFormatMovedBlocks(t *testing.T) {
 
 	blocks := []MovedBlock{
 		{From: "module.old", To: "module.new"},
+		{From: "aws_instance.server[count]", To: "aws_instance.new_server[for_each]"},
+		{From: "bad [ traversal", To: "other"},
 		{From: "", To: "module.ignored"},
 		{From: "module.ignored2", To: ""},
 	}
@@ -174,6 +182,10 @@ func TestFormatMovedBlocks(t *testing.T) {
 	assert.Contains(t, formatted, "moved {")
 	assert.Contains(t, formatted, "from = module.old")
 	assert.Contains(t, formatted, "to   = module.new")
+	assert.Contains(t, formatted, "from = aws_instance.server")
+	assert.Contains(t, formatted, "to   = aws_instance.new_server")
+	assert.NotContains(t, formatted, "[count]")
+	assert.NotContains(t, formatted, "[for_each]")
 	assert.NotContains(t, formatted, "module.ignored")
 }
 

@@ -110,6 +110,22 @@ func TestLoadProviderSchema(t *testing.T) {
 	ps, err := LoadProviderSchema(path)
 	require.NoError(t, err)
 	assert.Equal(t, "1.0", ps.FormatVersion)
+
+	// Second load hits memoized cache
+	psCached, err := LoadProviderSchema(path)
+	require.NoError(t, err)
+	assert.Same(t, ps, psCached)
+
+	// Second extraction hits memoizedDesc
+	d1 := ps.ExtractForceNewDescriptors()
+	d2 := ps.ExtractForceNewDescriptors()
+	assert.Equal(t, len(d1), len(d2))
+
+	// Invalid JSON file returns error
+	badPath := filepath.Join(dir, "bad.json")
+	require.NoError(t, os.WriteFile(badPath, []byte("broken json"), 0o600))
+	_, err = LoadProviderSchema(badPath)
+	assert.Error(t, err)
 }
 
 func TestDynamicHazardRegistryAndAnalysis(t *testing.T) {

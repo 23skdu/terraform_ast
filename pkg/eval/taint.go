@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,7 +22,7 @@ type TaintReport struct {
 }
 
 // AnalyzeVariableTaint scans all .tf files in dir to trace the dependency path of targetVar.
-func AnalyzeVariableTaint(dir string, targetVar string) (*TaintReport, error) {
+func AnalyzeVariableTaint(dir string, targetVar string, preParsed ...map[string]*hclsyntax.Body) (*TaintReport, error) {
 	fi, err := os.Stat(dir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to access directory: %w", err)
@@ -52,23 +53,44 @@ func AnalyzeVariableTaint(dir string, targetVar string) (*TaintReport, error) {
 		body *hclsyntax.Body
 	}
 	var files []fileAST
+	affectedAttrsMap := make(map[string]struct{})
 
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tf") || strings.HasSuffix(entry.Name(), ".tf.json") {
-			continue
+	if len(preParsed) > 0 && len(preParsed[0]) > 0 {
+		for name, body := range preParsed[0] {
+			files = append(files, fileAST{name: name, body: body})
 		}
-		filePath := filepath.Join(dir, entry.Name())
-		// #nosec G304 -- directory entry read within inspected module
-		src, readErr := os.ReadFile(filepath.Clean(filePath))
-		if readErr != nil {
-			continue
-		}
-		parsedFile, diags := hclsyntax.ParseConfig(src, entry.Name(), hcl.Pos{Line: 1, Column: 1})
-		if diags.HasErrors() || parsedFile == nil {
-			continue
-		}
-		if body, ok := parsedFile.Body.(*hclsyntax.Body); ok {
-			files = append(files, fileAST{name: entry.Name(), body: body})
+	} else {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			isJSON := strings.HasSuffix(entry.Name(), ".tf.json")
+			if !strings.HasSuffix(entry.Name(), ".tf") && !isJSON {
+				continue
+			}
+			filePath := filepath.Join(dir, entry.Name())
+			// #nosec G304 -- directory entry read within inspected module
+			src, readErr := os.ReadFile(filepath.Clean(filePath))
+			if readErr != nil {
+				continue
+			}
+			if isJSON {
+				if bytes.Contains(src, []byte("var."+targetVar)) || bytes.Contains(src, []byte("${var."+targetVar+"}")) {
+					report.IsReachable = true
+					report.IsDeadCode = false
+					dest := fmt.Sprintf("%s.var.%s", entry.Name(), targetVar)
+					affectedAttrsMap[dest] = struct{}{}
+					report.TracePath = append(report.TracePath, dest)
+				}
+				continue
+			}
+			parsedFile, diags := hclsyntax.ParseConfig(src, entry.Name(), hcl.Pos{Line: 1, Column: 1})
+			if diags.HasErrors() || parsedFile == nil {
+				continue
+			}
+			if body, ok := parsedFile.Body.(*hclsyntax.Body); ok {
+				files = append(files, fileAST{name: entry.Name(), body: body})
+			}
 		}
 	}
 
@@ -99,18 +121,29 @@ func AnalyzeVariableTaint(dir string, targetVar string) (*TaintReport, error) {
 		}
 	}
 
-	// Step 2: Trace through child modules and resources
-	affectedAttrsMap := make(map[string]struct{})
-	for _, f := range files {
-		for _, block := range f.body.Blocks {
-			switch block.Type {
-			case "module":
-				modName := block.Labels[0]
-				for attrName, attr := range block.Body.Attributes {
-					for _, v := range attr.Expr.Variables() {
+	// Step 2: Trace through child modules, resources, data blocks recursively
+	var inspectBody func(prefix string, body *hclsyntax.Body)
+	inspectBody = func(prefix string, body *hclsyntax.Body) {
+		for attrName, attr := range body.Attributes {
+			for _, v := range attr.Expr.Variables() {
+				varStr := traversalToString(v)
+				if isTainted(varStr, taintedVars, taintedLocals) {
+					dest := fmt.Sprintf("%s.%s", prefix, attrName)
+					affectedAttrsMap[dest] = struct{}{}
+					report.IsReachable = true
+					report.IsDeadCode = false
+					report.TracePath = append(report.TracePath, dest)
+				}
+			}
+		}
+		for _, subBlock := range body.Blocks {
+			if subBlock.Type == "dynamic" && len(subBlock.Labels) > 0 {
+				subPrefix := prefix + "." + subBlock.Labels[0]
+				if forEach, ok := subBlock.Body.Attributes["for_each"]; ok {
+					for _, v := range forEach.Expr.Variables() {
 						varStr := traversalToString(v)
 						if isTainted(varStr, taintedVars, taintedLocals) {
-							dest := fmt.Sprintf("module.%s.%s", modName, attrName)
+							dest := subPrefix + ".for_each"
 							affectedAttrsMap[dest] = struct{}{}
 							report.IsReachable = true
 							report.IsDeadCode = false
@@ -118,22 +151,35 @@ func AnalyzeVariableTaint(dir string, targetVar string) (*TaintReport, error) {
 						}
 					}
 				}
+				for _, cb := range subBlock.Body.Blocks {
+					if cb.Type == "content" {
+						inspectBody(subPrefix, cb.Body)
+					}
+				}
+				continue
+			}
+			inspectBody(prefix+"."+subBlock.Type, subBlock.Body)
+		}
+	}
+
+	for _, f := range files {
+		for _, block := range f.body.Blocks {
+			switch block.Type {
+			case "module":
+				if len(block.Labels) >= 1 {
+					inspectBody("module."+block.Labels[0], block.Body)
+				}
 			case "resource":
 				if len(block.Labels) >= 2 {
-					resType := block.Labels[0]
-					resName := block.Labels[1]
-					for attrName, attr := range block.Body.Attributes {
-						for _, v := range attr.Expr.Variables() {
-							varStr := traversalToString(v)
-							if isTainted(varStr, taintedVars, taintedLocals) {
-								dest := fmt.Sprintf("%s.%s.%s", resType, resName, attrName)
-								affectedAttrsMap[dest] = struct{}{}
-								report.IsReachable = true
-								report.IsDeadCode = false
-								report.TracePath = append(report.TracePath, dest)
-							}
-						}
-					}
+					inspectBody(block.Labels[0]+"."+block.Labels[1], block.Body)
+				}
+			case "data":
+				if len(block.Labels) >= 2 {
+					inspectBody("data."+block.Labels[0]+"."+block.Labels[1], block.Body)
+				}
+			case "check":
+				if len(block.Labels) >= 1 {
+					inspectBody("check."+block.Labels[0], block.Body)
 				}
 			case "output":
 				if len(block.Labels) >= 1 {

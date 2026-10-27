@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -194,7 +195,8 @@ func FilterTaintedCallSites(callSites []CallSite, taintReport *eval.TaintReport)
 		if !isTainted {
 			for _, expr := range cs.PassedInputs {
 				for outName := range taintedOutputs {
-					if strings.Contains(expr, "."+outName) {
+					re := regexp.MustCompile(`\bmodule\.[a-zA-Z0-9_-]+\.` + regexp.QuoteMeta(outName) + `\b`)
+					if re.MatchString(expr) {
 						isTainted = true
 						break
 					}

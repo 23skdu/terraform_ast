@@ -26,19 +26,24 @@ flowchart LR
 ## Key Platform Features
 
 ### 1. Semantic AST Inspection & Deep Diff Engine (`pkg/ast`, `pkg/diff`)
-- **Direct Single-Pass AST Parsing**: Parses `.tf` and `.tf.json` files in a single pass without requiring an initialized `.terraform` directory or live cloud credentials.
-- **Modern HCL & OpenTofu Support**: Full bidirectional support for `moved {}` state migrations, `removed {}` blocks (reporting destructive `destroy = true` additions as breaking and soft `destroy = false` additions as features), `check {}` assertions, programmatic `import {}`, custom provider functions (`function "..." {}`), client-side state encryption (`encryption {}`), resource `lifecycle` flags (`prevent_destroy`, `create_before_destroy`, `replace_triggered_by`, `ignore_changes`), destroy-time provisioners, and `backend {}` configuration.
-- **Comprehensive Change Categorization**: Accurately classifies changes into **Breaking Changes** (removed inputs/outputs/resources, newly required inputs, changed variable defaults, narrowed type constraints, major provider constraint bumps, removed `prevent_destroy` or `moved {}` blocks, backend changes), **New Features** (optional inputs, new outputs/resources, new `moved {}` migrations), and **Warnings** (output expression drift, removed `required_version`, narrowed `ignore_changes`).
+- **Direct Single-Pass AST Parsing**: Parses `.tf` and `.tf.json` files in a single pass without requiring an initialized `.terraform` directory or live cloud credentials. Shares parsed AST bodies (`ParsedBodies`) directly with taint evaluation.
+- **Nested Child Module Diffing**: Deeply inspects child `module "..." {}` calls inside upstream modules, flagging removed module calls (which destroy entire state subtrees), module source swaps, major version jumps, and count/for_each indexing shifts as breaking changes.
+- **Resource-Body Attribute & ForceNew Diffing**: Inspects top-level attributes on managed resource bodies, detecting direct mutations to schema-confirmed immutable (`ForceNew` / `requires_replace`) fields.
+- **Destructive Safeguard & Trigger Detection**: Flags modifications to `triggers`, `triggers_replace`, `keepers`, disabling of `deletion_protection` / `purge_protection_enabled`, or enabling of `force_destroy` / `skip_final_snapshot` as breaking changes.
+- **Instance Cardinality Destruction**: Detects integer `count` reductions ($n_{\text{new}} < n_{\text{old}}$ or $n_{\text{new}} == 0$) and static `for_each` key-set deletions.
+- **Semver Range Interval Analysis**: Evaluates full semver constraint intervals (`ParseConstraintRange`), identifying upper-bound major narrowings (e.g. `< 6.0` to `< 5.0`) and `0.x` breaking minor bumps.
+- **Modern HCL & OpenTofu Support**: Full bidirectional support for `moved {}` state migrations, `removed {}` blocks (reporting destructive `destroy = true` additions as breaking and soft `destroy = false` additions as features), `check {}` assertions, programmatic `import {}`, custom provider functions (`function "..." {}`), client-side state encryption (`encryption {}`), resource `lifecycle` flags (`prevent_destroy`, `create_before_destroy`, `replace_triggered_by`, `ignore_changes`), destroy-time provisioners, and `backend {}` / `cloud {}` configuration.
+- **Comprehensive Change Categorization**: Accurately classifies changes into **Breaking Changes** (unmigrated address shifts, removed child modules, removed inputs/outputs/resources, newly required inputs, changed variable defaults, narrowed type constraints, major provider constraint bumps, removed `prevent_destroy` or `moved {}` blocks, backend changes), **New Features** (optional inputs, new outputs/resources, new `moved {}` migrations), and **Warnings** (output expression drift, removed `required_version`, narrowed `ignore_changes`, modified check assertions).
 - **Object Schema Inspection**: Traverses deeply nested `object(...)` type constraints, detecting added required fields or incompatible attribute definitions.
 
-### 2. Expression Evaluation Context & Taint Reachability (`pkg/eval`)
+### 2. Expression Evaluation Context & Recursive Taint Reachability (`pkg/eval`)
 - **Embedded `hcl.EvalContext`**: Pure, hermetic implementations of Terraform standard functions (`concat`, `merge`, `lookup`, `coalesce`, `element`, `lower`, `upper`, `trimspace`, `jsondecode`).
 - **Terragrunt Dynamic Inputs**: Evaluates Terragrunt `inputs = merge(...)` blocks and wrapper variable delegations without failing with incomplete analysis.
-- **Dependency Taint Analysis**: Traces input variables through intermediate `locals` and child module calls to verify whether an upstream breaking change reaches an active managed resource or remains dead code.
+- **Recursive Dependency Taint Analysis**: Recursively traces input variables through intermediate `locals`, child module calls, `data` blocks, `dynamic` blocks, and deeply nested sub-blocks (e.g. `node_config`) across `.tf` and `.tf.json` files using pre-parsed AST bodies.
 
 ### 3. State Recreation, `ForceNew` Hazards & Dynamic Auto-Discovery (`pkg/recreation`)
 - **Dynamic Provider Schema Auto-Discovery**: Automatically inspects `required_providers` in the AST, discovers local schemas or queries built-in ForceNew attribute tables for standard cloud providers (AWS, GCP, AzureRM, Kubernetes, Cloudflare), and writes schemas to the persistent L2 disk cache.
-- **Dynamic Provider Schema Ingestion**: Ingests custom schema dumps (`terraform providers schema -json`) to extract `requires_replace` metadata across arbitrary cloud resource attributes.
+- **Memoized Schema Ingestion**: Ingests custom schema dumps (`terraform providers schema -json`) memoized by file path, size, and mtime to avoid redundant re-parsing.
 - **Built-in Cloud Heuristics**: Pre-configured immutability detection for flagship multi-cloud modules:
   - **GCP GKE**: Cluster name, region, network, subnetwork, and secondary pod CIDR blocks.
   - **AWS EKS**: Cluster name, VPC attachment, and IP family.
@@ -47,18 +52,18 @@ flowchart LR
 
 ### 4. Intermediate Representation (IR) & State Graph Theory (`pkg/ast`)
 - **Eliminating the "Static AST Fallacy"**: While static variable analysis ensures syntactic compatibility, Terraform's runtime state is organized as a hierarchical instance address graph. If an internal resource switches from singleton to indexed (`count` or `for_each`), transitions between `count` and `for_each`, or is moved into a child module, Terraform destroys and recreates the resource on apply unless a `moved {}` block covers the transition.
-- **Canonical Address Model**: Evaluates addresses into canonical forms (`module.vpc.aws_subnet.this["a"]`) capturing module nesting, resource mode (`managed` vs `data`), type, name, and `count`/`for_each` index keys.
-- **Evaluation Graph & Deterministic Shift Detection**: Builds an IR graph (`EvaluationGraph`) of module resources and detects address displacements (`DetectAddressShifts`) using deterministic best-match scoring across resource type, label, index mode, and module path while honouring upstream `moved {}` blocks.
+- **Canonical Address Model**: Evaluates addresses into canonical forms (`module.vpc.aws_subnet.this["a"]`) capturing module nesting, resource mode (`managed`, `data`, or `module`), type, name, and `count`/`for_each` index keys.
+- **Evaluation Graph & Deterministic Shift Detection**: Builds an IR graph (`EvaluationGraph`) of module resources and detects address displacements (`DetectAddressShifts`) using deterministic best-match scoring across resource type, label, index mode, and module path while honouring upstream `moved {}` blocks. Unmigrated shifts are stored directly on `DiffReport` and folded into the verdict.
 
 ### 5. Monorepo Blast Radius & Inter-Procedural Taint Reachability (`pkg/blastradius`, `pkg/eval`)
 - **Parallel Monorepo Traversal**: Discovers all downstream root modules and Terragrunt environments consuming an upstream module using a two-phase parallel directory walk and single-pass HCL inspection.
 - **Evidence-Gated Consumer Impact Assessment**: Attributes missing required inputs only when exposed by the wrapper, gates recreation hazards on actual diff or dynamic schema evidence, and emits a per-risk distribution summary.
-- **Inter-Procedural Taint Reachability**: Directly wires `--taint <var>` into `--blast-radius` scans, dynamically tracing value flows through module calls and filtering out downstream consumers that do not actively pass or consume tainted variables.
+- **Inter-Procedural Taint Reachability**: Directly wires `--taint <var>` into `--blast-radius` scans, dynamically tracing value flows through module calls with token-boundary regex matching and filtering out downstream consumers that do not actively pass or consume tainted variables.
 - **Unified SARIF & JSON Reporting**: Emits structured diagnostics (`TF-BLAST-RADIUS-CONSUMER`) for GitHub Code Scanning and enterprise compliance dashboards.
 
 ### 6. Automated Migration Codemods & State Refactoring (`pkg/codemod`, `pkg/planner`)
-- **In-Place Refactoring (`--fix`)**: Modifies `.tf` files using `hclwrite` to strip obsolete arguments and inject missing required inputs using safe typed placeholders (`""`, `false`, `0`), refusing with exit code 2 when no safe placeholder can be derived.
-- **Automated `moved {}` Block Synthesis**: Detects resource address shifts between module versions and automatically synthesizes Terraform 1.1+ state migration declarations (`moved { from = ... to = ... }`), skipping transitions already covered by upstream `moved {}` blocks.
+- **In-Place Refactoring (`--fix`)**: Modifies `.tf` files using `hclwrite` to strip obsolete arguments and inject missing required inputs using safe typed cty literals (`cty.StringVal`, `cty.BoolVal`, `cty.NumberIntVal`), refusing with exit code 2 when no safe placeholder can be derived.
+- **Automated `moved {}` Block Synthesis**: Detects resource address shifts between module versions and automatically synthesizes Terraform 1.1+ state migration declarations (`moved { from = ... to = ... }`), stripping synthetic `[count]`/`[for_each]` markers and skipping transitions already covered by upstream or wrapper `moved {}` blocks.
 - **Concurrent Transitive Multi-Version Planner**: Prefetches and inspects intermediate Git or Registry releases concurrently with `--cache-dir` persistence to find the highest contiguous "safe harbor" version.
 
 ### 7. Enterprise Policy Governance (Official OPA Go SDK & Rego v1) (`pkg/policy`)

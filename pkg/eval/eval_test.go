@@ -379,6 +379,73 @@ locals {
 	assert.Error(t, errUnreadable)
 }
 
+func TestAnalyzeVariableTaint_RecursiveAndJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	mainTF := `
+variable "machine_type" { type = string }
+variable "tags" { type = list(string) }
+variable "ami_name" { type = string }
+variable "check_val" { type = string }
+
+resource "google_container_cluster" "primary" {
+  name = "cluster"
+  node_config {
+    machine_type = var.machine_type
+  }
+  dynamic "tag" {
+    for_each = var.tags
+    content {
+      val = tag.value
+    }
+  }
+}
+
+data "aws_ami" "ubuntu" {
+  name = var.ami_name
+}
+
+check "health" {
+  assert {
+    condition = var.check_val == "ok"
+  }
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(mainTF), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "extra.tf.json"), []byte(`{"resource":{"aws_s3_bucket":{"b":{"bucket":"${var.json_var}"}}}}`), 0o600))
+
+	repMachine, err := AnalyzeVariableTaint(tmpDir, "machine_type")
+	require.NoError(t, err)
+	assert.False(t, repMachine.IsDeadCode)
+	assert.True(t, repMachine.IsReachable)
+	assert.Contains(t, repMachine.AffectedResourceAttributes, "google_container_cluster.primary.node_config.machine_type")
+
+	repTags, err := AnalyzeVariableTaint(tmpDir, "tags")
+	require.NoError(t, err)
+	assert.False(t, repTags.IsDeadCode)
+	assert.Contains(t, repTags.AffectedResourceAttributes, "google_container_cluster.primary.tag.for_each")
+
+	repAMI, err := AnalyzeVariableTaint(tmpDir, "ami_name")
+	require.NoError(t, err)
+	assert.False(t, repAMI.IsDeadCode)
+	assert.Contains(t, repAMI.AffectedResourceAttributes, "data.aws_ami.ubuntu.name")
+
+	repCheck, err := AnalyzeVariableTaint(tmpDir, "check_val")
+	require.NoError(t, err)
+	assert.False(t, repCheck.IsDeadCode)
+
+	repJSON, err := AnalyzeVariableTaint(tmpDir, "json_var")
+	require.NoError(t, err)
+	assert.False(t, repJSON.IsDeadCode)
+
+	// Test preParsed map (#130)
+	parsed, diags := hclsyntax.ParseConfig([]byte(mainTF), "main.tf", hcl.Pos{Line: 1, Column: 1})
+	require.False(t, diags.HasErrors())
+	body := parsed.Body.(*hclsyntax.Body)
+	repPre, err := AnalyzeVariableTaint(tmpDir, "machine_type", map[string]*hclsyntax.Body{"main.tf": body})
+	require.NoError(t, err)
+	assert.False(t, repPre.IsDeadCode)
+}
+
 // writeTerragrunt lays out a Terragrunt config and returns its path.
 func writeTerragrunt(t *testing.T, dir, name, content string) string {
 	t.Helper()

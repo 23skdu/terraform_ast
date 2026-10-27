@@ -69,6 +69,32 @@ func TestResourceAddress_FullAddressAndParse(t *testing.T) {
 				Name: "lone_identifier",
 			},
 		},
+		{
+			addr: "module.vpc",
+			expected: ResourceAddress{
+				Mode: "module",
+				Type: "module",
+				Name: "vpc",
+			},
+		},
+		{
+			addr: "module.parent.module.child",
+			expected: ResourceAddress{
+				ModulePath: "module.parent",
+				Mode:       "module",
+				Type:       "module",
+				Name:       "child",
+			},
+		},
+		{
+			addr: "module.vpc[0]",
+			expected: ResourceAddress{
+				Mode:     "module",
+				Type:     "module",
+				Name:     "vpc",
+				IndexKey: "0",
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -96,6 +122,10 @@ func TestExtractResourceAddressesAndGraph(t *testing.T) {
 	}
 
 	mod := &ModuleInfo{
+		ModuleCalls: map[string]ModuleCallDef{
+			"vpc": {Name: "vpc", Count: "2"},
+			"db":  {Name: "db", ForEach: `toset(["a"])`},
+		},
 		ManagedResources: map[string]ResourceDef{
 			"aws_vpc.main": {
 				Mode: "managed",
@@ -118,19 +148,22 @@ func TestExtractResourceAddressesAndGraph(t *testing.T) {
 	}
 
 	addrs := ExtractResourceAddresses(mod)
-	if len(addrs) != 3 {
-		t.Fatalf("expected 3 addresses, got %d", len(addrs))
+	if len(addrs) != 5 {
+		t.Fatalf("expected 5 addresses, got %d", len(addrs))
 	}
 
 	graph := BuildEvaluationGraph(mod)
-	if len(graph.Nodes) != 3 {
-		t.Fatalf("expected 3 graph nodes, got %d", len(graph.Nodes))
+	if len(graph.Nodes) != 5 {
+		t.Fatalf("expected 5 graph nodes, got %d", len(graph.Nodes))
 	}
 	if node, ok := graph.Nodes["aws_vpc.main"]; !ok || node.Resource.Name != "main" {
 		t.Errorf("expected node aws_vpc.main in graph")
 	}
 	if node, ok := graph.Nodes["data.aws_ami.ubuntu"]; !ok || node.Resource.Name != "ubuntu" {
 		t.Errorf("expected node data.aws_ami.ubuntu in graph")
+	}
+	if node, ok := graph.Nodes["module.vpc[count]"]; !ok || node.Resource.Name != "vpc" {
+		t.Errorf("expected node module.vpc in graph")
 	}
 }
 

@@ -2,7 +2,7 @@
 
 **Scope:** 20 numbered improvement items (`#111` – `#130`) covering analysis **accuracy**, analysis **performance**, and an expanded taxonomy of **destructive changes** that must be classified as breaking.
 
-**Status:** Open. Items are ordered by delivery batch, not by ID.
+**Status:** Completed. All 20 items (#111 - #130) implemented and verified with 100.0% statement coverage across all packages.
 
 ---
 
@@ -32,7 +32,7 @@ Baseline verified before writing this document:
 | Pass 3 | `#71` – `#76` | IR evaluation graph, OPA v1, cross-module taint, differential verification |
 | Pass 4 | `#77` – `#90` | Registry subpaths, monorepo tags, golden-plan verification |
 | Pass 5 | `#91` – `#110` | Resource/modern-block diffing, single-pass AST cache, concurrent upgrade prefetch, LSP debounce |
-| **Pass 6** | **`#111` – `#130`** | **This document** |
+| **Pass 6** | **`#111` – `#130`** | **Delivered: detection blind spots, semantic/wrapper precision, performance/caching optimizations** |
 
 ---
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclparse"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/terraform-config-inspect/tfconfig"
 )
 
@@ -33,64 +34,29 @@ func InspectSource(dir, fileName, content string) (*ModuleInfo, error) {
 // content fingerprint, so an unsaved buffer cannot be represented by either. Copying is the only
 // faithful option; it runs per keystroke, so only the .tf and .tf.json files are copied.
 func inspectOverlay(dir string, overlay map[string][]byte) (*ModuleInfo, error) {
-	staging, err := os.MkdirTemp("", "tfastdiff_overlay_*")
-	if err != nil {
-		return nil, fmt.Errorf("failed to stage module overlay: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(staging) }()
-
-	if err := stageModuleFiles(dir, staging, overlay); err != nil {
-		return nil, err
-	}
-
-	info, err := Inspect(staging)
-	if err != nil {
-		return nil, err
-	}
-	rebaseModulePaths(info, staging, dir)
-	return info, nil
-}
-
-// stageModuleFiles copies the top-level .tf and .tf.json files of dir into staging, replacing the
-// content of any file named in the overlay.
-//
-// Only top-level files are copied: a nested directory is a child module, not part of this one.
-// A file that cannot be read is skipped unless the overlay supplies its content, and a file that
-// cannot be written is an error: silently skipping it would analyse a module that is missing
-// declarations, which is the same class of partial result this overlay exists to avoid.
-func stageModuleFiles(dir, staging string, overlay map[string][]byte) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return fmt.Errorf("failed to read module directory %s: %w", dir, err)
+		return nil, fmt.Errorf("failed to read module directory %s: %w", dir, err)
 	}
 
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".tf") && !strings.HasSuffix(name, ".tf.json") {
-			continue
-		}
-		source := filepath.Clean(filepath.Join(dir, name))
-		// #nosec G304 -- source is a directory entry read via os.ReadDir
-		data, readErr := os.ReadFile(source)
-		replacement, replaced := overlay[source]
-		if readErr != nil {
-			if !replaced {
-				continue
-			}
-			// The caller's content is authoritative for a file that cannot be read.
-			data = replacement
-		} else if replaced {
-			data = replacement
-		}
-		// #nosec G306, G703 -- staging directory is private to this process
-		if writeErr := os.WriteFile(filepath.Clean(filepath.Join(staging, name)), data, 0o600); writeErr != nil {
-			return fmt.Errorf("failed to stage %s: %w", name, writeErr)
-		}
+	info := &ModuleInfo{
+		Path:                    dir,
+		Variables:               make(map[string]VariableDef),
+		Outputs:                 make(map[string]OutputDef),
+		ModuleCalls:             make(map[string]ModuleCallDef),
+		RequiredProviders:       make(map[string]ProviderRequirement),
+		WrapperOutputReferences: make(map[string][]OutputReference),
+		CheckBlocks:             make(map[string]CheckBlockDef),
+		Functions:               make(map[string]FunctionDef),
+		ManagedResources:        make(map[string]ResourceDef),
+		DataResources:           make(map[string]ResourceDef),
 	}
-	return nil
+
+	if err := parseAndEnrichModuleWithOverlay(dir, entries, info, true, overlay); err != nil {
+		return nil, err
+	}
+	rebaseModulePaths(info, dir, dir)
+	return info, nil
 }
 
 // rebaseModulePaths rewrites every recorded source position from the staging directory back to the
@@ -328,12 +294,28 @@ func enrichFromHCLFiles(dir string, info *ModuleInfo) {
 	_ = parseAndEnrichModule(dir, info, false)
 }
 
+func splitHCLListExpr(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	trimmed = strings.TrimPrefix(trimmed, "[")
+	trimmed = strings.TrimSuffix(trimmed, "]")
+	var items []string
+	for _, part := range strings.Split(trimmed, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			items = append(items, p)
+		}
+	}
+	return items
+}
+
 func parseAndEnrichModule(dir string, info *ModuleInfo, loadTFConfig bool) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
+	return parseAndEnrichModuleWithOverlay(dir, entries, info, loadTFConfig, nil)
+}
 
+func parseAndEnrichModuleWithOverlay(dir string, entries []os.DirEntry, info *ModuleInfo, loadTFConfig bool, overlay map[string][]byte) error {
 	parser := hclparse.NewParser()
 	var tfMod *tfconfig.Module
 	if loadTFConfig {
@@ -353,10 +335,13 @@ func parseAndEnrichModule(dir string, info *ModuleInfo, loadTFConfig bool) error
 			{Type: "resource", LabelNames: []string{"type", "name"}},
 			{Type: "data", LabelNames: []string{"type", "name"}},
 			{Type: "terraform"},
+			{Type: "provider", LabelNames: []string{"name"}},
+			{Type: "locals"},
 		},
 	}
 
 	var parsedFiles []parsedHCLFile
+	seenPaths := make(map[string]bool)
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -368,10 +353,20 @@ func parseAndEnrichModule(dir string, info *ModuleInfo, loadTFConfig bool) error
 		}
 
 		filePath := filepath.Join(dir, name)
-		// #nosec G304 -- directory entry read within inspected module
-		src, err := os.ReadFile(filepath.Clean(filePath))
-		if err != nil {
-			continue
+		cleanPath := filepath.Clean(filePath)
+		seenPaths[cleanPath] = true
+
+		var src []byte
+		replacement, replaced := overlay[cleanPath]
+		if replaced {
+			src = replacement
+		} else {
+			// #nosec G304 -- directory entry read within inspected module
+			var readErr error
+			src, readErr = os.ReadFile(cleanPath)
+			if readErr != nil {
+				continue
+			}
 		}
 
 		var file *hcl.File
@@ -393,12 +388,47 @@ func parseAndEnrichModule(dir string, info *ModuleInfo, loadTFConfig bool) error
 		parsedFiles = append(parsedFiles, parsedHCLFile{filePath: filePath, src: src, file: file})
 	}
 
+	for ovPath, ovSrc := range overlay {
+		cleanOv := filepath.Clean(ovPath)
+		if seenPaths[cleanOv] {
+			continue
+		}
+		if filepath.Dir(cleanOv) != filepath.Clean(dir) {
+			continue
+		}
+		name := filepath.Base(cleanOv)
+		isJSON := strings.HasSuffix(name, ".tf.json")
+		if !isJSON && !strings.HasSuffix(name, ".tf") {
+			continue
+		}
+		var file *hcl.File
+		var diags hcl.Diagnostics
+		if isJSON {
+			file, diags = parser.ParseJSON(ovSrc, cleanOv)
+		} else {
+			file, diags = parser.ParseHCL(ovSrc, cleanOv)
+		}
+		if !diags.HasErrors() {
+			diags = append(diags, tfconfig.LoadModuleFromFile(file, tfMod)...)
+		}
+		if diags.HasErrors() {
+			return fmt.Errorf("diagnostics error loading module %s: %s", dir, diags.Error())
+		}
+		parsedFiles = append(parsedFiles, parsedHCLFile{filePath: cleanOv, src: ovSrc, file: file})
+	}
+
 	if loadTFConfig {
 		populateFromTFModule(tfMod, info)
 	}
 
 	for _, pf := range parsedFiles {
 		filePath, src, file := pf.filePath, pf.src, pf.file
+		if syntaxBody, ok := file.Body.(*hclsyntax.Body); ok {
+			if info.ParsedBodies == nil {
+				info.ParsedBodies = make(map[string]*hclsyntax.Body)
+			}
+			info.ParsedBodies[filePath] = syntaxBody
+		}
 		content, _, diags := file.Body.PartialContent(schema)
 		if diags.HasErrors() || content == nil {
 			continue
@@ -660,10 +690,10 @@ func parseAndEnrichModule(dir string, info *ModuleInfo, loadTFConfig bool) error
 							res.Lifecycle.CreateBeforeDestroy = (val == "true")
 						}
 						if v, ok := lcAttrs["replace_triggered_by"]; ok {
-							res.Lifecycle.ReplaceTriggeredBy = append(res.Lifecycle.ReplaceTriggeredBy, strings.TrimSpace(string(src[v.Expr.Range().Start.Byte:v.Expr.Range().End.Byte])))
+							res.Lifecycle.ReplaceTriggeredBy = append(res.Lifecycle.ReplaceTriggeredBy, splitHCLListExpr(string(src[v.Expr.Range().Start.Byte:v.Expr.Range().End.Byte]))...)
 						}
 						if v, ok := lcAttrs["ignore_changes"]; ok {
-							res.Lifecycle.IgnoreChanges = append(res.Lifecycle.IgnoreChanges, strings.TrimSpace(string(src[v.Expr.Range().Start.Byte:v.Expr.Range().End.Byte])))
+							res.Lifecycle.IgnoreChanges = append(res.Lifecycle.IgnoreChanges, splitHCLListExpr(string(src[v.Expr.Range().Start.Byte:v.Expr.Range().End.Byte]))...)
 						}
 					}
 				}
@@ -681,13 +711,23 @@ func parseAndEnrichModule(dir string, info *ModuleInfo, loadTFConfig bool) error
 						res.Provisioners = append(res.Provisioners, when)
 					}
 				}
-				// triggers attribute (for null_resource etc.)
+				// triggers and resource attributes
 				blockAttrs, _ := block.Body.JustAttributes()
-				if tAttr, ok := blockAttrs["triggers"]; ok {
-					if res.Triggers == nil {
-						res.Triggers = make(map[string]string)
+				for attrName, attr := range blockAttrs {
+					valStr := strings.TrimSpace(string(src[attr.Expr.Range().Start.Byte:attr.Expr.Range().End.Byte]))
+					switch attrName {
+					case "triggers", "triggers_replace", "keepers":
+						if res.Triggers == nil {
+							res.Triggers = make(map[string]string)
+						}
+						res.Triggers[attrName] = valStr
+					case "count", "for_each", "provider", "depends_on":
+					default:
+						if res.Attributes == nil {
+							res.Attributes = make(map[string]string)
+						}
+						res.Attributes[attrName] = valStr
 					}
-					res.Triggers["triggers"] = strings.TrimSpace(string(src[tAttr.Expr.Range().Start.Byte:tAttr.Expr.Range().End.Byte]))
 				}
 				if mode == "data" {
 					if info.DataResources == nil {
@@ -703,16 +743,45 @@ func parseAndEnrichModule(dir string, info *ModuleInfo, loadTFConfig bool) error
 
 			case "terraform":
 				bcContent, _, _ := block.Body.PartialContent(&hcl.BodySchema{
-					Blocks: []hcl.BlockHeaderSchema{{Type: "backend", LabelNames: []string{"type"}}},
+					Blocks: []hcl.BlockHeaderSchema{
+						{Type: "backend", LabelNames: []string{"type"}},
+						{Type: "cloud"},
+					},
 				})
 				if bcContent != nil && len(bcContent.Blocks) > 0 {
 					bc := bcContent.Blocks[0]
-					bcfg := &BackendConfig{Type: bc.Labels[0], Attributes: make(map[string]string)}
+					bType := bc.Type
+					if len(bc.Labels) > 0 {
+						bType = bc.Labels[0]
+					}
+					bcfg := &BackendConfig{Type: bType, Attributes: make(map[string]string)}
 					bAttrs, _ := bc.Body.JustAttributes()
 					for an, av := range bAttrs {
 						bcfg.Attributes[an] = strings.TrimSpace(string(src[av.Expr.Range().Start.Byte:av.Expr.Range().End.Byte]))
 					}
 					info.Backend = bcfg
+				}
+
+			case "provider":
+				pName := block.Labels[0]
+				if info.ProviderConfigs == nil {
+					info.ProviderConfigs = make(map[string]map[string]string)
+				}
+				pAttrs := make(map[string]string)
+				for an, av := range attrs {
+					pAttrs[an] = strings.TrimSpace(string(src[av.Expr.Range().Start.Byte:av.Expr.Range().End.Byte]))
+				}
+				if alias, ok := pAttrs["alias"]; ok {
+					pName = pName + "." + strings.Trim(alias, `"'`)
+				}
+				info.ProviderConfigs[pName] = pAttrs
+
+			case "locals":
+				if info.Locals == nil {
+					info.Locals = make(map[string]string)
+				}
+				for ln, la := range attrs {
+					info.Locals[ln] = strings.TrimSpace(string(src[la.Expr.Range().Start.Byte:la.Expr.Range().End.Byte]))
 				}
 			}
 		}

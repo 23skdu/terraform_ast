@@ -58,8 +58,9 @@ flowchart TD
 ### 1. `pkg/ast` (Single-Pass AST Inspection, IR & Multi-Tier Cache)
 - **Engine**: Built on `github.com/hashicorp/terraform-config-inspect/tfconfig` (`LoadModuleFromFile`) and `github.com/hashicorp/hcl/v2/hclparse`.
 - **Capabilities**:
-  - **Single-Pass Parsing (`parseAndEnrichModule`)**: Reads and parses each `.tf` and `.tf.json` file once per uncached inspection, feeding the parsed `*hcl.File` into both `tfconfig.LoadModuleFromFile` and deep HCL enrichment (`enrichFromHCLFiles`).
-  - **Metadata & Enrichment**: Extracts variables (types, defaults, `nullable`, `validation` rules, `deprecated`, source positions), outputs (types, `value` expressions, sensitivity, `module.*` delegations), module calls (forwarded inputs, raw expressions, `count`, `for_each`), managed/data resources (`provider` aliases, `count`, `for_each`, `lifecycle` flags, `provisioner` blocks, `triggers`), `backend {}` configuration, and modern Terraform/OpenTofu blocks (`moved {}`, `removed {}`, `check {}`, `import {}`, `function {}`, `encryption {}`).
+  - **Single-Pass Parsing (`parseAndEnrichModule`)**: Reads and parses each `.tf` and `.tf.json` file once per uncached inspection, feeding the parsed `*hcl.File` into both `tfconfig.LoadModuleFromFile` and deep HCL enrichment (`enrichFromHCLFiles`). Retains parsed AST bodies (`ParsedBodies map[string]*hclsyntax.Body`) to eliminate redundant re-parsing in downstream evaluators.
+  - **In-Memory Overlay Inspection (`InspectSource`)**: Applies in-memory file overlays directly during AST parsing (`inspectOverlay`) without creating temporary directories or staging file copies on disk, accelerating LSP buffer diagnostics.
+  - **Metadata & Enrichment**: Extracts variables (types, defaults, `nullable`, `validation` rules, `deprecated`, source positions), outputs (types, `value` expressions, sensitivity, `module.*` delegations), module calls (forwarded inputs, raw expressions, `count`, `for_each`), managed/data resources (`provider` aliases, `count`, `for_each`, `lifecycle` flags, `provisioner` blocks, `triggers`, `triggers_replace`, `keepers`, destructive toggles, top-level attributes), `provider` block configurations (`region`, `project`, `assume_role`), `backend {}` / `cloud {}` configuration, and modern Terraform/OpenTofu blocks (`moved {}`, `removed {}`, `check {}`, `import {}`, `function {}`, `encryption {}`).
   - **L1 In-Memory & L2 Persistent Disk Cache (`cache.go`)**: Computes a pooled SHA-256 content fingerprint across module files, serves in-memory cache hits via zero-unmarshal struct cloning (`cloneModuleInfo`), and persists `<sha256>.json` entries (including versioned `source@version` snapshots via `CachedVersionModule` / `CacheVersionModule`) when `--cache-dir` is configured.
   - **Deep Type Compatibility**: Evaluates nested `object({ ... })` schemas and primitive/collection type transitions (`string`, `number`, `bool`, `list` → `set`, `any` widening vs narrowing).
 
@@ -69,6 +70,7 @@ flowchart TD
   - Canonicalizes version strings (ensuring standard `v` prefix).
   - Determines semver bump transitions: `MAJOR` (breaking), `MINOR` (features), `PATCH` (fixes), `DOWNGRADE`, `IDENTICAL`, and `INVALID`.
   - Filters non-semver tags and sorts the remainder deterministically in ascending order.
+  - **Constraint Range Analysis (`ParseConstraintRange`)**: Computes the closed/open interval of allowed versions (`MinVersion`, `MaxVersion`, `Exclusions`) for provider requirements, identifying upper-bound major narrowings (e.g. `< 6.0` to `< 5.0`) and `0.x` minor bumps as breaking changes.
 
 ### 3. `pkg/gitops` (Git Operations & Version Extraction)
 - **Engine**: Powered by `github.com/go-git/go-git/v5`.
@@ -83,38 +85,26 @@ flowchart TD
 
 ### 4. `pkg/registry` (Terraform Registry Protocol Client)
 - **Capabilities**:
-  - `IsRegistrySource` and `ParseRegistrySource` agree on exactly one grammar (`namespace/name/provider`,
-    optionally hostname-prefixed) and reject empty or URL-metacharacter components, so a malformed address can never
-    become a request against a partially empty, query-extended or path-redirected registry path.
-  - VCS and local sources are never registry addresses: `git::`, `git@`, any URL scheme (`git://`,
-    `ssh://`, `file://`, `http(s)://`), the `github.com/` and `bitbucket.org/` shorthands Terraform
-    expands into git URLs, and the `.git` repository suffix are all rejected by both functions.
-  - A module source can name the host every request goes to, so the client refuses link-local and
-    unspecified addresses (`169.254.0.0/16`, which contains the `169.254.169.254` cloud metadata
-    endpoint, `fe80::/10`, and `0.0.0.0/8`) on every connection, redirect and `X-Terraform-Get`
-    follow-up. The check runs after name resolution as well as on literal addresses, and a refusal
-    is reported immediately instead of being retried as a transient failure; public, RFC1918 and
-    loopback registry hosts stay reachable so private and development registries keep working.
-  - `X-Terraform-Get` may name any module source Terraform understands, but only `http(s)` archive
-    URLs can be downloaded here; a VCS source in the header is rejected with an error naming the
-    value rather than surfacing as an opaque URL parse failure.
-  - Native client implementing the official Terraform Registry Service Discovery protocol (`https://registry.terraform.io/v1/modules/...`).
+  - `IsRegistrySource` and `ParseRegistrySource` agree on exactly one grammar (`namespace/name/provider`, optionally hostname-prefixed) and reject empty or URL-metacharacter components.
+  - VCS and local sources are never registry addresses: `git::`, `git@`, any URL scheme (`git://`, `ssh://`, `file://`, `http(s)://`), the `github.com/` and `bitbucket.org/` shorthands Terraform expands into git URLs, and the `.git` repository suffix are all rejected by both functions.
+  - Refuses link-local and unspecified addresses (`169.254.0.0/16`, `fe80::/10`, and `0.0.0.0/8`) on every connection, redirect, and `X-Terraform-Get` follow-up.
+  - `X-Terraform-Get` archive extraction rejects entries that escape the destination directory.
   - Resolves available module versions and downloads release tarballs, retrying transient failures with exponential backoff.
-  - Extracts target modules and submodules into sandboxed directories for AST inspection, rejecting archive entries that escape the destination directory.
 
 ### 5. `pkg/diff` (Upstream Diff Comparator & Safe-Pin Recommender)
 - **Capabilities**:
-  - Compares two versions of an upstream module across interface declarations, internal resources, lifecycle gates, and modern HCL blocks.
+  - Compares two versions of an upstream module across interface declarations, internal resources, child module calls, lifecycle gates, and modern HCL blocks.
   - Categorizes differences with source positions (`Pos`) and evidence-based confidence scores (`[1, 10]`):
-    - **Breaking Changes**: Removed inputs/outputs/resources (`Variable`, `Output`, `Resource`), newly required inputs without defaults (`VariableRequirement`), changed variable defaults (`VariableDefault`), narrowed type constraints (`VariableType`, `OutputType`), disallowed `null` (`VariableNullability`), output value changes paired with type/sensitivity shifts (`OutputValue`), provider source changes (`ProviderSource`), provider major version upgrades (`ProviderMajorUpgrade`), resource provider/alias reassignments (`ResourceProvider`), newrequired provider aliases (`ProviderConfigurationAlias`), destructive `removed { destroy = true }` blocks (`RemovedDestroy`), removed `moved {}` state migrations (`StateMigrationRemoved`), removed custom `function` or `encryption` blocks, removed `lifecycle { prevent_destroy }`, added `replace_triggered_by` or destroy-time provisioners, `triggers` changes, and `backend {}` changes (`StateBackendChange`).
-    - **New Features**: Newly introduced optional inputs with defaults, new outputs, new managed/data resources, new `moved {}` migrations, soft `removed { destroy = false }` blocks, and newly added `check`, `import`, `function`, or `encryption` blocks.
-    - **Warnings**: Widened types (`list(string)` → `set(string)`), output `value` expression changes (`OutputValue`), validation rule changes (`VariableValidation`), sensitive/deprecation transitions, non-major provider constraint updates, removed or updated `required_version` (`TerraformCore`), narrowed `lifecycle { ignore_changes }`, removed `create_before_destroy`, and removed `check`, `import`, or `removed` blocks.
+    - **Breaking Changes**: Unmigrated resource address shifts (`AddressShift`), removed child modules (`ModuleCall`), child module source changes or major bumps (`ModuleCallSource`), child module indexing shifts (`ModuleCallIndex`), instance cardinality reductions (`ResourceCount`, `ResourceForEach`), resource-body `ForceNew` attribute modifications (`ResourceForceNew`), triggers/keepers modifications (`ResourceTriggers`), destruction protection disabled or accelerators enabled (`DestructiveAttribute`), provider block modifications (`ProviderConfig`), cloud backend changes (`StateBackendChange`), removed inputs/outputs/resources (`Variable`, `Output`, `Resource`), newly required inputs without defaults (`VariableRequirement`), changed variable defaults (`VariableDefault`), narrowed type constraints (`VariableType`, `OutputType`), disallowed `null` (`VariableNullability`), output value changes paired with type/sensitivity shifts (`OutputValue`), provider source changes (`ProviderSource`), provider major version upgrades (`ProviderMajorUpgrade`), resource provider/alias reassignments (`ResourceProvider`), new required provider aliases (`ProviderConfigurationAlias`), destructive `removed { destroy = true }` blocks (`RemovedDestroy`), removed `moved {}` state migrations (`StateMigrationRemoved`), and removed `lifecycle { prevent_destroy }`.
+    - **New Features**: Newly introduced optional inputs with defaults, new outputs, new managed/data resources, new child module calls, new `moved {}` migrations, soft `removed { destroy = false }` blocks, and newly added `check`, `import`, `function`, or `encryption` blocks.
+    - **Warnings**: Widened types (`list(string)` → `set(string)`), output `value` expression changes (`OutputValue`), validation rule changes (`VariableValidation`), check assertion modifications (`CheckBlockModified`), import ID changes (`ImportBlockModified`), local value or data selector drift (`LocalValue`, `DataSelector`), sensitive/deprecation transitions, non-major provider constraint updates, removed or updated `required_version` (`TerraformCore`), narrowed `lifecycle { ignore_changes }`, removed `create_before_destroy`, and removed `check`, `import`, or `removed` blocks.
+  - Directly attaches computed `AddressShifts` to `DiffReport` to avoid redundant multi-pass recomputation.
   - Computes high-level safety verdicts (`SAFE`, `BREAKING_CHANGES`, `WARNINGS_ONLY`, `DOWNGRADE`) and populates `SafePinVersion` and `SafePinRationale`.
 
 ### 6. `pkg/recreation` (ForceNew Destruction & Golden Plan Verification Engine)
 - **Capabilities**:
   - Encodes infrastructure destruction heuristics for immutable cloud resources (GKE cluster name, project ID, location, region, network, subnetwork and secondary subnet CIDR blocks; AWS EKS cluster name, VPC ID and cluster IP family; Azure AKS cluster name, resource group, location and DNS prefix).
-  - Auto-discovers provider schemas (`AutoDiscoverSchemas`) from `required_providers` or ingests `terraform providers schema -json` dumps (`LoadProviderSchema`) to build a `DynamicHazardRegistry` of `requires_replace` attributes.
+  - Auto-discovers provider schemas (`AutoDiscoverSchemas`) from `required_providers` or ingests `terraform providers schema -json` dumps (`LoadProviderSchema`) to build a `DynamicHazardRegistry` of `requires_replace` attributes. Schema files and descriptors are memoized in memory by file path, mtime, and size to avoid redundant disk I/O.
   - **Golden Plan & Pin-Update Execution Plan Verification**:
     - Ingests Terraform plan JSON (`terraform show -json <planfile>`) via `--golden-plan` or automated autodiscovery (`golden-plan.json`, `golden_plan.json`, `tfplan.json`, `plan.json`, `.terraform/golden-plan.json`, `.terraform/tfplan.json`).
     - Flattens and normalizes planned resources across `resource_changes`, top-level `resources`, and hierarchical `planned_values.root_module`.
@@ -124,40 +114,42 @@ flowchart TD
 ### 7. `pkg/blastradius` (Parallel Downstream Consumer & Environment Scanner)
 - **Capabilities**:
   - Executes a **two-phase parallel directory walk** (`discoverCallSites`): collects candidate `.tf`, `.tf.json`, and `terragrunt.hcl` paths in lexical order, then processes them across a bounded worker pool (`min(8, GOMAXPROCS)`) while preserving deterministic `(file, block)` ordering.
-  - Pre-filters `.tf` files with a fast byte scan (`bytes.Contains`) before parsing, parses each file once, and lazily extracts `module.<name>.<output>` references from the already-parsed `*hclsyntax.Body`.
+  - Pre-filters `.tf` files with a fast byte scan (`bytes.Contains`) before parsing, parses each file once, and lazily extracts `module.<name>.<output>` references from the already-parsed `*hclsyntax.Body` using token-boundary regex matching.
   - Pre-indexes wrapper audit issues (`buildAuditIndex`) once before evaluating call sites, avoiding $O(\text{call sites} \times \text{issues})$ rescanning.
   - Applies **evidence-gated hazard attribution**: attributes `MissingRequiredInput` to a consumer only when the wrapper exposes that variable, fires `RecreationHazards` only when the input is confirmed changed in the audit/upstream diff or registered in `DynamicHazardRegistry`, scores `AnalysisIncomplete` separately as `MEDIUM`, and emits `RiskDistribution` counts by risk level (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`).
 
 ### 8. `pkg/wrapper` (Wrapper Compatibility & Pin Analyzer)
 - **Capabilities**:
   - Audits a wrapper module against a target upstream module and optional pinned baseline (`pinnedMod`), with wrapper, target, and pinned modules inspected concurrently in CLI wrapper mode.
+  - Traces wrapper variable delegations across renamed variables using `call.InputExpressions` to catch type incompatibilities and nullability discrepancies.
   - Detects wrapper-specific breakages (`PassedRemovedInput`, `MissingRequiredInput`, `TypeMismatch`, `BrokenOutputDelegation`) and folds upstream breaking and warning counts from `UpstreamDiff` into `TotalBreaking` and `TotalWarnings` (`UpstreamBreaking`, `UpstreamWarnings`), preserving the safety equivalence $\text{TotalBreaking} = 0 \iff \text{CanSafelyUpdate}$.
   - Recommends exact version pinning syntax (`RecommendedPin`, `SafePinVersion`, `SafePinRationale`) and produces verdicts `SAFE_TO_PIN`, `WARNINGS_ONLY`, `UPSTREAM_BREAKING_CHANGES_DETECTED`, `BREAKING_CHANGES_DETECTED`, or `DOWNGRADE_DETECTED`.
 
 ### 9. `pkg/ast` Intermediate Representation (IR) & State Graph Theory
 - **The "Static AST Fallacy"**: Traditional Terraform static checkers compare module interfaces (variables and outputs). In the Terraform execution engine, however, state persistence is keyed strictly by **hierarchical instance addresses** (`module.vpc.aws_subnet.this["public"]`). If an internal module refactoring converts a singleton resource to an indexed one (`count` or `for_each`), switches `count` ↔ `for_each`, or changes submodule nesting, interface types remain identical while `terraform apply` destroys and recreates existing cloud resources.
 - **Canonical Address Model (`ResourceAddress`)**:
-  - Full hierarchical address decomposition: `[ModulePath].[Mode].[Type].[Name][[IndexKey]]`, recording `count` and `for_each` instance modes on both `ResourceDef` and `ModuleCallDef`.
+  - Full hierarchical address decomposition: `[ModulePath].[Mode].[Type].[Name][[IndexKey]]`, recording `count` and `for_each` instance modes on `ResourceDef`, `DataResourceDef`, and `ModuleCallDef` (`Mode == "module"`).
 - **Evaluation Graph (`EvaluationGraph`) & Deterministic Shift Detection**:
   - `DetectAddressShifts(oldMod, newMod)` scores candidate pairings deterministically across resource type, label, index mode (`count`/`for_each`), and module path.
-  - Transitions covered by an upstream `moved {}` block (`MovedBlocks`) have `IsRecreation` suppressed (`false`), while unmitigated renames, index transitions, or deletions are flagged with `IsRecreation: true`.
+  - Transitions covered by an upstream or wrapper `moved {}` block (`MovedBlocks`) have `IsRecreation` suppressed (`false`), while unmitigated renames, index transitions, or deletions are flagged with `IsRecreation: true`.
 
 ### 10. `pkg/codemod` (Automated Code Remediation & State Migration)
 - **Capabilities**:
   - In-place AST refactoring with `hclwrite` preserving comments, formatting, and file structure.
-  - Removes obsolete module-call arguments (`ApplyRemovedInputs`) and injects newly required upstream inputs (`AddMissingInputs`) using safe primitive placeholders (`""` for `string`, `false` for `bool`, `0` for `number`), refusing with exit code 2 when a complex type requires manual input.
-  - Automated `moved {}` block synthesis: `SynthesizeMovedBlocksForShifts` maps detected AST address shifts into Terraform 1.1+ `moved {}` blocks while skipping addresses already covered by upstream `MovedBlocks` (`CoveredMovedAddresses`).
+  - Removes obsolete module-call arguments (`ApplyRemovedInputs`) and injects newly required upstream inputs (`AddMissingInputs`) using safe typed cty literals (`cty.StringVal` for `string`, `cty.BoolVal` for `bool`, `cty.NumberIntVal` for `number`), refusing with exit code 2 when a complex type requires manual input.
+  - Automated `moved {}` block synthesis: `SynthesizeMovedBlocksForShifts` maps detected AST address shifts into Terraform 1.1+ `moved {}` blocks while stripping synthetic index markers (`[count]`, `[for_each]`) and skipping addresses already covered by upstream or wrapper `MovedBlocks` (`CoveredMovedAddresses`).
 
 ### 11. `pkg/policy` (Prepared Open Policy Agent OPA & Rego v1 Governance)
 - **Engine**: Official Open Policy Agent Go SDK (`github.com/open-policy-agent/opa/v1/rego`).
 - **Capabilities**:
   - Compiles and prepares Rego queries once per `RegoPolicy` (`rego.PrepareForEval` cached on `RegoPolicy`) and reuses the prepared query across multi-step upgrade paths.
+  - Memoizes marshalled report maps in memory keyed by report pointer (`uintptr`), avoiding duplicate serialization during policy evaluation.
   - Evaluates standard OPA Rego policies (`deny`, `violation`, `violations`, `warn`) and JSON policies against structured findings (`input.breaking_changes`, `input.bump_type`, `input.blast_radius`, `input.report`).
   - Fail-closed security architecture: compile errors or unknown rule blocks fail explicitly.
 
 ### 12. `pkg/report` (Multi-Format Reporting & Line-Exact SARIF Exporter)
 - **Capabilities**:
-  - Renders both direct diffs and wrapper audits (including `UpstreamDiff` breaking changes, address shifts, recreation hazards, taint traces, blast radius, and golden plan verifications) with full parity across Terminal Text, GitHub-Flavored Markdown, JSON, and **OASIS SARIF v2.1.0**.
+  - Renders both direct diffs and wrapper audits (including `UpstreamDiff` breaking changes, address shifts, recreation hazards, taint traces, blast radius, and golden plan verifications) with full parity across Terminal Text, GitHub-Flavored Markdown (`### Resource Address Shifts`), JSON, and **OASIS SARIF v2.1.0**.
   - Emits real 1-based declaration line numbers (`Pos.Line`) in SARIF `physicalLocation.region.startLine` and advertises rules `TF-DIFF-BREAKING-CHANGE`, `TF-DIFF-WARNING`, `TF-ADDRESS-SHIFT`, `TF-RECREATION-HAZARD`, `TF-WRAPPER-ISSUE`, `TF-UPSTREAM-BREAKING-CHANGE`, `TF-TAINT-REACHABLE`, and `TF-BLAST-RADIUS-CONSUMER`.
 
 ### 13. `pkg/planner` — Plan Executor for Pin Updates & Multi-Version Upgrade Paths

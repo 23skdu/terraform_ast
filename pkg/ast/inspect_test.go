@@ -810,49 +810,38 @@ func TestInspectSource_RejectsUnparsableBuffer(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// TestInspectSource_StagingFailureIsReported covers an unwritable staging destination.
-func TestInspectSource_StagingFailureIsReported(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: directory permissions are not enforced")
-	}
+// TestInspectSource_NewOverlaidFiles covers overlaid files that do not exist on disk yet,
+// both .tf and .tf.json.
+func TestInspectSource_NewOverlaidFiles(t *testing.T) {
 	dir := writeModule(t, map[string]string{"main.tf": "variable \"a\" {\n  type = string\n}\n"})
 	isolateModuleCache(t)
 
-	// Point TMPDIR at a read-only directory so MkdirTemp fails.
-	blocked := t.TempDir()
-	require.NoError(t, os.Chmod(blocked, 0o500))
-	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
-	t.Setenv("TMPDIR", blocked)
+	// An unsaved new file
+	newFile := filepath.Join(dir, "new.tf")
+	info, err := InspectSource(dir, newFile, "variable \"brand_new\" {\n  type = string\n}\n")
+	require.NoError(t, err)
+	assert.Contains(t, info.Variables, "a")
+	assert.Contains(t, info.Variables, "brand_new")
 
-	_, err := InspectSource(dir, filepath.Join(dir, "main.tf"), "variable \"b\" {\n  type = string\n}\n")
+	// An unsaved new .tf.json file
+	newJSON := filepath.Join(dir, "new.tf.json")
+	infoJSON, err := InspectSource(dir, newJSON, `{"variable": {"json_var": {"type": "string"}}}`)
+	require.NoError(t, err)
+	assert.Contains(t, infoJSON.Variables, "json_var")
+
+	// Invalid overlay syntax in new file
+	_, err = InspectSource(dir, filepath.Join(dir, "broken.tf"), "variable { broken")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to stage module overlay")
-}
 
-// TestInspectSource_StagingWriteFailureIsReported covers a staging directory that disappears
-// between creation and use, which makes the per-file write fail.
-func TestInspectSource_StagingWriteFailureIsReported(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: directory permissions are not enforced")
-	}
-	isolateModuleCache(t)
+	// Overlay targeting a subpath outside top-level module
+	infoSub, err := InspectSource(dir, filepath.Join(dir, "child/sub.tf"), "variable \"sub\" { type = string }")
+	require.NoError(t, err)
+	assert.NotContains(t, infoSub.Variables, "sub")
 
-	dir := writeModule(t, map[string]string{
-		"main.tf":   "variable \"a\" {\n  type = string\n}\n",
-		"second.tf": "variable \"b\" {\n  type = string\n}\n",
-	})
-
-	// A staging root that is read-only after creation: MkdirTemp under it succeeds only if the
-	// parent allows it, so instead make the staged copy unwritable by removing write permission
-	// on the directory the temp file lands in.
-	root := t.TempDir()
-	t.Setenv("TMPDIR", root)
-	require.NoError(t, os.Chmod(root, 0o500))
-	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
-
-	_, err := InspectSource(dir, filepath.Join(dir, "main.tf"), "variable \"c\" {\n  type = string\n}\n")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to stage module overlay")
+	// Overlay targeting a non-tf file
+	infoTxt, err := InspectSource(dir, filepath.Join(dir, "readme.txt"), "some content")
+	require.NoError(t, err)
+	assert.Contains(t, infoTxt.Variables, "a")
 }
 
 // TestRebasePath covers the path rewrite directly, including the cases that must be left alone.
@@ -889,41 +878,6 @@ func TestInspectSource_IgnoresNestedSubtree(t *testing.T) {
 	assert.Contains(t, info.Variables, "buffered")
 	assert.NotContains(t, info.Variables, "child", "a nested module is not part of its parent")
 	assert.NotContains(t, info.Variables, "child2")
-}
-
-// TestStageModuleFiles_ReadFailureIsReported covers the staging copy failing to enumerate the
-// module directory. Reported rather than ignored, since an unreadable module cannot be analysed.
-func TestStageModuleFiles_ReadFailureIsReported(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: directory permissions are not enforced")
-	}
-	dir := t.TempDir()
-	require.NoError(t, os.Chmod(dir, 0o000))
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-
-	err := stageModuleFiles(dir, t.TempDir(), nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to read module directory")
-}
-
-// TestStageModuleFiles_WriteFailureIsReported covers a staging destination that rejects writes.
-// The file must not be skipped silently: a missing declaration would be analysed as if the module
-// never declared it.
-func TestStageModuleFiles_WriteFailureIsReported(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: directory permissions are not enforced")
-	}
-	source := writeModule(t, map[string]string{
-		"main.tf": "variable \"a\" {\n  type = string\n}\n",
-	})
-
-	staging := t.TempDir()
-	require.NoError(t, os.Chmod(staging, 0o500))
-	t.Cleanup(func() { _ = os.Chmod(staging, 0o700) })
-
-	err := stageModuleFiles(source, staging, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to stage main.tf")
 }
 
 func TestInspect_ResourcesAndRebase(t *testing.T) {

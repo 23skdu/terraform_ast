@@ -69,13 +69,55 @@ A breaking change is any modification that will prevent existing wrapper code or
 - **Impact**: Existing state instances are destroyed or fail provider resolution unless migrated.
 - **Verdict**: `BREAKING`.
 
-### Lifecycle, Provisioner & State Backend Changes (`Lifecycle`, `Provisioner`, `Triggers`, `StateBackendChange`)
+### Unmigrated Resource Address Shifts (`AddressShift`)
+- **Condition**: An internal resource or module address moves (renamed, indexed, or relocated) without an upstream `moved {}` declaration covering the transition.
+- **Impact**: Terraform treats the old address as destroyed and the new address as newly created, triggering unmigrated state destruction.
+- **Verdict**: `BREAKING` (`Category: "AddressShift"`, `ConfidenceScore = 9/10`).
+
+### Nested Child Module Call Transitions (`ModuleCall`, `ModuleCallSource`, `ModuleCallIndex`)
 - **Condition**:
-  - `lifecycle { prevent_destroy = true }` is removed (`Lifecycle`).
-  - `lifecycle { replace_triggered_by = [...] }` is added (`Lifecycle`).
-  - A destroy-time `provisioner` (`when = destroy`) is added (`Provisioner`), or resource `triggers` change (`Triggers`).
-  - `terraform { backend "..." { ... } }` changes backend type or key attributes (`bucket`, `key`, `region`) (`StateBackendChange`).
-- **Verdict**: `BREAKING`. (Removing `create_before_destroy` or narrowing `ignore_changes` is classified as `WARNING`).
+  - A child `module "..." {}` call is removed from an upstream module without a covering `moved {}` or soft `removed {}` block (`ModuleCall` → `BREAKING`).
+  - An existing child `module` call changes its `source` or bumps its major `version` constraint (`ModuleCallSource` → `BREAKING`).
+  - An existing child `module` call transitions between singleton, `count`, and `for_each` indexing modes (`ModuleCallIndex` → `BREAKING`).
+- **Impact**: Removing or relocating a child module call destroys its entire state subtree during `terraform apply`.
+
+### Instance Cardinality & Count / ForEach Destruction (`ResourceCount`, `ResourceForEach`)
+- **Condition**:
+  - Literal integer `count` reduction ($n_{\text{new}} < n_{\text{old}}$) or explicit `count = 0` (`ResourceCount` → `BREAKING`).
+  - Static `for_each` key-set shrinkage (e.g. `toset(["a", "b"])` → `toset(["a"])`) (`ResourceForEach` → `BREAKING`).
+  - Dynamic `count` or `for_each` expression drift (`WARNING`, promoted to `BREAKING` if evaluated to empty or 0).
+- **Impact**: Higher-indexed instances ($[n_{\text{new}} \dots n_{\text{old}}-1]$) or omitted keys are immediately destroyed in cloud state.
+
+### Resource-Body ForceNew Attribute Modifications (`ResourceForceNew`)
+- **Condition**: An attribute defined directly on a managed `resource` block changes value between versions, and the attribute is confirmed as `ForceNew` (`requires_replace`) by built-in cloud heuristics or dynamic provider schemas.
+- **Impact**: In-place updates are rejected by the cloud provider, forcing resource destruction and recreation.
+- **Verdict**: `BREAKING` (`Category: "ResourceForceNew"`, `ConfidenceScore = 10/10` with schema evidence).
+
+### Destructive Protection Toggles & Triggers (`ResourceTriggers`, `DestructiveAttribute`)
+- **Condition**:
+  - `triggers`, `triggers_replace` (`terraform_data`), or `keepers` (`random_*`) attribute expressions change (`ResourceTriggers` → `BREAKING`).
+  - Destruction safeguards are disabled (`deletion_protection = false` or `purge_protection_enabled = false`) (`DestructiveAttribute` → `BREAKING`).
+  - Destruction accelerators are enabled (`force_destroy = true` or `skip_final_snapshot = true`) (`DestructiveAttribute` → `BREAKING`).
+- **Verdict**: `BREAKING` (`ConfidenceScore = 9/10`).
+
+### Lifecycle List Mutations & Checks (`Lifecycle`, `CheckBlockModified`, `ImportBlockModified`)
+- **Condition**:
+  - `lifecycle { prevent_destroy = true }` is removed (`Lifecycle` → `BREAKING`).
+  - `lifecycle { replace_triggered_by = [...] }` is added or has targets expanded (`Lifecycle` → `BREAKING`).
+  - `lifecycle { ignore_changes = [...] }` is narrowed, has elements removed, or transitions from `all` to a subset (`WARNING`, promoted to `BREAKING` if target attribute is `ForceNew`).
+  - A destroy-time `provisioner` (`when = destroy`) is added (`Provisioner` → `BREAKING`).
+  - A `check {}` assertion condition is altered or weakened (`CheckBlockModified` → `WARNING`).
+  - An `import {}` block changes its target `id` for the same resource address (`ImportBlockModified` → `BREAKING`).
+
+### Provider Configuration & State Backend Changes (`ProviderConfig`, `StateBackendChange`)
+- **Condition**:
+  - `terraform { backend "..." { ... } }` or `terraform { cloud { ... } }` changes organization, workspace, backend type, or key attributes (`StateBackendChange` → `BREAKING`).
+  - A `provider "..." {}` block changes its `region`, `project`, `subscription_id`, or `assume_role` configuration (`ProviderConfig` → `BREAKING`).
+- **Impact**: Modifies target deployment cloud tenant or state storage destination, risking cross-account state or resource corruption.
+
+### Local Value & Data Selector Drift (`LocalValue`, `DataSelector`)
+- **Condition**: A `locals {}` expression or `data` source selector (`filter`, `most_recent`, `owners`) changes value and is referenced by an attribute of a managed resource.
+- **Verdict**: `WARNING`, promoted to `BREAKING` if the downstream resource attribute is `ForceNew`.
 
 ### Modern HCL & OpenTofu Block Transitions (`RemovedDestroy`, `StateMigrationRemoved`, `Function`, `Encryption`)
 - **Condition**:

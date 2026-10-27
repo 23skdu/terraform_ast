@@ -49,6 +49,8 @@ func cloneModuleInfo(src *ModuleInfo) *ModuleInfo {
 	dst.Functions = maps.Clone(src.Functions)
 	dst.ManagedResources = maps.Clone(src.ManagedResources)
 	dst.DataResources = maps.Clone(src.DataResources)
+	dst.ProviderConfigs = maps.Clone(src.ProviderConfigs)
+	dst.Locals = maps.Clone(src.Locals)
 	dst.RemovedBlocks = slices.Clone(src.RemovedBlocks)
 	dst.MovedBlocks = slices.Clone(src.MovedBlocks)
 	dst.ImportBlocks = slices.Clone(src.ImportBlocks)

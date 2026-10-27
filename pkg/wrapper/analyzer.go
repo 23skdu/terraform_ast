@@ -2,6 +2,7 @@ package wrapper
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -192,42 +193,88 @@ func AnalyzeWrapper(
 
 	// 4. Check wrapper variable type consistency against target upstream. Iterated in name order so
 	// the report is stable across runs.
-	for _, varName := range sortedKeys(wrapperMod.Variables) {
-		wVar := wrapperMod.Variables[varName]
-		if upVar, exists := targetUpstream.Variables[varName]; exists {
-			wrapperNullable := wVar.Nullable == nil || *wVar.Nullable
-			upstreamNullable := upVar.Nullable == nil || *upVar.Nullable
-			if wrapperNullable && !upstreamNullable {
-				report.Issues = append(report.Issues, WrapperIssue{
-					Severity:    diff.SeverityBreaking,
-					Category:    "VariableNullability",
-					Target:      varName,
-					Description: fmt.Sprintf("Wrapper variable '%s' accepts null, but upstream no longer does", varName),
-					Remediation: fmt.Sprintf("Reject null values for variable \"%s\" in the wrapper", varName),
-					Pos:         wVar.Pos,
-				})
-			}
+	type varMapping struct {
+		wrapperVar  string
+		upstreamVar string
+	}
+	var mappings []varMapping
+	seenPairs := make(map[string]bool)
 
-			typeCompat := ast.CheckTypeCompatibility(wVar.Type, upVar.Type)
-			if typeCompat.IsBreaking {
-				report.Issues = append(report.Issues, WrapperIssue{
-					Severity:    diff.SeverityBreaking,
-					Category:    "TypeMismatch",
-					Target:      varName,
-					Description: fmt.Sprintf("Wrapper variable '%s' type '%s' is incompatible with upstream expected type '%s'", varName, wVar.Type, upVar.Type),
-					Remediation: fmt.Sprintf("Update variable \"%s\" in wrapper to type = %s", varName, upVar.Type),
-					Pos:         wVar.Pos,
-				})
-			} else if wVar.Type != upVar.Type {
-				report.Issues = append(report.Issues, WrapperIssue{
-					Severity:    diff.SeverityWarning,
-					Category:    "TypeMismatch",
-					Target:      varName,
-					Description: fmt.Sprintf("Wrapper variable '%s' type '%s' differs from upstream '%s': %s", varName, wVar.Type, upVar.Type, typeCompat.Reason),
-					Remediation: fmt.Sprintf("Align variable \"%s\" with upstream type", varName),
-					Pos:         wVar.Pos,
-				})
+	// Direct name matching
+	for _, varName := range sortedKeys(wrapperMod.Variables) {
+		if _, exists := targetUpstream.Variables[varName]; exists {
+			key := varName + ":" + varName
+			if !seenPairs[key] {
+				seenPairs[key] = true
+				mappings = append(mappings, varMapping{wrapperVar: varName, upstreamVar: varName})
 			}
+		}
+	}
+
+	// Trace wrapper InputExpressions across renamed variables (#121)
+	// e.g. region = var.custom_region
+	varVarRe := regexp.MustCompile(`\bvar\.([a-zA-Z0-9_-]+)\b`)
+	for _, call := range calls {
+		for _, upInput := range sortedKeys(call.InputExpressions) {
+			expr := call.InputExpressions[upInput]
+			matches := varVarRe.FindAllStringSubmatch(expr, -1)
+			for _, m := range matches {
+				wVarName := m[1]
+				if _, okW := wrapperMod.Variables[wVarName]; okW {
+					if _, okU := targetUpstream.Variables[upInput]; okU {
+						key := wVarName + ":" + upInput
+						if !seenPairs[key] {
+							seenPairs[key] = true
+							mappings = append(mappings, varMapping{wrapperVar: wVarName, upstreamVar: upInput})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	sort.Slice(mappings, func(i, j int) bool {
+		if mappings[i].wrapperVar != mappings[j].wrapperVar {
+			return mappings[i].wrapperVar < mappings[j].wrapperVar
+		}
+		return mappings[i].upstreamVar < mappings[j].upstreamVar
+	})
+
+	for _, m := range mappings {
+		wVar := wrapperMod.Variables[m.wrapperVar]
+		upVar := targetUpstream.Variables[m.upstreamVar]
+		wrapperNullable := wVar.Nullable == nil || *wVar.Nullable
+		upstreamNullable := upVar.Nullable == nil || *upVar.Nullable
+		if wrapperNullable && !upstreamNullable {
+			report.Issues = append(report.Issues, WrapperIssue{
+				Severity:    diff.SeverityBreaking,
+				Category:    "VariableNullability",
+				Target:      m.wrapperVar,
+				Description: fmt.Sprintf("Wrapper variable '%s' accepts null, but upstream no longer does", m.wrapperVar),
+				Remediation: fmt.Sprintf("Reject null values for variable \"%s\" in the wrapper", m.wrapperVar),
+				Pos:         wVar.Pos,
+			})
+		}
+
+		typeCompat := ast.CheckTypeCompatibility(wVar.Type, upVar.Type)
+		if typeCompat.IsBreaking {
+			report.Issues = append(report.Issues, WrapperIssue{
+				Severity:    diff.SeverityBreaking,
+				Category:    "TypeMismatch",
+				Target:      m.wrapperVar,
+				Description: fmt.Sprintf("Wrapper variable '%s' type '%s' is incompatible with upstream expected type '%s'", m.wrapperVar, wVar.Type, upVar.Type),
+				Remediation: fmt.Sprintf("Update variable \"%s\" in wrapper to type = %s", m.wrapperVar, upVar.Type),
+				Pos:         wVar.Pos,
+			})
+		} else if wVar.Type != upVar.Type {
+			report.Issues = append(report.Issues, WrapperIssue{
+				Severity:    diff.SeverityWarning,
+				Category:    "TypeMismatch",
+				Target:      m.wrapperVar,
+				Description: fmt.Sprintf("Wrapper variable '%s' type '%s' differs from upstream '%s': %s", m.wrapperVar, wVar.Type, upVar.Type, typeCompat.Reason),
+				Remediation: fmt.Sprintf("Align variable \"%s\" with upstream type", m.wrapperVar),
+				Pos:         wVar.Pos,
+			})
 		}
 	}
 

@@ -518,3 +518,41 @@ func TestSortedKeys(t *testing.T) {
 	assert.Equal(t, []string{"a", "b", "z"}, sortedKeys(map[string]int{"z": 1, "a": 2, "b": 3}))
 	assert.Empty(t, sortedKeys(map[string]int{}))
 }
+
+func TestAnalyzeWrapper_RenamedInputExpressions(t *testing.T) {
+	wrapperMod := &ast.ModuleInfo{
+		ModuleCalls: map[string]ast.ModuleCallDef{
+			"vpc": {
+				Name:         "vpc",
+				Source:       "./upstream",
+				PassedInputs: []string{"region", "zone"},
+				InputExpressions: map[string]string{
+					"region": "var.custom_region",
+					"zone":   "var.custom_region",
+				},
+			},
+		},
+		Variables: map[string]ast.VariableDef{
+			"custom_region": {Name: "custom_region", Type: "number"},
+		},
+		Outputs: map[string]ast.OutputDef{},
+	}
+	targetUpstream := &ast.ModuleInfo{
+		Variables: map[string]ast.VariableDef{
+			"region": {Name: "region", Type: "string"},
+			"zone":   {Name: "zone", Type: "string"},
+		},
+		Outputs: map[string]ast.OutputDef{},
+	}
+
+	report := AnalyzeWrapper(wrapperMod, targetUpstream, nil, "v2.0.0", "")
+	assert.NotEmpty(t, report.Issues)
+	var found bool
+	for _, issue := range report.Issues {
+		if issue.Category == "TypeMismatch" && issue.Target == "custom_region" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected TypeMismatch on custom_region")
+}

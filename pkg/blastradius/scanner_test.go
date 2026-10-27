@@ -1382,8 +1382,7 @@ resource "null_resource" "noop" {}
 			{Category: "PassedRemovedInput", Target: "obsolete", Severity: diff.SeverityBreaking},
 		},
 	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _ = ScanDirectory(root, "gke_wrapper", nil, audit)
 	}
 }

@@ -500,12 +500,19 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		}
 		var movedBlocksPreview string
 		if pinnedInfo != nil && targetInfo != nil {
-			shifts := ast.DetectAddressShifts(pinnedInfo, targetInfo)
+			var shifts []ast.ResourceAddressShift
+			if res.UpstreamDiff != nil {
+				shifts = res.UpstreamDiff.AddressShifts
+			}
 			if len(shifts) > 0 {
-				var covered map[string]struct{}
+				var allMoved []ast.MovedBlockDef
 				if targetInfo != nil {
-					covered = codemod.CoveredMovedAddresses(targetInfo.MovedBlocks)
+					allMoved = append(allMoved, targetInfo.MovedBlocks...)
 				}
+				if wInfo != nil {
+					allMoved = append(allMoved, wInfo.MovedBlocks...)
+				}
+				covered := codemod.CoveredMovedAddresses(allMoved)
 				blocks := codemod.SynthesizeMovedBlocksForShifts(shifts, covered)
 				if len(blocks) > 0 {
 					movedTf := filepath.Join(wrapperPath, "moved.tf")
@@ -585,12 +592,19 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 			modified = append(modified, added...)
 		}
 		if pinnedInfo != nil && targetInfo != nil {
-			shifts := ast.DetectAddressShifts(pinnedInfo, targetInfo)
+			var shifts []ast.ResourceAddressShift
+			if res.UpstreamDiff != nil {
+				shifts = res.UpstreamDiff.AddressShifts
+			}
 			if len(shifts) > 0 {
-				var covered map[string]struct{}
+				var allMoved []ast.MovedBlockDef
 				if targetInfo != nil {
-					covered = codemod.CoveredMovedAddresses(targetInfo.MovedBlocks)
+					allMoved = append(allMoved, targetInfo.MovedBlocks...)
 				}
+				if wInfo != nil {
+					allMoved = append(allMoved, wInfo.MovedBlocks...)
+				}
+				covered := codemod.CoveredMovedAddresses(allMoved)
 				movedFile := filepath.Join(wrapperPath, "moved.tf")
 				if err := codemod.SynthesizeAndWriteMovedBlocks(movedFile, shifts, covered); err != nil {
 					_, _ = fmt.Fprintf(stderr, "Error writing moved blocks: %v\n", err)
@@ -621,8 +635,8 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 	canSafelyUpdate := res.CanSafelyUpdate
 
 	findings := report.Findings{}
-	if pinnedInfo != nil && targetInfo != nil {
-		findings.AddressShifts = ast.DetectAddressShifts(pinnedInfo, targetInfo)
+	if pinnedInfo != nil && targetInfo != nil && res.UpstreamDiff != nil {
+		findings.AddressShifts = res.UpstreamDiff.AddressShifts
 	}
 	if checkRecreation {
 		if dynamicRegistry == nil {
@@ -634,7 +648,7 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 	if taintVar != "" {
 		vlog("Analyzing taint for input variable var.%s", taintVar)
 		var err error
-		taintReport, err = analyzeVariableTaint(wrapperPath, taintVar)
+		taintReport, err = analyzeVariableTaint(wrapperPath, taintVar, wInfo.ParsedBodies)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error analyzing variable taint: %v\n", err)
 			return 1
@@ -721,100 +735,168 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		}
 	}()
 
-	actualOld := oldPath
-	if registry.IsRegistrySource(oldPath) {
-		tmpOld, err := mkdirTemp("", "tf_registry_old_*")
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "Error creating temp dir: %v\n", err)
-			return 1
+	var (
+		oldInfo   *ast.ModuleInfo
+		newInfo   *ast.ModuleInfo
+		actualOld = oldPath
+		actualNew = newPath
+		oldErr    string
+		newErr    string
+		cleanupMu sync.Mutex
+	)
+
+	// Check persistent cache first if versions are known (#127)
+	if oldVersion != "" {
+		if cached, ok := ast.CachedVersionModule(oldPath, oldVersion); ok {
+			oldInfo = cached
 		}
-		cleanupDirs = append(cleanupDirs, tmpOld)
-		client := registryClient(registryTimeout)
-		ver := oldVersion
-		if ver == "" {
-			regCtx, cancel := registryContext(ctx, registryTimeout)
-			ver, err = client.GetLatestVersion(regCtx, oldPath)
-			cancel()
-			if err != nil {
-				// Previously ignored, which silently analysed an unspecified version.
-				_, _ = fmt.Fprintf(stderr, "Error resolving the latest version of %s: %v\n", oldPath, err)
-				return 1
-			}
+	}
+	if newVersion != "" {
+		if cached, ok := ast.CachedVersionModule(newPath, newVersion); ok {
+			newInfo = cached
 		}
-		vlog("Downloading old module version %s@%s", oldPath, ver)
-		regCtx, cancel := registryContext(ctx, registryTimeout)
-		err = client.DownloadModule(regCtx, oldPath, ver, tmpOld)
-		cancel()
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "Error checking out old version: %v\n", err)
-			return 1
-		}
-		actualOld = tmpOld
-		if sub := registry.SubmodulePath(oldPath); sub != "" {
-			actualOld = filepath.Join(tmpOld, sub)
-		}
-	} else if isGitURL(oldPath) || (oldVersion != "" && isGitRepo(oldPath)) {
-		vlog("Checking out old repository version %s from %s", oldVersion, oldPath)
-		tmpOld, err := gitops.GlobalCache.GetOrExtract(oldPath, oldVersion, newCachedDir("tf_old_*"))
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "Error checking out old version: %v\n", err)
-			return 1
-		}
-		actualOld = tmpOld
 	}
 
-	actualNew := newPath
-	if registry.IsRegistrySource(newPath) {
-		tmpNew, err := mkdirTemp("", "tf_registry_new_*")
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "Error creating temp dir: %v\n", err)
-			return 1
-		}
-		cleanupDirs = append(cleanupDirs, tmpNew)
-		client := registryClient(registryTimeout)
-		ver := newVersion
-		if ver == "" {
-			regCtx, cancel := registryContext(ctx, registryTimeout)
-			ver, err = client.GetLatestVersion(regCtx, newPath)
-			cancel()
-			if err != nil {
-				_, _ = fmt.Fprintf(stderr, "Error resolving the latest version of %s: %v\n", newPath, err)
-				return 1
+	var fetchWG sync.WaitGroup
+	if oldInfo == nil {
+		fetchWG.Add(1)
+		go func() {
+			defer fetchWG.Done()
+			if registry.IsRegistrySource(oldPath) {
+				tmpOld, err := mkdirTemp("", "tf_registry_old_*")
+				if err != nil {
+					oldErr = fmt.Sprintf("Error creating temp dir: %v", err)
+					return
+				}
+				cleanupMu.Lock()
+				cleanupDirs = append(cleanupDirs, tmpOld)
+				cleanupMu.Unlock()
+				client := registryClient(registryTimeout)
+				ver := oldVersion
+				if ver == "" {
+					regCtx, cancel := registryContext(ctx, registryTimeout)
+					ver, err = client.GetLatestVersion(regCtx, oldPath)
+					cancel()
+					if err != nil {
+						oldErr = fmt.Sprintf("Error resolving the latest version of %s: %v", oldPath, err)
+						return
+					}
+				}
+				vlog("Downloading old module version %s@%s", oldPath, ver)
+				regCtx, cancel := registryContext(ctx, registryTimeout)
+				err = client.DownloadModule(regCtx, oldPath, ver, tmpOld)
+				cancel()
+				if err != nil {
+					oldErr = fmt.Sprintf("Error checking out old version: %v", err)
+					return
+				}
+				actualOld = tmpOld
+				if sub := registry.SubmodulePath(oldPath); sub != "" {
+					actualOld = filepath.Join(tmpOld, sub)
+				}
+			} else if isGitURL(oldPath) || (oldVersion != "" && isGitRepo(oldPath)) {
+				vlog("Checking out old repository version %s from %s", oldVersion, oldPath)
+				tmpOld, err := gitops.GlobalCache.GetOrExtract(oldPath, oldVersion, newCachedDir("tf_old_*"))
+				if err != nil {
+					oldErr = fmt.Sprintf("Error checking out old version: %v", err)
+					return
+				}
+				actualOld = tmpOld
 			}
-		}
-		vlog("Downloading new module version %s@%s", newPath, ver)
-		regCtx, cancel := registryContext(ctx, registryTimeout)
-		err = client.DownloadModule(regCtx, newPath, ver, tmpNew)
-		cancel()
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "Error checking out new version: %v\n", err)
-			return 1
-		}
-		actualNew = tmpNew
-		if sub := registry.SubmodulePath(newPath); sub != "" {
-			actualNew = filepath.Join(tmpNew, sub)
-		}
-	} else if isGitURL(newPath) || (newVersion != "" && isGitRepo(newPath)) {
-		vlog("Checking out new repository version %s from %s", newVersion, newPath)
-		tmpNew, err := gitops.GlobalCache.GetOrExtract(newPath, newVersion, newCachedDir("tf_new_*"))
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "Error checking out new version: %v\n", err)
-			return 1
-		}
-		actualNew = tmpNew
+		}()
 	}
 
-	vlog("Inspecting modules in parallel: %s and %s", actualOld, actualNew)
-	modules, err := ast.InspectModulesParallel(ctx, []string{actualOld, actualNew}, 2)
-	if err != nil {
-		if strings.Contains(err.Error(), actualOld) {
-			_, _ = fmt.Fprintf(stderr, "Error comparing modules: inspecting old module %s: %v\n", actualOld, err)
-		} else {
-			_, _ = fmt.Fprintf(stderr, "Error comparing modules: inspecting new module %s: %v\n", actualNew, err)
-		}
+	if newInfo == nil {
+		fetchWG.Add(1)
+		go func() {
+			defer fetchWG.Done()
+			if registry.IsRegistrySource(newPath) {
+				tmpNew, err := mkdirTemp("", "tf_registry_new_*")
+				if err != nil {
+					newErr = fmt.Sprintf("Error creating temp dir: %v", err)
+					return
+				}
+				cleanupMu.Lock()
+				cleanupDirs = append(cleanupDirs, tmpNew)
+				cleanupMu.Unlock()
+				client := registryClient(registryTimeout)
+				ver := newVersion
+				if ver == "" {
+					regCtx, cancel := registryContext(ctx, registryTimeout)
+					ver, err = client.GetLatestVersion(regCtx, newPath)
+					cancel()
+					if err != nil {
+						newErr = fmt.Sprintf("Error resolving the latest version of %s: %v", newPath, err)
+						return
+					}
+				}
+				vlog("Downloading new module version %s@%s", newPath, ver)
+				regCtx, cancel := registryContext(ctx, registryTimeout)
+				err = client.DownloadModule(regCtx, newPath, ver, tmpNew)
+				cancel()
+				if err != nil {
+					newErr = fmt.Sprintf("Error checking out new version: %v", err)
+					return
+				}
+				actualNew = tmpNew
+				if sub := registry.SubmodulePath(newPath); sub != "" {
+					actualNew = filepath.Join(tmpNew, sub)
+				}
+			} else if isGitURL(newPath) || (newVersion != "" && isGitRepo(newPath)) {
+				vlog("Checking out new repository version %s from %s", newVersion, newPath)
+				tmpNew, err := gitops.GlobalCache.GetOrExtract(newPath, newVersion, newCachedDir("tf_new_*"))
+				if err != nil {
+					newErr = fmt.Sprintf("Error checking out new version: %v", err)
+					return
+				}
+				actualNew = tmpNew
+			}
+		}()
+	}
+	fetchWG.Wait()
+
+	if oldErr != "" {
+		_, _ = fmt.Fprintln(stderr, oldErr)
 		return 1
 	}
-	oldInfo, newInfo := modules[0], modules[1]
+	if newErr != "" {
+		_, _ = fmt.Fprintln(stderr, newErr)
+		return 1
+	}
+
+	var inspectDirs []string
+	if oldInfo == nil {
+		inspectDirs = append(inspectDirs, actualOld)
+	}
+	if newInfo == nil {
+		inspectDirs = append(inspectDirs, actualNew)
+	}
+	if len(inspectDirs) > 0 {
+		vlog("Inspecting modules in parallel: %s", strings.Join(inspectDirs, " and "))
+		modules, err := ast.InspectModulesParallel(ctx, inspectDirs, len(inspectDirs))
+		if err != nil {
+			if strings.Contains(err.Error(), actualOld) {
+				_, _ = fmt.Fprintf(stderr, "Error comparing modules: inspecting old module %s: %v\n", actualOld, err)
+			} else {
+				_, _ = fmt.Fprintf(stderr, "Error comparing modules: inspecting new module %s: %v\n", actualNew, err)
+			}
+			return 1
+		}
+		idx := 0
+		if oldInfo == nil {
+			oldInfo = modules[idx]
+			idx++
+			if oldVersion != "" {
+				ast.CacheVersionModule(oldPath, oldVersion, oldInfo)
+			}
+		}
+		if newInfo == nil {
+			newInfo = modules[idx]
+			if newVersion != "" {
+				ast.CacheVersionModule(newPath, newVersion, newInfo)
+			}
+		}
+	}
 
 	vlog("Comparing modules: %s -> %s", oldVersion, newVersion)
 	diffReport := diff.Compare(oldInfo, newInfo, oldVersion, newVersion)
@@ -895,7 +977,10 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 	}
 
 	findings := report.Findings{
-		AddressShifts: ast.DetectAddressShifts(oldInfo, newInfo),
+		AddressShifts: diffReport.AddressShifts,
+	}
+	if len(findings.AddressShifts) == 0 && oldInfo != nil && newInfo != nil {
+		findings.AddressShifts = ast.DetectAddressShifts(oldInfo, newInfo)
 	}
 	if checkRecreation {
 		if dynamicRegistry == nil {

@@ -75,9 +75,13 @@ func RenderText(r *diff.DiffReport, findings Findings) string {
 	if len(findings.RecreationHazards) > 0 {
 		sb.WriteString(recreation.FormatHazardsText(findings.RecreationHazards))
 	}
+	shifts := r.AddressShifts
 	if len(findings.AddressShifts) > 0 {
-		sb.WriteString(fmt.Sprintf("RESOURCE ADDRESS SHIFTS (%d):\n", len(findings.AddressShifts)))
-		for _, s := range findings.AddressShifts {
+		shifts = findings.AddressShifts
+	}
+	if len(shifts) > 0 {
+		sb.WriteString(fmt.Sprintf("RESOURCE ADDRESS SHIFTS (%d):\n", len(shifts)))
+		for _, s := range shifts {
 			sb.WriteString(fmt.Sprintf("  • %s -> %s (%s)\n", s.OldAddress.FullAddress(), s.NewAddress.FullAddress(), s.Reason))
 		}
 		sb.WriteString("\n")
@@ -89,7 +93,7 @@ func RenderText(r *diff.DiffReport, findings Findings) string {
 }
 
 // RenderMarkdown formats a DiffReport into GitHub-flavored Markdown.
-func RenderMarkdown(r *diff.DiffReport) string {
+func RenderMarkdown(r *diff.DiffReport, findings ...Findings) string {
 	if r == nil {
 		return ""
 	}
@@ -140,6 +144,23 @@ func RenderMarkdown(r *diff.DiffReport) string {
 		sb.WriteString("\n")
 	}
 	writePolicyViolations(&sb, r.PolicyViolations)
+
+	shifts := r.AddressShifts
+	if len(findings) > 0 {
+		f := findings[0]
+		if len(f.AddressShifts) > 0 {
+			shifts = f.AddressShifts
+		}
+		if len(f.RecreationHazards) > 0 {
+			sb.WriteString(recreation.FormatHazardsMarkdown(f.RecreationHazards))
+		}
+		if f.GoldenPlan != nil {
+			sb.WriteString(recreation.FormatGoldenPlanMarkdown(f.GoldenPlan))
+		}
+	}
+	if len(shifts) > 0 {
+		writeAddressShiftsMarkdown(&sb, shifts)
+	}
 
 	return sb.String()
 }
@@ -221,9 +242,13 @@ func RenderWrapperText(w *wrapper.WrapperCompatibilityReport, findings Findings)
 	if len(findings.RecreationHazards) > 0 {
 		sb.WriteString(recreation.FormatHazardsText(findings.RecreationHazards))
 	}
-	if len(findings.AddressShifts) > 0 {
-		sb.WriteString(fmt.Sprintf("RESOURCE ADDRESS SHIFTS (%d):\n", len(findings.AddressShifts)))
-		for _, s := range findings.AddressShifts {
+	wShifts := findings.AddressShifts
+	if len(wShifts) == 0 && w.UpstreamDiff != nil && len(w.UpstreamDiff.AddressShifts) > 0 {
+		wShifts = w.UpstreamDiff.AddressShifts
+	}
+	if len(wShifts) > 0 {
+		sb.WriteString(fmt.Sprintf("RESOURCE ADDRESS SHIFTS (%d):\n", len(wShifts)))
+		for _, s := range wShifts {
 			sb.WriteString(fmt.Sprintf("  • %s -> %s (%s)\n", s.OldAddress.FullAddress(), s.NewAddress.FullAddress(), s.Reason))
 		}
 		sb.WriteString("\n")
@@ -318,8 +343,15 @@ func RenderWrapperMarkdown(w *wrapper.WrapperCompatibilityReport, findings ...Fi
 	}
 	writePolicyViolations(&sb, w.PolicyViolations)
 
+	shifts := []ast.ResourceAddressShift{}
+	if w.UpstreamDiff != nil && len(w.UpstreamDiff.AddressShifts) > 0 {
+		shifts = w.UpstreamDiff.AddressShifts
+	}
 	if len(findings) > 0 {
 		f := findings[0]
+		if len(f.AddressShifts) > 0 {
+			shifts = f.AddressShifts
+		}
 		if len(f.RecreationHazards) > 0 {
 			sb.WriteString(recreation.FormatHazardsMarkdown(f.RecreationHazards))
 		}
@@ -327,8 +359,24 @@ func RenderWrapperMarkdown(w *wrapper.WrapperCompatibilityReport, findings ...Fi
 			sb.WriteString(recreation.FormatGoldenPlanMarkdown(f.GoldenPlan))
 		}
 	}
+	if len(shifts) > 0 {
+		writeAddressShiftsMarkdown(&sb, shifts)
+	}
 
 	return sb.String()
+}
+
+func writeAddressShiftsMarkdown(sb *strings.Builder, shifts []ast.ResourceAddressShift) {
+	if len(shifts) == 0 {
+		return
+	}
+	sb.WriteString(fmt.Sprintf("### Resource Address Shifts (%d)\n\n", len(shifts)))
+	sb.WriteString("| Old Address | New Address | Reason |\n")
+	sb.WriteString("| :--- | :--- | :--- |\n")
+	for _, s := range shifts {
+		sb.WriteString(fmt.Sprintf("| `%s` | `%s` | %s |\n", s.OldAddress.FullAddress(), s.NewAddress.FullAddress(), s.Reason))
+	}
+	sb.WriteString("\n")
 }
 
 // RenderWrapperJSON serializes a WrapperCompatibilityReport into JSON bytes.

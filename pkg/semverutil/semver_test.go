@@ -83,3 +83,33 @@ func TestFilterPrereleases(t *testing.T) {
 	expected := []string{"v1.0.0", "v2.0.0", "v3.0.0"}
 	assert.Equal(t, expected, actual)
 }
+
+func TestParseConstraintRange(t *testing.T) {
+	cr1 := ParseConstraintRange(">= 4.0, < 6.0, != 4.5.0")
+	assert.Equal(t, "4.0", cr1.MinVersion)
+	assert.Equal(t, "6.0", cr1.MaxVersion)
+	assert.Equal(t, []string{"4.5.0"}, cr1.Excluded)
+
+	cr2 := ParseConstraintRange("~> 0.12.0")
+	assert.Equal(t, "0.12.0", cr2.MinVersion)
+	assert.Equal(t, "0.13.0", cr2.MaxVersion)
+
+	cr3 := ParseConstraintRange("~> 2.1")
+	assert.Equal(t, "2.1", cr3.MinVersion)
+	assert.Equal(t, "3.0.0", cr3.MaxVersion)
+
+	cr4 := ParseConstraintRange("> 1.0.0, <= 2.0.0")
+	assert.Equal(t, "1.0.0", cr4.MinVersion)
+	assert.Equal(t, "2.0.0", cr4.MaxVersion)
+
+	cr5 := ParseConstraintRange("= 1.5.0")
+	assert.Equal(t, "1.5.0", cr5.MinVersion)
+	assert.Equal(t, "1.5.0", cr5.MaxVersion)
+
+	cr6 := ParseConstraintRange("1.5.0")
+	assert.Equal(t, "1.5.0", cr6.MinVersion)
+	assert.Equal(t, "1.5.0", cr6.MaxVersion)
+
+	crEmpty := ParseConstraintRange("  ,  ")
+	assert.Equal(t, "", crEmpty.MinVersion)
+}

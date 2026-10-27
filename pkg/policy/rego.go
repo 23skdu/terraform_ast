@@ -6,12 +6,29 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 
 	opaast "github.com/open-policy-agent/opa/v1/ast"
 	"github.com/open-policy-agent/opa/v1/rego"
 )
+
+var reportMapCache sync.Map
+
+func reportKey(v any) uintptr {
+	if v == nil {
+		return 0
+	}
+	val := reflect.ValueOf(v)
+	switch val.Kind() {
+	case reflect.Pointer, reflect.UnsafePointer, reflect.Map, reflect.Slice:
+		return val.Pointer()
+	default:
+		return 0
+	}
+}
 
 // RegoRule represents a single parsed rule from a Rego policy file.
 type RegoRule struct {
@@ -197,10 +214,20 @@ func EvaluateRego(policy *RegoPolicy, input Input) []Violation {
 	}
 	if input.Report != nil {
 		inputMap["report"] = input.Report
-		// Cache the marshalled report map per pointer to avoid re-marshalling per step.
 		var reportMap map[string]any
-		if reportBytes, err := json.Marshal(input.Report); err == nil {
-			_ = json.Unmarshal(reportBytes, &reportMap)
+		key := reportKey(input.Report)
+		if key != 0 {
+			if cached, ok := reportMapCache.Load(key); ok {
+				reportMap = cached.(map[string]any)
+			}
+		}
+		if reportMap == nil {
+			if reportBytes, err := json.Marshal(input.Report); err == nil {
+				_ = json.Unmarshal(reportBytes, &reportMap)
+				if key != 0 {
+					reportMapCache.Store(key, reportMap)
+				}
+			}
 		}
 		for k, v := range reportMap {
 			if _, exists := inputMap[k]; !exists {
@@ -210,7 +237,7 @@ func EvaluateRego(policy *RegoPolicy, input Input) []Violation {
 	}
 
 	violations, err := EvaluateRegoArbitrary(context.Background(), policy, inputMap)
-	if err == nil && len(violations) > 0 {
+	if err == nil {
 		return violations
 	}
 

@@ -5,10 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -135,7 +137,17 @@ func AddMissingInputs(dir, moduleName string, missingInputs map[string]string) (
 			for _, key := range keys {
 				val := missingInputs[key]
 				if block.Body().GetAttribute(key) == nil {
-					block.Body().SetAttributeValue(key, cty.StringVal(val))
+					var ctyVal cty.Value
+					if val == "true" {
+						ctyVal = cty.BoolVal(true)
+					} else if val == "false" {
+						ctyVal = cty.BoolVal(false)
+					} else if num, err := strconv.ParseInt(val, 10, 64); err == nil {
+						ctyVal = cty.NumberIntVal(num)
+					} else {
+						ctyVal = cty.StringVal(val)
+					}
+					block.Body().SetAttributeValue(key, ctyVal)
 					changed = true
 				}
 			}
@@ -155,6 +167,22 @@ func AddMissingInputs(dir, moduleName string, missingInputs map[string]string) (
 	return modified, nil
 }
 
+func cleanAddressForMoved(addr string) string {
+	res := strings.TrimSpace(addr)
+	res = strings.ReplaceAll(res, "[count]", "")
+	res = strings.ReplaceAll(res, "[for_each]", "")
+	return res
+}
+
+func parseAddressTraversal(addr string) hcl.Traversal {
+	cleaned := cleanAddressForMoved(addr)
+	traversal, diags := hclsyntax.ParseTraversalAbs([]byte(cleaned), "", hcl.Pos{})
+	if diags.HasErrors() || len(traversal) == 0 {
+		return hcl.Traversal{hcl.TraverseRoot{Name: cleaned}}
+	}
+	return traversal
+}
+
 // FormatMovedBlocks synthesizes Terraform 1.1+ moved blocks.
 func FormatMovedBlocks(blocks []MovedBlock) string {
 	if len(blocks) == 0 {
@@ -164,17 +192,15 @@ func FormatMovedBlocks(blocks []MovedBlock) string {
 	body := file.Body()
 
 	for _, mb := range blocks {
-		if strings.TrimSpace(mb.From) == "" || strings.TrimSpace(mb.To) == "" {
+		cleanFrom := cleanAddressForMoved(mb.From)
+		cleanTo := cleanAddressForMoved(mb.To)
+		if cleanFrom == "" || cleanTo == "" {
 			continue
 		}
 		block := body.AppendNewBlock("moved", nil)
 		blockBody := block.Body()
-		blockBody.SetAttributeTraversal("from", hcl.Traversal{
-			hcl.TraverseRoot{Name: mb.From},
-		})
-		blockBody.SetAttributeTraversal("to", hcl.Traversal{
-			hcl.TraverseRoot{Name: mb.To},
-		})
+		blockBody.SetAttributeTraversal("from", parseAddressTraversal(cleanFrom))
+		blockBody.SetAttributeTraversal("to", parseAddressTraversal(cleanTo))
 		body.AppendNewline()
 	}
 	return string(file.Bytes())
@@ -253,8 +279,8 @@ func SynthesizeMovedBlocksForShifts(shifts []ast.ResourceAddressShift, covered .
 	}
 
 	for _, s := range shifts {
-		from := s.OldAddress.FullAddress()
-		to := s.NewAddress.FullAddress()
+		from := cleanAddressForMoved(s.OldAddress.FullAddress())
+		to := cleanAddressForMoved(s.NewAddress.FullAddress())
 		if from == "" || to == "" || from == to {
 			continue
 		}

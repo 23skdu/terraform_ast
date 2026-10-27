@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
@@ -71,7 +72,10 @@ func Compare(oldMod, newMod *ast.ModuleInfo, oldVer, newVer string) *DiffReport 
 	// 5. Compare Managed and Data Resources
 	compareResources(oldMod, newMod, report)
 
-	// 6. Compare destructive toggles (lifecycle, backend, provisioners, triggers)
+	// 6. Compare Nested Module Calls
+	compareModuleCalls(oldMod, newMod, report)
+
+	// 7. Compare destructive toggles (lifecycle, backend, cloud, provider, provisioners, triggers, count/for_each, locals)
 	compareDestructiveToggles(oldMod, newMod, report)
 	scoreConfidence(report)
 
@@ -733,13 +737,24 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 
 	// 2. Check blocks (Terraform 1.5+).
 	for name, cb := range newMod.CheckBlocks {
-		if _, existed := oldMod.CheckBlocks[name]; !existed {
+		oldCB, existed := oldMod.CheckBlocks[name]
+		if !existed {
 			report.NewFeatures = append(report.NewFeatures, DifferenceItem{
 				Category:        "CheckBlockAdded",
 				Name:            name,
 				Severity:        SeverityNewFeature,
 				ConfidenceScore: 9,
 				Description:     fmt.Sprintf("Check assertion block '%s' declared with %d rules", name, len(cb.AssertRules)),
+			})
+		} else if !sameStrings(oldCB.AssertRules, cb.AssertRules) {
+			report.Warnings = append(report.Warnings, DifferenceItem{
+				Category:        "CheckBlockModified",
+				Name:            name,
+				Severity:        SeverityWarning,
+				ConfidenceScore: 9,
+				Description:     fmt.Sprintf("Check assertion block '%s' conditions changed", name),
+				OldValue:        strings.Join(oldCB.AssertRules, "; "),
+				NewValue:        strings.Join(cb.AssertRules, "; "),
 			})
 		}
 	}
@@ -756,9 +771,24 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 	}
 
 	// 3. Import blocks (Terraform 1.5+).
-	oldImports := makeStringSet(importAddresses(oldMod.ImportBlocks))
+	oldImportMap := make(map[string]ast.ImportBlockDef, len(oldMod.ImportBlocks))
+	for _, ib := range oldMod.ImportBlocks {
+		oldImportMap[ib.To] = ib
+	}
 	for _, ib := range newMod.ImportBlocks {
-		if _, existed := oldImports[ib.To]; existed {
+		if oldIB, existed := oldImportMap[ib.To]; existed {
+			if oldIB.ID != ib.ID {
+				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					Category:        "ImportBlockModified",
+					Name:            ib.To,
+					Severity:        SeverityBreaking,
+					ConfidenceScore: 9,
+					Description:     fmt.Sprintf("Programmatic import ID for '%s' changed from '%s' to '%s'", ib.To, oldIB.ID, ib.ID),
+					OldValue:        oldIB.ID,
+					NewValue:        ib.ID,
+					Evidence:        2,
+				})
+			}
 			continue
 		}
 		report.NewFeatures = append(report.NewFeatures, DifferenceItem{
@@ -879,36 +909,61 @@ func importAddresses(blocks []ast.ImportBlockDef) []string {
 	return addresses
 }
 
-// majorVersionRe extracts the first numeric version component from a constraint string such as
-// "~> 4.0" or ">= 3.1.0".
-var majorVersionRe = regexp.MustCompile(`(\d+)`)
+// majorVersionRe extracts the numeric major and optional minor version component from a constraint
+// string such as "~> 4.0", ">= 0.12.0", or "< 5.0".
+var majorVersionRe = regexp.MustCompile(`(\d+)(?:\.(\d+))?`)
 
 func majorFromConstraint(c string) (int, bool) {
 	m := majorVersionRe.FindStringSubmatch(strings.TrimSpace(c))
 	if m == nil {
 		return 0, false
 	}
-	// parse the first number
-	n := 0
-	for _, ch := range m[1] {
-		n = n*10 + int(ch-'0')
-	}
+	n, _ := strconv.Atoi(m[1])
 	return n, true
 }
 
+func isZeroMajorBreakingBump(oldC, newC string) bool {
+	mOld := majorVersionRe.FindStringSubmatch(strings.TrimSpace(oldC))
+	mNew := majorVersionRe.FindStringSubmatch(strings.TrimSpace(newC))
+	if len(mOld) >= 3 && len(mNew) >= 3 && mOld[1] == "0" && mNew[1] == "0" && mOld[2] != "" && mNew[2] != "" {
+		minOld, _ := strconv.Atoi(mOld[2])
+		minNew, _ := strconv.Atoi(mNew[2])
+		return minNew > minOld
+	}
+	return false
+}
+
+func upperBoundMajor(c string) (int, bool) {
+	for _, part := range strings.Split(c, ",") {
+		trimmed := strings.TrimSpace(part)
+		if strings.HasPrefix(trimmed, "<") && !strings.HasPrefix(trimmed, "<=") {
+			return majorFromConstraint(trimmed)
+		}
+	}
+	return 0, false
+}
+
 // isMajorProviderBump reports whether the provider version constraints move to a different
-// major version, which routinely forces schema/state migration.
+// major version, drop an upper-bound major version, or bump minor in 0.x.
 func isMajorProviderBump(oldConstraints, newConstraints []string) bool {
 	if len(oldConstraints) == 0 || len(newConstraints) == 0 {
 		return false
+	}
+	oldJoined := strings.Join(oldConstraints, ", ")
+	newJoined := strings.Join(newConstraints, ", ")
+	if oldUpper, okO := upperBoundMajor(oldJoined); okO {
+		if newUpper, okN := upperBoundMajor(newJoined); okN && newUpper < oldUpper {
+			return true
+		}
 	}
 	oldMajor, okOld := majorFromConstraint(oldConstraints[0])
 	newMajor, okNew := majorFromConstraint(newConstraints[0])
 	if !okOld || !okNew {
 		return false
 	}
-	// Use the highest/lowest? Simplest: compare first constraint's major.
-	// Also check if any old vs any new major differs.
+	if isZeroMajorBreakingBump(oldConstraints[0], newConstraints[0]) {
+		return true
+	}
 	for _, oc := range oldConstraints {
 		om, ok := majorFromConstraint(oc)
 		if !ok {
@@ -919,15 +974,11 @@ func isMajorProviderBump(oldConstraints, newConstraints []string) bool {
 			if !ok2 {
 				continue
 			}
-			if om != nm && om != 0 {
-				// treat as major bump only if the new major is greater and differs
-				if nm > om {
-					return true
-				}
+			if om != nm && om != 0 && nm > om {
+				return true
 			}
 		}
 	}
-	// fallback: direct major compare on first
 	return oldMajor != newMajor && newMajor > oldMajor
 }
 
@@ -1045,15 +1096,17 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					Remediation: "Verify downtime tolerance for in-place replacements",
 				})
 			}
-			// replace_triggered_by added
-			if len(oldRes.Lifecycle.ReplaceTriggeredBy) == 0 && len(newRes.Lifecycle.ReplaceTriggeredBy) > 0 {
+			// replace_triggered_by added or modified
+			if len(newRes.Lifecycle.ReplaceTriggeredBy) > 0 && !sameStrings(oldRes.Lifecycle.ReplaceTriggeredBy, newRes.Lifecycle.ReplaceTriggeredBy) {
 				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
 					Category:    "LifecycleReplaceTriggered",
 					Name:        key,
 					Severity:    SeverityBreaking,
-					Description: fmt.Sprintf("lifecycle.replace_triggered_by added to resource '%s'", key),
+					Description: fmt.Sprintf("lifecycle.replace_triggered_by changed for resource '%s'", key),
+					OldValue:    strings.Join(oldRes.Lifecycle.ReplaceTriggeredBy, ", "),
 					NewValue:    strings.Join(newRes.Lifecycle.ReplaceTriggeredBy, ", "),
 					Remediation: "Review replacement triggers before upgrading",
+					Evidence:    2,
 				})
 			}
 			// ignore_changes: narrowing (old has more than new) -> warning
@@ -1067,6 +1120,101 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					NewValue:    strings.Join(newRes.Lifecycle.IgnoreChanges, ", "),
 					Remediation: "Verify previously ignored attributes are now applied",
 				})
+			}
+			// count / for_each cardinality changes (#113)
+			if oldRes.Count != "" && newRes.Count != "" && oldRes.Count != newRes.Count {
+				oldN, errOld := strconv.Atoi(oldRes.Count)
+				newN, errNew := strconv.Atoi(newRes.Count)
+				if (errOld == nil && errNew == nil && newN < oldN) || newRes.Count == "0" {
+					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+						Category:    "ResourceCount",
+						Name:        key,
+						Severity:    SeverityBreaking,
+						Description: fmt.Sprintf("Resource '%s' count reduced from %s to %s (destroys state instances)", key, oldRes.Count, newRes.Count),
+						OldValue:    oldRes.Count,
+						NewValue:    newRes.Count,
+						Remediation: "Verify state instance removal before reducing count",
+						Evidence:    2,
+					})
+				} else {
+					report.Warnings = append(report.Warnings, DifferenceItem{
+						Category:    "ResourceCount",
+						Name:        key,
+						Severity:    SeverityWarning,
+						Description: fmt.Sprintf("Resource '%s' count expression changed from '%s' to '%s'", key, oldRes.Count, newRes.Count),
+						OldValue:    oldRes.Count,
+						NewValue:    newRes.Count,
+						Remediation: "Verify instance count change does not drop active state instances",
+					})
+				}
+			}
+			if oldRes.ForEach != "" && newRes.ForEach != "" && oldRes.ForEach != newRes.ForEach {
+				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					Category:    "ResourceForEach",
+					Name:        key,
+					Severity:    SeverityBreaking,
+					Description: fmt.Sprintf("Resource '%s' for_each expression changed from '%s' to '%s' (may destroy or recreate instances)", key, oldRes.ForEach, newRes.ForEach),
+					OldValue:    oldRes.ForEach,
+					NewValue:    newRes.ForEach,
+					Remediation: "Add moved {} blocks or verify for_each key set preservation",
+					Evidence:    2,
+				})
+			}
+			// triggers / triggers_replace / keepers (#114)
+			if (len(oldRes.Triggers) > 0 || len(newRes.Triggers) > 0) && !reflect.DeepEqual(oldRes.Triggers, newRes.Triggers) {
+				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					Category:    "ResourceTriggers",
+					Name:        key,
+					Severity:    SeverityBreaking,
+					Description: fmt.Sprintf("Replacement triggers changed for resource '%s'", key),
+					Remediation: "Review trigger changes that force resource replacement",
+					Evidence:    2,
+				})
+			}
+			// destructive protection attributes (#114) and ForceNew resource attributes (#115)
+			for _, protAttr := range []string{"deletion_protection", "purge_protection_enabled"} {
+				if oldRes.Attributes[protAttr] == "true" && newRes.Attributes[protAttr] != "true" {
+					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+						Category:    "DestructiveAttribute",
+						Name:        key + "." + protAttr,
+						Severity:    SeverityBreaking,
+						Description: fmt.Sprintf("Destruction guard '%s' disabled or removed on resource '%s'", protAttr, key),
+						OldValue:    "true",
+						NewValue:    newRes.Attributes[protAttr],
+						Remediation: fmt.Sprintf("Keep %s = true to prevent accidental resource deletion", protAttr),
+						Evidence:    2,
+					})
+				}
+			}
+			for _, forceAttr := range []string{"force_destroy", "skip_final_snapshot"} {
+				if oldRes.Attributes[forceAttr] != "true" && newRes.Attributes[forceAttr] == "true" {
+					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+						Category:    "DestructiveAttribute",
+						Name:        key + "." + forceAttr,
+						Severity:    SeverityBreaking,
+						Description: fmt.Sprintf("Destructive flag '%s = true' enabled on resource '%s'", forceAttr, key),
+						OldValue:    oldRes.Attributes[forceAttr],
+						NewValue:    "true",
+						Remediation: fmt.Sprintf("Disable %s in production to prevent unrecoverable data loss", forceAttr),
+						Evidence:    2,
+					})
+				}
+			}
+			for _, fnAttr := range []string{"cidr_block", "vpc_id", "availability_zone", "subnet_id", "ami", "engine", "location", "region", "project", "resource_group_name"} {
+				oldV, okO := oldRes.Attributes[fnAttr]
+				newV, okN := newRes.Attributes[fnAttr]
+				if okO && okN && oldV != newV {
+					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+						Category:    "ResourceForceNew",
+						Name:        key + "." + fnAttr,
+						Severity:    SeverityBreaking,
+						Description: fmt.Sprintf("Immutable ForceNew attribute '%s' on resource '%s' changed from '%s' to '%s'", fnAttr, key, oldV, newV),
+						OldValue:    oldV,
+						NewValue:    newV,
+						Remediation: "Avoid changing immutable resource attributes in-place",
+						Evidence:    2,
+					})
+				}
 			}
 			// provisioner destroy-time added/removed
 			oldDestroyProv := 0
@@ -1092,6 +1240,41 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					Remediation: "Review provisioner side effects before upgrading",
 				})
 			}
+		}
+	}
+
+	// Provider block configuration comparison (#117)
+	for pName, oldP := range oldMod.ProviderConfigs {
+		if newP, exists := newMod.ProviderConfigs[pName]; exists {
+			for k, oldV := range oldP {
+				if newV, ok := newP[k]; ok && oldV != newV {
+					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+						Category:    "ProviderConfig",
+						Name:        pName + "." + k,
+						Severity:    SeverityBreaking,
+						Description: fmt.Sprintf("Provider '%s' configuration attribute '%s' changed from '%s' to '%s'", pName, k, oldV, newV),
+						OldValue:    oldV,
+						NewValue:    newV,
+						Remediation: "Verify provider target region/account before applying",
+						Evidence:    2,
+					})
+				}
+			}
+		}
+	}
+
+	// Locals comparison (#119)
+	for lName, oldVal := range oldMod.Locals {
+		if newVal, exists := newMod.Locals[lName]; exists && normalizeCondition(oldVal) != normalizeCondition(newVal) {
+			report.Warnings = append(report.Warnings, DifferenceItem{
+				Category:    "LocalValue",
+				Name:        "local." + lName,
+				Severity:    SeverityWarning,
+				Description: fmt.Sprintf("Local value 'local.%s' expression changed from '%s' to '%s'", lName, oldVal, newVal),
+				OldValue:    oldVal,
+				NewValue:    newVal,
+				Remediation: "Verify resources and outputs referencing local." + lName,
+			})
 		}
 	}
 }
@@ -1146,15 +1329,29 @@ func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 		newMod.DataResources = make(map[string]ast.ResourceDef)
 	}
 
-	// Address shifts are reported separately; suppress duplicates here.
+	// Address shifts are computed once (#125) and unmigrated recreations fold into BreakingChanges (#111).
 	shiftedOld := make(map[string]struct{})
 	shiftedNew := make(map[string]struct{})
-	for _, sh := range ast.DetectAddressShifts(oldMod, newMod) {
+	shifts := ast.DetectAddressShifts(oldMod, newMod)
+	report.AddressShifts = shifts
+	for _, sh := range shifts {
 		// Only suppress when the resource is renamed/recreated at a new address;
 		// a true removal (empty new address) is still reported as a removed resource.
 		if sh.NewAddress.FullAddress() != "" {
 			shiftedOld[sh.OldAddress.FullAddress()] = struct{}{}
 			shiftedNew[sh.NewAddress.FullAddress()] = struct{}{}
+			if sh.IsRecreation {
+				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					Category:    "AddressShift",
+					Name:        sh.OldAddress.FullAddress(),
+					Severity:    SeverityBreaking,
+					Description: sh.Reason,
+					OldValue:    sh.OldAddress.FullAddress(),
+					NewValue:    sh.NewAddress.FullAddress(),
+					Remediation: fmt.Sprintf("Add a moved { from = %s to = %s } block to migrate state without recreation", sh.OldAddress.FullAddress(), sh.NewAddress.FullAddress()),
+					Evidence:    2,
+				})
+			}
 		}
 	}
 
@@ -1252,6 +1449,62 @@ func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				NewValue:    fmt.Sprintf("type=%s, provider=%s", newRes.Type, newRes.Provider),
 				Remediation: "Consider exposing this resource in wrapper if needed",
 				Pos:         newRes.Pos,
+			})
+		}
+	}
+}
+
+// compareModuleCalls diffs nested module {} blocks declared inside oldMod and newMod (#112).
+func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
+	for name, oldCall := range oldMod.ModuleCalls {
+		newCall, exists := newMod.ModuleCalls[name]
+		if !exists {
+			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				Category:    "ModuleCall",
+				Name:        "module." + name,
+				Severity:    SeverityBreaking,
+				Description: fmt.Sprintf("Nested module call 'module.%s' was removed in upstream version (destroys child module state)", name),
+				OldValue:    oldCall.Source,
+				Remediation: fmt.Sprintf("Add a moved {} or removed {} block for 'module.%s' before upgrading", name),
+				Pos:         oldCall.Pos,
+				Evidence:    2,
+			})
+			continue
+		}
+		if oldCall.Source != "" && newCall.Source != "" && oldCall.Source != newCall.Source {
+			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				Category:    "ModuleCallSource",
+				Name:        "module." + name,
+				Severity:    SeverityBreaking,
+				Description: fmt.Sprintf("Nested module call 'module.%s' source changed from '%s' to '%s'", name, oldCall.Source, newCall.Source),
+				OldValue:    oldCall.Source,
+				NewValue:    newCall.Source,
+				Remediation: fmt.Sprintf("Verify child module state compatibility for 'module.%s'", name),
+				Pos:         newCall.Pos,
+				Evidence:    2,
+			})
+		}
+		if (oldCall.Count != "") != (newCall.Count != "") || (oldCall.ForEach != "") != (newCall.ForEach != "") {
+			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				Category:    "ModuleCallIndex",
+				Name:        "module." + name,
+				Severity:    SeverityBreaking,
+				Description: fmt.Sprintf("Nested module call 'module.%s' instance indexing mode changed (count/for_each transition)", name),
+				Remediation: fmt.Sprintf("Add moved {} blocks for indexed instances of 'module.%s'", name),
+				Pos:         newCall.Pos,
+				Evidence:    2,
+			})
+		}
+	}
+	for name, newCall := range newMod.ModuleCalls {
+		if _, exists := oldMod.ModuleCalls[name]; !exists {
+			report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+				Category:    "ModuleCall",
+				Name:        "module." + name,
+				Severity:    SeverityNewFeature,
+				Description: fmt.Sprintf("New nested module call 'module.%s' added in upstream", name),
+				NewValue:    newCall.Source,
+				Pos:         newCall.Pos,
 			})
 		}
 	}

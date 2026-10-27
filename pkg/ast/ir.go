@@ -29,9 +29,14 @@ func (ra ResourceAddress) FullAddress() string {
 	if ra.Mode == "data" {
 		sb.WriteString("data.")
 	}
-	sb.WriteString(ra.Type)
-	sb.WriteString(".")
-	sb.WriteString(ra.Name)
+	if ra.Mode == "module" {
+		sb.WriteString("module.")
+		sb.WriteString(ra.Name)
+	} else {
+		sb.WriteString(ra.Type)
+		sb.WriteString(".")
+		sb.WriteString(ra.Name)
+	}
 	if ra.IndexKey != "" {
 		sb.WriteString("[")
 		sb.WriteString(ra.IndexKey)
@@ -74,6 +79,20 @@ func ParseResourceAddress(addr string) ResourceAddress {
 	}
 
 	rem := parts[i:]
+	if len(rem) == 0 && len(moduleParts) > 0 {
+		// Canonical module call address (e.g. module.vpc)
+		lastMod := moduleParts[len(moduleParts)-1]
+		res.Mode = "module"
+		res.Type = "module"
+		res.Name = strings.TrimPrefix(lastMod, "module.")
+		if len(moduleParts) > 1 {
+			res.ModulePath = strings.Join(moduleParts[:len(moduleParts)-1], ".")
+		} else {
+			res.ModulePath = ""
+		}
+		return res
+	}
+
 	if len(rem) > 0 && rem[0] == "data" {
 		res.Mode = "data"
 		rem = rem[1:]
@@ -115,6 +134,28 @@ func ExtractResourceAddresses(mod *ModuleInfo) []ResourceAddress {
 	}
 
 	var addresses []ResourceAddress
+
+	// Module calls (#112)
+	moduleKeys := make([]string, 0, len(mod.ModuleCalls))
+	for k := range mod.ModuleCalls {
+		moduleKeys = append(moduleKeys, k)
+	}
+	sort.Strings(moduleKeys)
+	for _, k := range moduleKeys {
+		mc := mod.ModuleCalls[k]
+		indexKey := ""
+		if mc.Count != "" {
+			indexKey = "count"
+		} else if mc.ForEach != "" {
+			indexKey = "for_each"
+		}
+		addresses = append(addresses, ResourceAddress{
+			Mode:     "module",
+			Type:     "module",
+			Name:     mc.Name,
+			IndexKey: indexKey,
+		})
+	}
 
 	// Managed resources
 	managedKeys := make([]string, 0, len(mod.ManagedResources))
@@ -178,13 +219,24 @@ func BuildEvaluationGraph(mod *ModuleInfo) *EvaluationGraph {
 	for _, addr := range addrs {
 		full := addr.FullAddress()
 		var def ResourceDef
-		if addr.Mode == "data" {
+		switch addr.Mode {
+		case "data":
 			mapKey := "data." + addr.Type + "." + addr.Name
 			def = mod.DataResources[mapKey]
 			if def.Name == "" {
 				def = mod.DataResources[addr.Type+"."+addr.Name]
 			}
-		} else {
+		case "module":
+			mc := mod.ModuleCalls[addr.Name]
+			def = ResourceDef{
+				Mode:    "module",
+				Type:    "module",
+				Name:    mc.Name,
+				Count:   mc.Count,
+				ForEach: mc.ForEach,
+				Pos:     mc.Pos,
+			}
+		default:
 			mapKey := addr.Type + "." + addr.Name
 			def = mod.ManagedResources[mapKey]
 		}

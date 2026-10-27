@@ -354,6 +354,9 @@ deny contains msg if {
 }
 
 func TestEvaluateRego_CoverMissingPackageAndEmptyConditions(t *testing.T) {
+	assert.Equal(t, uintptr(0), reportKey(nil))
+	assert.Equal(t, uintptr(0), reportKey(123))
+
 	// Policy without package evaluated via EvaluateRegoArbitrary
 	polNoPkg := &RegoPolicy{
 		Package: "terraform_ast.policy",
@@ -363,9 +366,10 @@ func TestEvaluateRego_CoverMissingPackageAndEmptyConditions(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, v)
 
-	// Policy rule with no conditions in fallback evaluation
+	// Policy rule with no conditions in fallback evaluation (OPA errors out)
 	polEmptyRule := &RegoPolicy{
 		Package: "terraform_ast.policy",
+		Source:  "deny = { broken",
 		Rules: []RegoRule{
 			{Name: "empty", Conditions: nil},
 		},

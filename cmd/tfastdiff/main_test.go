@@ -23,6 +23,7 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/registry"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -2367,7 +2368,7 @@ module "test" {
 
 	// Error when taint analysis fails
 	origTaint := analyzeVariableTaint
-	analyzeVariableTaint = func(dir, target string) (*eval.TaintReport, error) {
+	analyzeVariableTaint = func(dir, target string, preParsed ...map[string]*hclsyntax.Body) (*eval.TaintReport, error) {
 		return nil, errors.New("simulated taint error")
 	}
 	defer func() { analyzeVariableTaint = origTaint }()

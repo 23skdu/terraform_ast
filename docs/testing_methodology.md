@@ -187,21 +187,36 @@ same targets can then be run as an open-ended campaign.
 
 | Target | Package | Invariant asserted |
 | :--- | :--- | :--- |
+| `FuzzCLI` | `cmd/tfastdiff` | CLI entry point handles arbitrary argument sets safely without unhandled panic |
 | `FuzzInspect` | `pkg/ast` | `Inspect` never panics; re-inspection is stable |
 | `FuzzCheckTypeCompatibility` | `pkg/ast` | Compatible is never breaking; `any` widening/narrowing rules hold |
 | `FuzzParseObjectSchema` | `pkg/ast` | Parsed attribute keys match their recorded names |
 | `FuzzParseModernHCLBlocks` | `pkg/ast` | Modern HCL/OpenTofu blocks parse without panicking |
 | `FuzzParseMovedLifecycleBackend` | `pkg/ast` | `moved`, `lifecycle`, `backend`, and `count`/`for_each` enrich cleanly |
+| `FuzzDifferentialValidation` | `pkg/ast` | In-memory overlay inspection produces identical ASTs to disk inspection |
 | `FuzzDiscoverCallSites` | `pkg/blastradius` | Scanning never panics and always yields a complete call site |
 | `FuzzTerragruntInputKey` | `pkg/blastradius` | Terragrunt keys resolve or cleanly fail |
 | `FuzzDiscoverJSONCallSites` | `pkg/blastradius` | Terraform JSON scanning never panics |
+| `FuzzFormatMovedBlocks` | `pkg/codemod` | Moved block formatter handles arbitrary address pairs producing valid HCL blocks |
 | `FuzzPreviewRemovedInputs` | `pkg/codemod` | Preview mode never mutates the wrapper |
 | `FuzzUnifiedReplacement` | `pkg/codemod` | Generated patches carry a valid unified diff header |
+| `FuzzCompare` | `pkg/diff` | AST module comparison preserves verdict soundness and confidence bounds |
+| `FuzzEvaluateExpression` | `pkg/eval` | Expression evaluation and function calls never panic on arbitrary inputs |
+| `FuzzParseGitSource` | `pkg/gitops` | Git module source normalizer never panics on malformed URLs or refs |
+| `FuzzResolveSubDir` | `pkg/gitops` | Subdirectory resolution never escapes repository boundaries |
+| `FuzzLSPServe` | `pkg/lsp` | JSON-RPC LSP protocol daemon handles arbitrary framing without memory corruption |
+| `FuzzAnalyzeUpgradePath` | `pkg/planner` | Upgrade path planning preserves contiguous safe harbor version bounds |
+| `FuzzPolicyDecode` | `pkg/policy` | JSON policy unmarshaling never crashes on malformed policy schemas |
+| `FuzzParseRego` | `pkg/policy` | Rego parser handles arbitrary rules with fail-closed security |
+| `FuzzParseGoldenPlan` | `pkg/recreation` | Plan JSON ingestion normalizes actions and resource changes safely |
+| `FuzzParseProviderSchema` | `pkg/recreation` | Schema ingestion extracts ForceNew descriptors without panic |
 | `FuzzIsRegistrySource` | `pkg/registry` | Local paths and VCS addresses are never Registry sources |
 | `FuzzParseRegistrySource` | `pkg/registry` | Registry addresses parse completely or are rejected |
+| `FuzzRenderReports` | `pkg/report` | Multi-format report renderer produces valid text, markdown, JSON, and SARIF |
 | `FuzzNormalizeAndIsValid` | `pkg/semverutil` | Normalisation is idempotent and agrees with the semver library |
 | `FuzzDetermineBumpType` | `pkg/semverutil` | Bump classification matches semver ordering |
 | `FuzzSort` | `pkg/semverutil` | Sorting preserves every element |
+| `FuzzAnalyzeWrapper` | `pkg/wrapper` | Wrapper analysis preserves safety equivalence theorem TotalBreaking == 0 <=> Safe |
 
 Run one target as a campaign:
 
