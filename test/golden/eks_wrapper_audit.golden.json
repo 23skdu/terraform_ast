@@ -147,7 +147,7 @@
         "category": "VariableDefault",
         "name": "cluster_version",
         "severity": "BREAKING",
-        "confidence_score": 8,
+        "confidence_score": 9,
         "description": "Default value for variable 'cluster_version' changed",
         "old_value": "1.28",
         "new_value": "1.30",
@@ -155,7 +155,8 @@
         "pos": {
           "filename": "<WORKSPACE>/test/fixtures/upstream_eks_v19/variables.tf",
           "line": 6
-        }
+        },
+        "evidence": 2
       }
     ],
     "new_features": [

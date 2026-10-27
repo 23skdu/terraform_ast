@@ -36,7 +36,7 @@
 - **Enterprise Policy Governance (OPA Rego v1)**: Enforce JSON or official OPA SDK-powered Rego policies (`--policy`, `--rego-policy`) evaluating arbitrary findings; trace input variable taint dependency graphs across module boundaries (`--taint`); preview unified patches for removed wrapper arguments.
 - **Upgrade-Path Analysis**: Compare adjacent semantic-version Git tags or Registry releases across a major-version jump, identify the last continuously safe version, and emit text, Markdown, or JSON reports.
 - **Language Server Protocol (LSP)**: Built-in JSON-RPC 2.0 language server (`tfastdiff daemon` / `--lsp`) with buffer-aware diagnostics and automated quick fixes.
-- **Enterprise Test Coverage**: **100% statement coverage** across every package, enforced in CI. Validated via [Terratest](test/terratest/) on realistic GKE/EKS fixtures, [Golden Image / Golden File](test/golden/) regression testing, and 19 native Go fuzz targets over every parser.
+- **Enterprise Test Coverage**: **100% statement coverage** across every package, enforced in CI. Validated via [Terratest](test/terratest/) on realistic GKE/EKS fixtures, [Golden Image / Golden File](test/golden/) regression testing, and 30 native Go fuzz targets over every parser.
 
 ---
 
@@ -218,6 +218,7 @@ Native Go fuzz targets cover every untrusted-input parser. Each one is seeded, r
 | `FuzzCheckTypeCompatibility` | `pkg/ast` | Compatible is never breaking; `any` widening/narrowing rules hold |
 | `FuzzParseObjectSchema` | `pkg/ast` | Parsed attribute keys always match their recorded names |
 | `FuzzParseModernHCLBlocks` | `pkg/ast` | Modern HCL blocks parse stably or fail gracefully |
+| `FuzzParseMovedLifecycleBackend` | `pkg/ast` | `moved`, `lifecycle`, `backend`, and `count`/`for_each` enrich cleanly |
 | `FuzzDifferentialValidation` | `pkg/ast` | AST parser matches compiler validation invariants |
 | `FuzzDiscoverCallSites` | `pkg/blastradius` | Consumer scanning never panics and always yields a complete call site |
 | `FuzzDiscoverJSONCallSites` | `pkg/blastradius` | Terraform JSON scanning never panics |

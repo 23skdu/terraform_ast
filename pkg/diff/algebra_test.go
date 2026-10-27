@@ -27,6 +27,7 @@ func TestAlgebraicInvariants_Identity(t *testing.T) {
 		"../../test/fixtures/upstream_aks_v2",
 		"../../test/fixtures/object_schema_v1",
 		"../../test/fixtures/object_schema_v2",
+		"../../test/fixtures/modern_constructs",
 	}
 
 	for _, relPath := range fixturePaths {
@@ -42,8 +43,10 @@ func TestAlgebraicInvariants_Identity(t *testing.T) {
 			assert.Equal(t, "SAFE", report.Verdict)
 			assert.Equal(t, 0, report.TotalBreaking, "Identity diff must have 0 breaking changes")
 			assert.Equal(t, 0, report.TotalWarnings, "Identity diff must have 0 warnings")
+			assert.Equal(t, 0, report.TotalNewFeatures, "Identity diff must have 0 new features")
 			assert.Empty(t, report.BreakingChanges)
 			assert.Empty(t, report.Warnings)
+			assert.Empty(t, report.NewFeatures)
 		})
 	}
 }

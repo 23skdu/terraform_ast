@@ -62,6 +62,22 @@ The terratest suite resides in `test/terratest/` and executes using `github.com/
 - `upstream_eks_v19`: Baseline AWS EKS upstream module (v19.0.0).
 - `upstream_eks_v20`: Upstream AWS EKS module (v20.0.0) simulating the v19 to v20 major migration (access entries, removed auth configmaps).
 - `eks_wrapper`: Realistic enterprise wrapper module wrapping EKS v19.
+- `modern_constructs`: Terraform 1.7+ / OpenTofu fixture exercising `moved {}`, `removed {}`, `check {}`, `count`, `for_each`, `lifecycle` flags, and `backend` configuration.
+
+---
+
+## 2.5 Evidence-Based Confidence Scoring (`#100`)
+
+Every reported `DifferenceItem` and `WrapperIssue` carries an evidence-calibrated `confidence_score` clamped to `[1, 10]`:
+
+| Evidence Signal | Base / Delta | Resulting Score |
+| :--- | :--- | :--- |
+| Breaking structural symbol removal or incompatible type/requirement change | Base `8` (`Evidence = 1`) | `8/10` |
+| Breaking parsed-literal comparison (`VariableDefault`, `ProviderSource`, `ProviderMajorUpgrade`, `StateBackendChange`, `Lifecycle`, `RemovedDestroy`) | Base `8` + literal/schema evidence (`Evidence = 2`) | `9/10` |
+| Provider-schema-confirmed `requires_replace` + structural + literal evidence | Base `8` + `Evidence >= 3` | `10/10` |
+| Warning (`VariableValidation`) | Base `6` + `Evidence` | `6/10` – `8/10` |
+| Warning (`TerraformCore`, `ProviderRequirement`) | Base `7` + `Evidence` | `7/10` – `9/10` |
+| Warning (`VariableType`, `OutputType`, `OutputValue`) | Base `8` + `Evidence` | `8/10` – `9/10` |
 
 ### Execution
 Terratest invokes the native Terraform CLI engine (`terraform init` and `terraform validate`) directly against all 6 module fixtures:
@@ -165,6 +181,8 @@ same targets can then be run as an open-ended campaign.
 | `FuzzInspect` | `pkg/ast` | `Inspect` never panics; re-inspection is stable |
 | `FuzzCheckTypeCompatibility` | `pkg/ast` | Compatible is never breaking; `any` widening/narrowing rules hold |
 | `FuzzParseObjectSchema` | `pkg/ast` | Parsed attribute keys match their recorded names |
+| `FuzzParseModernHCLBlocks` | `pkg/ast` | Modern HCL/OpenTofu blocks parse without panicking |
+| `FuzzParseMovedLifecycleBackend` | `pkg/ast` | `moved`, `lifecycle`, `backend`, and `count`/`for_each` enrich cleanly |
 | `FuzzDiscoverCallSites` | `pkg/blastradius` | Scanning never panics and always yields a complete call site |
 | `FuzzTerragruntInputKey` | `pkg/blastradius` | Terragrunt keys resolve or cleanly fail |
 | `FuzzDiscoverJSONCallSites` | `pkg/blastradius` | Terraform JSON scanning never panics |

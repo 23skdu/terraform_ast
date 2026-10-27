@@ -29,39 +29,65 @@ func TestDockerfile_DevSecOpsStaticAnalysis(t *testing.T) {
 	require.NoError(t, err)
 	dockerfileContent := string(dockerfileBytes)
 
-	// 2. Multi-stage build check
-	assert.Contains(t, dockerfileContent, "AS builder", "Dockerfile must use multi-stage builds")
+	// 2. Validate Dockerfile and .dockerignore against DevSecOps policy rules
+	require.NoError(t, validateDockerfilePolicy(dockerfileContent))
 
-	// 3. Dependency caching & verification
-	assert.Contains(t, dockerfileContent, "COPY go.mod go.sum ./")
-	assert.Contains(t, dockerfileContent, "go mod verify", "Dependencies must be verified against checksums")
-
-	// 4. Hardened binary compilation checks
-	assert.Contains(t, dockerfileContent, "CGO_ENABLED=0", "Must disable CGO for a statically-linked binary")
-	assert.Contains(t, dockerfileContent, "-trimpath", "Must use -trimpath to prevent host path disclosure")
-	assert.Contains(t, dockerfileContent, "-ldflags=\"-s -w", "Must strip symbol table and debugging info")
-
-	// 5. Final stage security
-	assert.Contains(t, dockerfileContent, "gcr.io/distroless/static-debian12:nonroot", "Must use minimal distroless base image")
-	assert.Contains(t, dockerfileContent, "USER 65532:65532", "Must explicitly enforce non-root user execution")
-	assert.Contains(t, dockerfileContent, `ENTRYPOINT ["/usr/local/bin/tfastdiff"]`, "Must define a secure direct entrypoint")
-
-	// 6. OCI metadata annotations
-	assert.Contains(t, dockerfileContent, "TARGETARCH")
-	assert.Contains(t, dockerfileContent, "org.opencontainers.image.title")
-	assert.Contains(t, dockerfileContent, "org.opencontainers.image.source")
-	assert.Contains(t, dockerfileContent, "org.opencontainers.image.licenses")
-	assert.Contains(t, dockerfileContent, `org.opencontainers.image.version="0.9.0"`)
-
-	// 7. .dockerignore validation
 	dockerignoreBytes, err := os.ReadFile(dockerignorePath)
 	require.NoError(t, err)
 	dockerignoreContent := string(dockerignoreBytes)
+	require.NoError(t, validateDockerignorePolicy(dockerignoreContent))
+}
 
-	requiredExclusions := []string{".git", "test/", "*.out", "coverage.*", "bin/"}
-	for _, excl := range requiredExclusions {
-		assert.Contains(t, dockerignoreContent, excl, ".dockerignore must exclude "+excl)
+func TestValidateDockerfileAndContainerPolicies_Unit(t *testing.T) {
+	rootPath, err := filepath.Abs("../../")
+	require.NoError(t, err)
+
+	dockerfileBytes, err := os.ReadFile(filepath.Join(rootPath, "Dockerfile"))
+	require.NoError(t, err)
+	validDockerfile := string(dockerfileBytes)
+
+	// Every required token removal must be caught by validateDockerfilePolicy.
+	for _, rule := range requiredDockerfileTokens {
+		broken := strings.ReplaceAll(validDockerfile, rule.token, "")
+		err := validateDockerfilePolicy(broken)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), rule.token)
 	}
+
+	dockerignoreBytes, err := os.ReadFile(filepath.Join(rootPath, ".dockerignore"))
+	require.NoError(t, err)
+	validDockerignore := string(dockerignoreBytes)
+
+	for _, excl := range requiredDockerignoreExclusions {
+		broken := strings.ReplaceAll(validDockerignore, excl, "")
+		err := validateDockerignorePolicy(broken)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), excl)
+	}
+
+	validCfg := containerConfig{
+		User:       "65532:65532",
+		WorkingDir: "/workspace",
+		Entrypoint: []string{"/usr/local/bin/tfastdiff"},
+		Labels:     map[string]string{"org.opencontainers.image.title": "terraform-ast-diff"},
+	}
+	require.NoError(t, validateContainerMetadata(validCfg))
+
+	badUser := validCfg
+	badUser.User = "0:0"
+	assert.ErrorContains(t, validateContainerMetadata(badUser), "non-root user")
+
+	badWorkdir := validCfg
+	badWorkdir.WorkingDir = "/root"
+	assert.ErrorContains(t, validateContainerMetadata(badWorkdir), "working directory")
+
+	badEntry := validCfg
+	badEntry.Entrypoint = []string{"/bin/sh"}
+	assert.ErrorContains(t, validateContainerMetadata(badEntry), "entrypoint")
+
+	badLabel := validCfg
+	badLabel.Labels = map[string]string{}
+	assert.ErrorContains(t, validateContainerMetadata(badLabel), "OCI title label")
 }
 
 func TestDeveloperWorkflowManifests(t *testing.T) {
@@ -135,21 +161,17 @@ func TestDockerfile_BuildAndRuntimeSecurity(t *testing.T) {
 	require.NoError(t, err)
 
 	var inspectData []struct {
-		Config struct {
-			User       string            `json:"User"`
-			WorkingDir string            `json:"WorkingDir"`
-			Entrypoint []string          `json:"Entrypoint"`
-			Labels     map[string]string `json:"Labels"`
-		} `json:"Config"`
+		Config containerConfig `json:"Config"`
 	}
 	require.NoError(t, json.Unmarshal(inspectOut, &inspectData))
 	require.NotEmpty(t, inspectData)
+	require.NoError(t, validateContainerMetadata(inspectData[0].Config))
 
-	cfg := inspectData[0].Config
-	assert.Equal(t, "65532:65532", cfg.User, "Container must run as non-root user 65532")
-	assert.Equal(t, "/workspace", cfg.WorkingDir, "Container must have working directory set to /workspace")
-	assert.Equal(t, []string{"/usr/local/bin/tfastdiff"}, cfg.Entrypoint)
-	assert.Equal(t, "terraform-ast-diff", cfg.Labels["org.opencontainers.image.title"])
+	// 2b. Test Container Execution: --version flag returns 0.9.0 and exit code 0
+	cmdVersion := exec.Command("docker", "run", "--rm", "--read-only", imageTag, "--version")
+	versionOut, err := cmdVersion.CombinedOutput()
+	require.NoError(t, err)
+	assert.Contains(t, string(versionOut), "tfastdiff 0.9.0")
 
 	// 3. Test Container Execution: --help flag returns usage and expected exit code 2
 	cmdRunHelp := exec.Command("docker", "run", "--rm", imageTag, "--help")
@@ -190,7 +212,23 @@ func TestDockerfile_BuildAndRuntimeSecurity(t *testing.T) {
 	require.ErrorAs(t, err, &breakExitErr)
 	assert.Equal(t, 1, breakExitErr.ExitCode(), "CLI must return exit code 1 on breaking changes inside container")
 
-	// 6. Security Assurance: Verify distroless container has NO shell
+	// 6. Test Container Execution: Identity diff on modern_constructs fixture inside read-only container
+	cmdModernIdentity := exec.Command(
+		"docker", "run", "--rm",
+		"--read-only",
+		"--security-opt", "no-new-privileges:true",
+		"-v", fixturesPath+":/workspace/fixtures:ro",
+		imageTag,
+		"--old", "/workspace/fixtures/modern_constructs",
+		"--new", "/workspace/fixtures/modern_constructs",
+		"--format", "json",
+		"--exit-code",
+	)
+	modernOut, err := cmdModernIdentity.CombinedOutput()
+	require.NoError(t, err, "Container modern_constructs identity failed: %s", string(modernOut))
+	assert.Contains(t, string(modernOut), `"verdict": "SAFE"`)
+
+	// 7. Security Assurance: Verify distroless container has NO shell
 	cmdNoShell := exec.Command("docker", "run", "--rm", "--entrypoint", "/bin/sh", imageTag)
 	noShellOut, err := cmdNoShell.CombinedOutput()
 	assert.Error(t, err, "Distroless container must not contain /bin/sh")

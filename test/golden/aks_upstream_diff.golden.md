@@ -16,7 +16,7 @@
 | `Output` | `client_key` | Output 'client_key' was removed in upstream version | 8/10 | Remove or replace references to output 'client_key' in wrapper or downstream modules |
 | `Variable` | `agents_type` | Input variable 'agents_type' was removed in upstream version | 8/10 | Remove variable 'agents_type' from wrapper or module callers before upgrading |
 | `Variable` | `workload_identity_enabled` | Newly introduced variable 'workload_identity_enabled' is required and has no default value | 8/10 | Provide a required value for 'workload_identity_enabled' in wrapper module call |
-| `VariableDefault` | `os_disk_size_gb` | Default value for variable 'os_disk_size_gb' changed | 8/10 | Review callers that omit 'os_disk_size_gb'; the default no longer matches |
+| `VariableDefault` | `os_disk_size_gb` | Default value for variable 'os_disk_size_gb' changed | 9/10 | Review callers that omit 'os_disk_size_gb'; the default no longer matches |
 | `VariableType` | `dns_prefix` | Type constraint for variable 'dns_prefix' changed: Type constraint changed incompatibly from 'string' to 'list(string)' | 8/10 | Update variable type definition in wrapper to 'list(string)' |
 
 ### New Features (2)

@@ -184,3 +184,57 @@ func FuzzParseModernHCLBlocks(f *testing.F) {
 		}
 	})
 }
+
+// FuzzParseMovedLifecycleBackend exercises enrichment for moved blocks, lifecycle flags,
+// provisioners, backend configuration, and count/for_each meta-arguments.
+func FuzzParseMovedLifecycleBackend(f *testing.F) {
+	seeds := []string{
+		`moved {
+  from = aws_s3_bucket.old
+  to   = aws_s3_bucket.new
+}`,
+		`resource "aws_instance" "web" {
+  count = 2
+  lifecycle {
+    prevent_destroy       = true
+    create_before_destroy = true
+    replace_triggered_by  = [aws_instance.db]
+    ignore_changes        = [tags]
+  }
+  provisioner "local-exec" {
+    when    = destroy
+    command = "echo bye"
+  }
+}`,
+		`resource "aws_s3_bucket" "b" {
+  for_each = toset(["a", "b"])
+}`,
+		`terraform {
+  backend "s3" {
+    bucket = "state-bucket"
+    key    = "terraform.tfstate"
+  }
+}`,
+		"moved { from = }",
+		"terraform { backend \"s3\" {} }",
+	}
+
+	for _, s := range seeds {
+		f.Add(s)
+	}
+
+	f.Fuzz(func(t *testing.T, input string) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(input), 0o600); err != nil {
+			return
+		}
+		info, err := Inspect(dir)
+		if err != nil {
+			return
+		}
+		if info == nil {
+			t.Fatalf("Inspect returned nil module without error")
+		}
+		_ = ExtractResourceAddresses(info)
+	})
+}

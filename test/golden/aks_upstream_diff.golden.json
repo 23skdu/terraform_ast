@@ -51,7 +51,7 @@
       "category": "VariableDefault",
       "name": "os_disk_size_gb",
       "severity": "BREAKING",
-      "confidence_score": 8,
+      "confidence_score": 9,
       "description": "Default value for variable 'os_disk_size_gb' changed",
       "old_value": "50",
       "new_value": "100",
@@ -59,7 +59,8 @@
       "pos": {
         "filename": "<WORKSPACE>/test/fixtures/upstream_aks_v1/variables.tf",
         "line": 28
-      }
+      },
+      "evidence": 2
     },
     {
       "category": "VariableType",

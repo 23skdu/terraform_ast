@@ -274,6 +274,7 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				NewValue:    fmt.Sprintf("%v", newVar.Default),
 				Remediation: fmt.Sprintf("Review callers that omit '%s'; the default no longer matches", name),
 				Pos:         oldVar.Pos,
+				Evidence:    2,
 			})
 		}
 
@@ -588,6 +589,7 @@ func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					OldValue:    oldC,
 					NewValue:    newC,
 					Remediation: "Review provider migration guide and update resource schemas before upgrading",
+					Evidence:    2,
 				})
 			} else {
 				report.Warnings = append(report.Warnings, DifferenceItem{

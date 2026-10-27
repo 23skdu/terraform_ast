@@ -34,5 +34,5 @@
 | `Variable` | `authentication_mode` | Newly introduced variable 'authentication_mode' is required and has no default value | 8/10 | Provide a required value for 'authentication_mode' in wrapper module call |
 | `Variable` | `legacy_security_group_id` | Input variable 'legacy_security_group_id' was removed in upstream version | 8/10 | Remove variable 'legacy_security_group_id' from wrapper or module callers before upgrading |
 | `Variable` | `manage_aws_auth_configmap` | Input variable 'manage_aws_auth_configmap' was removed in upstream version | 8/10 | Remove variable 'manage_aws_auth_configmap' from wrapper or module callers before upgrading |
-| `VariableDefault` | `cluster_version` | Default value for variable 'cluster_version' changed | 8/10 | Review callers that omit 'cluster_version'; the default no longer matches |
+| `VariableDefault` | `cluster_version` | Default value for variable 'cluster_version' changed | 9/10 | Review callers that omit 'cluster_version'; the default no longer matches |
 

@@ -52,8 +52,8 @@ Audits a local wrapper module (such as a Google GKE or AWS EKS wrapper) against 
 - `--format <text|markdown|json|sarif>`: Output format (default: `text`). Use `sarif` for GitHub Code Scanning.
 - `--output <file>`: Write report to destination file (written with permissions `0644`).
 - `--exit-code`: Returns non-zero exit code (1) if breaking changes or policy violations are detected.
-- `--fix-preview`: Emit a preview-only unified patch for removed arguments passed by the wrapper. Currently supports removal of direct module-call arguments; it does not change files or apply other remediation types.
-- `--fix`: Apply fixes in-place to remove wrapper arguments no longer accepted upstream. Uses `hclwrite` to preserve comments and formatting. Mutually exclusive with `--fix-preview`.
+- `--fix-preview`: Emit a preview-only unified patch for removed arguments, note missing required inputs that `--fix` would inject, and preview synthesized `moved.tf` blocks without modifying files on disk.
+- `--fix`: Apply fixes in-place to remove obsolete wrapper arguments, inject missing required upstream inputs with safe primitive placeholders (`string` `""`, `bool` `false`, `number` `0`; exits with code 2 if a complex required input has no safe placeholder), and synthesize `moved.tf` for unmigrated address shifts. Mutually exclusive with `--fix-preview`.
 - `--golden-plan <file>`: Optional path to a Terraform plan JSON file (`terraform show -json <planfile>`). Correlates planned resource changes against detected `ForceNew` recreation hazards, address shifts, and replacement actions (`["delete", "create"]`). If omitted, automatically discovers candidate plans (`golden-plan.json`, `golden_plan.json`, `tfplan.json`, `plan.json`, `.terraform/tfplan.json`) in the wrapper directory.
 - `--provider-schema <file>`: Optional path to a provider schema JSON file (`terraform providers schema -json`). Dynamically extracts `requires_replace` metadata across resources and nested blocks to detect ForceNew recreation hazards across any cloud provider.
 - `--cache-dir <dir>`: Optional path to an on-disk directory for persistent L2 AST caching, accelerating monorepo traversals and pre-commit checks.
@@ -389,6 +389,8 @@ tfastdiff \
 ```
 **Outcome**:
 - Parses files with `hclwrite`, removing obsolete arguments from `module "..."` blocks while preserving comments and indentation.
+- Injects newly required primitive inputs (`string`, `bool`, `number`) with safe placeholders, or exits with code 2 when a complex required input requires manual intervention.
+- Synthesizes `moved.tf` migration blocks for unmigrated resource address shifts.
 
 ---
 

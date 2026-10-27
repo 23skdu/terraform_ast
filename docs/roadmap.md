@@ -2,7 +2,7 @@
 
 **Scope:** 20 numbered improvement items (`#91` – `#110`) covering analysis **accuracy**, analysis **performance**, and an expanded taxonomy of **destructive changes** that must be classified as breaking.
 
-**Status:** Open. Items are ordered by delivery batch, not by ID.
+**Status:** Delivered (`#91` – `#110` complete). Items are ordered by delivery batch, not by ID.
 
 ---
 
