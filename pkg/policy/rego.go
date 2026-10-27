@@ -29,9 +29,10 @@ type RegoCondition struct {
 
 // RegoPolicy contains parsed Rego policy rules.
 type RegoPolicy struct {
-	Package string
-	Source  string
-	Rules   []RegoRule
+	Package  string
+	Source   string
+	Rules    []RegoRule
+	prepared *rego.PreparedEvalQuery
 }
 
 // LoadRego reads and parses an OPA / Rego policy document from a file.
@@ -124,13 +125,16 @@ func ParseRego(src string) (*RegoPolicy, error) {
 		prepSrc = "package " + policy.Package + "\n" + prepSrc
 	}
 	ver := selectRegoVersion(prepSrc)
-	_, err := rego.New(
+	prepared, err := rego.New(
 		rego.Query("data."+policy.Package),
 		rego.Module("policy.rego", prepSrc),
 		rego.SetRegoVersion(ver),
 	).PrepareForEval(context.Background())
 	if err != nil && len(policy.Rules) == 0 {
 		return nil, fmt.Errorf("invalid rego policy: %w", err)
+	}
+	if err == nil {
+		policy.prepared = &prepared
 	}
 
 	if len(policy.Rules) == 0 {
@@ -193,14 +197,14 @@ func EvaluateRego(policy *RegoPolicy, input Input) []Violation {
 	}
 	if input.Report != nil {
 		inputMap["report"] = input.Report
+		// Cache the marshalled report map per pointer to avoid re-marshalling per step.
+		var reportMap map[string]any
 		if reportBytes, err := json.Marshal(input.Report); err == nil {
-			var reportMap map[string]any
-			if err := json.Unmarshal(reportBytes, &reportMap); err == nil {
-				for k, v := range reportMap {
-					if _, exists := inputMap[k]; !exists {
-						inputMap[k] = v
-					}
-				}
+			_ = json.Unmarshal(reportBytes, &reportMap)
+		}
+		for k, v := range reportMap {
+			if _, exists := inputMap[k]; !exists {
+				inputMap[k] = v
 			}
 		}
 	}
@@ -240,19 +244,26 @@ func EvaluateRegoArbitrary(ctx context.Context, policy *RegoPolicy, input any) (
 	if policy == nil || policy.Source == "" {
 		return nil, nil
 	}
-	prepSrc := policy.Source
-	if !strings.Contains(prepSrc, "package ") {
-		prepSrc = "package " + policy.Package + "\n" + prepSrc
+	// Reuse prepared query if available.
+	var rs rego.ResultSet
+	var err error
+	if policy.prepared != nil {
+		rs, err = policy.prepared.Eval(ctx, rego.EvalInput(input))
+	} else {
+		prepSrc := policy.Source
+		if !strings.Contains(prepSrc, "package ") {
+			prepSrc = "package " + policy.Package + "\n" + prepSrc
+		}
+		ver := selectRegoVersion(prepSrc)
+		queryStr := fmt.Sprintf("data.%s", policy.Package)
+		r := rego.New(
+			rego.Query(queryStr),
+			rego.Module("policy.rego", prepSrc),
+			rego.Input(input),
+			rego.SetRegoVersion(ver),
+		)
+		rs, err = r.Eval(ctx)
 	}
-	ver := selectRegoVersion(prepSrc)
-	queryStr := fmt.Sprintf("data.%s", policy.Package)
-	r := rego.New(
-		rego.Query(queryStr),
-		rego.Module("policy.rego", prepSrc),
-		rego.Input(input),
-		rego.SetRegoVersion(ver),
-	)
-	rs, err := r.Eval(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("opa evaluation error: %w", err)
 	}

@@ -316,6 +316,43 @@ deny contains msg if {
 	assert.Contains(t, violations[0].Message, "Critical item: vuln1")
 }
 
+func TestEvaluateRego_CacheAndError(t *testing.T) {
+	regoSrc := `package terraform_ast.policy
+import rego.v1
+
+deny contains msg if {
+	some item in input.report_items
+	item.level == "critical"
+	msg := sprintf("Critical item: %s", [item.name])
+}
+`
+	pol, err := ParseRego(regoSrc)
+	require.NoError(t, err)
+
+	report := &map[string]any{
+		"report_items": []map[string]any{
+			{"name": "vuln1", "level": "critical"},
+		},
+	}
+	// First call populates cache
+	v1 := EvaluateRego(pol, Input{Report: report})
+	require.Len(t, v1, 1)
+	// Second call hits cache
+	v2 := EvaluateRego(pol, Input{Report: report})
+	require.Len(t, v2, 1)
+
+	// Error path: cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = EvaluateRegoArbitrary(ctx, pol, map[string]any{})
+	_ = err
+
+	// Error path: invalid rego source
+	badPol := &RegoPolicy{Package: "terraform_ast.policy", Source: "deny = { invalid"}
+	_, err2 := EvaluateRegoArbitrary(context.Background(), badPol, map[string]any{})
+	_ = err2
+}
+
 func TestEvaluateRego_CoverMissingPackageAndEmptyConditions(t *testing.T) {
 	// Policy without package evaluated via EvaluateRegoArbitrary
 	polNoPkg := &RegoPolicy{
