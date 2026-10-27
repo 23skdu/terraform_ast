@@ -311,12 +311,14 @@ func TestPass5_CompareResourcesConsumedNewInTypeReassign(t *testing.T) {
 	}
 	newMod := &ast.ModuleInfo{
 		ManagedResources: map[string]ast.ResourceDef{
-			"aws_s3_bucket.x": {Mode: "managed", Type: "aws_s3_bucket", Name: "x", Provider: "aws"}, // exact match for first
-			"azure_blob.x":    {Mode: "managed", Type: "azure_blob", Name: "x", Provider: "azure"},
+			"azure_blob.x": {Mode: "managed", Type: "azure_blob", Name: "x", Provider: "azure"},
+			"gcp_bucket.x": {Mode: "managed", Type: "gcp_bucket", Name: "x", Provider: "gcp"},
 		},
 	}
-	report := Compare(oldMod, newMod, "1.0.0", "1.1.0")
-	require.NotNil(t, report)
+	for i := 0; i < 50; i++ {
+		report := Compare(oldMod, newMod, "1.0.0", "1.1.0")
+		require.NotNil(t, report)
+	}
 }
 
 func TestPass5_CompareModernBlocksNil(t *testing.T) {

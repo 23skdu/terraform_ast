@@ -1834,7 +1834,7 @@ func TestExecute_FixMode(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	code = Execute([]string{"--wrapper", wrapperDir, "--upstream", brokenUpstream, "--fix", "--policy", policyFile}, &stdout, &stderr)
-	assert.Equal(t, 1, code)
+	assert.Equal(t, 0, code)
 }
 
 func TestExecute_ProviderSchema(t *testing.T) {

@@ -228,6 +228,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	format = strings.ToLower(strings.TrimSpace(format))
 	switch format {
 	case "text", "markdown", "json", "sarif":
+		format = strings.ToLower(format)
 	default:
 		_, _ = fmt.Fprintf(stderr, "Error: invalid --format %q: expected one of text, markdown, json, sarif\n", format)
 		return 2
@@ -469,6 +470,17 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 			_, _ = fmt.Fprintf(stderr, "Error generating fix preview: %v\n", err)
 			return 1
 		}
+
+		// (Missing-input injection is performed by --fix; preview lists them as a note.)
+		var missingNames []string
+		for _, issue := range res.Issues {
+			if issue.Category == "MissingRequiredInput" {
+				missingNames = append(missingNames, issue.Target)
+			}
+		}
+		if len(missingNames) > 0 && preview == "" {
+			preview = "No automatic patch can be generated for removed arguments; --fix would inject missing required inputs: " + strings.Join(missingNames, ", ") + "\n"
+		}
 		var movedBlocksPreview string
 		if pinnedInfo != nil && targetInfo != nil {
 			shifts := ast.DetectAddressShifts(pinnedInfo, targetInfo)
@@ -516,6 +528,44 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error applying fixes: %v\n", err)
 			return 1
+		}
+
+		missingInputs := make(map[string]string)
+		for _, issue := range res.Issues {
+			if issue.Category != "MissingRequiredInput" {
+				continue
+			}
+			varName := issue.Target
+			placeholder := ""
+			canDerive := false
+			if targetInfo != nil {
+				if upVar, ok := targetInfo.Variables[varName]; ok {
+					switch strings.ToLower(strings.TrimSpace(upVar.Type)) {
+					case "string":
+						placeholder = ""
+						canDerive = true
+					case "bool":
+						placeholder = "false"
+						canDerive = true
+					case "number":
+						placeholder = "0"
+						canDerive = true
+					}
+				}
+			}
+			if !canDerive {
+				_, _ = fmt.Fprintf(stderr, "Cannot derive a safe placeholder for required input '%s'; refusing to write null. Supply it manually.\n", varName)
+				return 2
+			}
+			missingInputs[varName] = placeholder
+		}
+		if len(missingInputs) > 0 {
+			added, err := codemod.AddMissingInputs(wrapperPath, res.TargetModuleName, missingInputs)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "Error applying missing-input fixes: %v\n", err)
+				return 1
+			}
+			modified = append(modified, added...)
 		}
 		if pinnedInfo != nil && targetInfo != nil {
 			shifts := ast.DetectAddressShifts(pinnedInfo, targetInfo)
@@ -626,9 +676,10 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath, newPath, oldVersion, newVersion, format, outputFile string, checkRecreation, enforceExit1, analyzeUpgradePath bool, policyConfig *policy.Policy, regoPolicy *policy.RegoPolicy, verbose bool, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
 	vlog := func(format string, a ...any) {
 		if verbose {
-			_, _ = fmt.Fprintf(stderr, "[verbose] "+format+"\n", a...)
+			_, _ = fmt.Fprintf(stderr, "[verbose] "+format+"\\n", a...)
 		}
 	}
+	vlog("Comparing modules %s and %s", oldPath, newPath)
 	if oldPath == "" || newPath == "" {
 		_, _ = fmt.Fprintln(stderr, "Error: Both --old and --new must be specified for module comparison")
 		return 2
