@@ -104,7 +104,8 @@ flowchart TD
 ### 6. `pkg/recreation` (ForceNew Destruction & Golden Plan Verification Engine)
 - **Capabilities**:
   - Encodes infrastructure destruction heuristics for immutable cloud resources (GKE cluster name, project ID, location, region, network, subnetwork and secondary subnet CIDR blocks; AWS EKS cluster name, VPC ID and cluster IP family; Azure AKS cluster name, resource group, location and DNS prefix).
-  - Auto-discovers provider schemas (`AutoDiscoverSchemas`) from `required_providers` or ingests `terraform providers schema -json` dumps (`LoadProviderSchema`) to build a `DynamicHazardRegistry` of `requires_replace` attributes. Schema files and descriptors are memoized in memory by file path, mtime, and size to avoid redundant disk I/O.
+  - Ships built-in `requires_replace` catalogs for AWS (`hashicorp/aws`) and Google Cloud (`hashicorp/google`, `hashicorp/google-beta`) resources in addition to AzureRM, Kubernetes, and Cloudflare, so zero-configuration runs detect common AWS/GCP recreation hazards.
+   - Auto-discovers provider schemas (`AutoDiscoverSchemas`) from `required_providers` or ingests `terraform providers schema -json` dumps (`LoadProviderSchema`) to build a `DynamicHazardRegistry` of `requires_replace` attributes. Schema files and descriptors are memoized in memory by file path, mtime, and size to avoid redundant disk I/O.
   - **Golden Plan & Pin-Update Execution Plan Verification**:
     - Ingests Terraform plan JSON (`terraform show -json <planfile>`) via `--golden-plan` or automated autodiscovery (`golden-plan.json`, `golden_plan.json`, `tfplan.json`, `plan.json`, `.terraform/golden-plan.json`, `.terraform/tfplan.json`).
     - Flattens and normalizes planned resources across `resource_changes`, top-level `resources`, and hierarchical `planned_values.root_module`.
@@ -151,6 +152,12 @@ flowchart TD
 - **Capabilities**:
   - Renders both direct diffs and wrapper audits (including `UpstreamDiff` breaking changes, address shifts, recreation hazards, taint traces, blast radius, and golden plan verifications) with full parity across Terminal Text, GitHub-Flavored Markdown (`### Resource Address Shifts`), JSON, and **OASIS SARIF v2.1.0**.
   - Emits real 1-based declaration line numbers (`Pos.Line`) in SARIF `physicalLocation.region.startLine` and advertises rules `TF-DIFF-BREAKING-CHANGE`, `TF-DIFF-WARNING`, `TF-ADDRESS-SHIFT`, `TF-RECREATION-HAZARD`, `TF-WRAPPER-ISSUE`, `TF-UPSTREAM-BREAKING-CHANGE`, `TF-TAINT-REACHABLE`, and `TF-BLAST-RADIUS-CONSUMER`.
+
+### 12a. `pkg/visualize` (Deterministic SVG State-Graph Renderer)
+- **Capabilities**:
+  - Renders byte-stable SVG diagrams of before/after state address graphs and overlay transition graphs from `EvaluationGraph` and `DetectAddressShifts`.
+  - Pure SVG 1.1 with no external CSS or JavaScript; colour-coded node/edge fates (removed, added, retained, migrated).
+  - CLI integration via `--svg-before`, `--svg-after`, and `--svg-transition`.
 
 ### 13. `pkg/planner` — Plan Executor for Pin Updates & Multi-Version Upgrade Paths
 - **Purpose**: Computes and executes step-by-step upgrade plans between a current version pin (`--old-version`) and a target version (`--new-version`), identifying every intermediate release transition and determining the highest contiguous "safe harbor" version pin.

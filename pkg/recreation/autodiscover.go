@@ -103,6 +103,10 @@ func GetBuiltinProviderSchema(providerName string) *ProviderSchemas {
 				},
 			},
 		}
+	case "aws":
+		return awsBuiltinProviderSchema()
+	case "google", "google-beta":
+		return googleBuiltinProviderSchema()
 	default:
 		return nil
 	}
@@ -199,4 +203,77 @@ func AutoDiscoverAndRegister(mod *ast.ModuleInfo, cacheDir string, reg *DynamicH
 	}
 
 	return nil
+}
+
+// awsResourceSchema builds a ResourceSchema with the given ForceNew attribute names.
+func awsResourceSchema(attrs ...string) ResourceSchema {
+	attributes := make(map[string]AttributeSchema, len(attrs))
+	for _, attr := range attrs {
+		attributes[attr] = AttributeSchema{RequiresReplace: true, Description: "AWS ForceNew attribute: " + attr}
+	}
+	return ResourceSchema{Block: BlockSchema{Attributes: attributes}}
+}
+
+func awsBuiltinProviderSchema() *ProviderSchemas {
+	resources := map[string]ResourceSchema{
+		"aws_eks_cluster":       awsResourceSchema("name"),
+		"aws_eks_node_group":    awsResourceSchema("cluster_name", "node_group_name", "subnet_ids"),
+		"aws_db_instance":       awsResourceSchema("identifier", "engine", "storage_encrypted", "kms_key_id", "availability_zone"),
+		"aws_db_cluster":        awsResourceSchema("cluster_identifier", "engine"),
+		"aws_s3_bucket":         awsResourceSchema("bucket", "bucket_prefix"),
+		"aws_lambda_function":   awsResourceSchema("function_name", "function_name_prefix"),
+		"aws_iam_role":          awsResourceSchema("name", "name_prefix", "path"),
+		"aws_vpc":               awsResourceSchema("cidr_block", "instance_tenancy"),
+		"aws_subnet":            awsResourceSchema("vpc_id", "cidr_block", "availability_zone", "ipv6_cidr_block"),
+		"aws_security_group":    awsResourceSchema("name", "name_prefix", "vpc_id"),
+		"aws_instance":          awsResourceSchema("ami", "subnet_id", "availability_zone", "tenancy", "host_id"),
+		"aws_autoscaling_group": awsResourceSchema("name", "name_prefix", "launch_configuration"),
+		"aws_lb":                awsResourceSchema("name", "name_prefix", "internal", "load_balancer_type"),
+		"aws_route_table":       awsResourceSchema("vpc_id"),
+		"aws_nat_gateway":       awsResourceSchema("subnet_id", "allocation_id"),
+		"aws_kms_key":           awsResourceSchema("key_usage", "customer_master_key_spec"),
+		"aws_dynamodb_table":    awsResourceSchema("name", "name_prefix", "hash_key", "range_key"),
+		"aws_sqs_queue":         awsResourceSchema("name", "name_prefix", "fifo_queue"),
+		"aws_sns_topic":         awsResourceSchema("name", "name_prefix", "fifo_topic"),
+	}
+	return &ProviderSchemas{
+		FormatVersion: "1.0",
+		ProviderSchemas: map[string]ProviderSchema{
+			"registry.terraform.io/hashicorp/aws": {ResourceSchemas: resources},
+		},
+	}
+}
+
+func googleResourceSchema(attrs ...string) ResourceSchema {
+	attributes := make(map[string]AttributeSchema, len(attrs))
+	for _, attr := range attrs {
+		attributes[attr] = AttributeSchema{RequiresReplace: true, Description: "Google Cloud ForceNew attribute: " + attr}
+	}
+	return ResourceSchema{Block: BlockSchema{Attributes: attributes}}
+}
+
+func googleBuiltinProviderSchema() *ProviderSchemas {
+	resources := map[string]ResourceSchema{
+		"google_container_cluster":     googleResourceSchema("name", "location", "project", "project_id", "network", "subnetwork", "ip_range_pods", "ip_range_services"),
+		"google_container_node_pool":   googleResourceSchema("name", "location", "project", "cluster"),
+		"google_compute_instance":      googleResourceSchema("name", "zone", "project", "boot_disk", "network_interface"),
+		"google_sql_database_instance": googleResourceSchema("name", "database_version", "region", "project"),
+		"google_storage_bucket":        googleResourceSchema("name", "location", "project"),
+		"google_compute_network":       googleResourceSchema("name", "project"),
+		"google_compute_subnetwork":    googleResourceSchema("name", "region", "project", "network", "ip_cidr_range"),
+		"google_project":               googleResourceSchema("project_id", "org_id", "folder_id"),
+		"google_service_account":       googleResourceSchema("account_id", "project"),
+		"google_compute_firewall":      googleResourceSchema("name", "project", "network"),
+		"google_compute_disk":          googleResourceSchema("name", "zone", "project", "image", "source_image"),
+		"google_pubsub_topic":          googleResourceSchema("name", "project"),
+		"google_bigquery_dataset":      googleResourceSchema("dataset_id", "project", "location"),
+		"google_cloud_run_service":     googleResourceSchema("name", "location", "project"),
+	}
+	return &ProviderSchemas{
+		FormatVersion: "1.0",
+		ProviderSchemas: map[string]ProviderSchema{
+			"registry.terraform.io/hashicorp/google":      {ResourceSchemas: resources},
+			"registry.terraform.io/hashicorp/google-beta": {ResourceSchemas: resources},
+		},
+	}
 }

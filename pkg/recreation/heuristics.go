@@ -137,6 +137,70 @@ var genericHazards = map[string]HazardDescriptor{
 		Impact:      "Region is immutable on most cloud resources; changing it triggers ForceNew destruction.",
 		Remediation: "Keep the region unchanged, or migrate with a replacement plan.",
 	},
+	"project": {
+		Impact:      "Cloud project is immutable on most cloud resources; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the project unchanged, or migrate with a replacement plan.",
+	},
+	"project_id": {
+		Impact:      "Cloud project ID is immutable on most cloud resources; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the project ID unchanged, or migrate with a replacement plan.",
+	},
+	"vpc_id": {
+		Impact:      "VPC attachment is immutable on most cloud resources; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the VPC attachment unchanged, or migrate with a replacement plan.",
+	},
+	"subnet_id": {
+		Impact:      "Subnet attachment is immutable on most cloud resources; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the subnet attachment unchanged, or migrate with a replacement plan.",
+	},
+	"subnets": {
+		Impact:      "Subnet attachments are immutable on most cloud resources; changing them triggers ForceNew destruction.",
+		Remediation: "Keep the subnet attachments unchanged, or migrate with a replacement plan.",
+	},
+	"network": {
+		Impact:      "Network attachment is immutable on most cloud resources; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the network attachment unchanged, or migrate with a replacement plan.",
+	},
+	"subnetwork": {
+		Impact:      "Subnetwork attachment is immutable on most cloud resources; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the subnetwork attachment unchanged, or migrate with a replacement plan.",
+	},
+	"zone": {
+		Impact:      "Zone is immutable on most cloud resources; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the zone unchanged, or migrate with a replacement plan.",
+	},
+	"availability_zone": {
+		Impact:      "Availability zone is immutable on most cloud resources; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the availability zone unchanged, or migrate with a replacement plan.",
+	},
+	"cidr_block": {
+		Impact:      "CIDR block is immutable on most cloud resources; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the CIDR block unchanged, or migrate with a replacement plan.",
+	},
+	"bucket": {
+		Impact:      "Bucket name is immutable; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the bucket name unchanged, or plan for a replacement.",
+	},
+	"function_name": {
+		Impact:      "Function name is immutable; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the function name unchanged, or plan for a replacement.",
+	},
+	"account_id": {
+		Impact:      "Account ID is immutable; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the account ID unchanged, or plan for a replacement.",
+	},
+	"dataset_id": {
+		Impact:      "Dataset ID is immutable; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the dataset ID unchanged, or plan for a replacement.",
+	},
+	"hash_key": {
+		Impact:      "Hash key is immutable; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the hash key unchanged, or plan for a replacement.",
+	},
+	"range_key": {
+		Impact:      "Range key is immutable; changing it triggers ForceNew destruction.",
+		Remediation: "Keep the range key unchanged, or plan for a replacement.",
+	},
 }
 
 // matchModuleCategory classifies a module by the cloud it manages, or returns "" when the name
@@ -203,6 +267,9 @@ func LookupHazard(moduleName, varName string) (HazardDescriptor, bool) {
 		if desc, ok := knownModuleHazards[category][varName]; ok {
 			return desc, true
 		}
+		// A classified module resolves against its own provider table only; do not
+		// bleed generic or other providers' hazards into it.
+		return HazardDescriptor{}, false
 	}
 	desc, ok := genericHazards[varName]
 	return desc, ok

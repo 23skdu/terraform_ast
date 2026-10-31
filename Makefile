@@ -1,6 +1,7 @@
 .PHONY: all build test verify fuzz lint clean docker secure accuracy-gate venv oracle help
 
 BIN := bin/tfastdiff
+export PATH := $(shell go env GOPATH)/bin:$(PATH)
 FUZZ_TIME ?= 10
 VENV := .venv
 PYTHON := $(VENV)/bin/python3

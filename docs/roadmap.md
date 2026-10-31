@@ -553,3 +553,252 @@ Every item, without exception:
    `docs/features.md`, `docs/gates.md`, `docs/testing_methodology.md`) updated in the same change.
 7. **No emoji** anywhere in sources, fixtures, goldens, documentation, or workflow files; typographic
    arrows (`→`, `↔`) remain permitted.
+
+---
+
+# Strategic Product Roadmap — Pass 7
+
+**Scope:** 2 numbered improvement items (`#131` – `#132`) covering (1) visual SVG rendering of
+before/after state-graph transitions for any state change operation, and (2) deep validation that
+every AWS and Google Cloud Terraform recreation hazard (`ForceNew` / `requires_replace`) is detected.
+
+**Status:** In progress. Core AWS/GCP built-in ForceNew catalogs, generic hazard fallback, SVG renderer, CLI flags, and unit tests implemented; drift harness and golden fixtures remain.
+
+---
+
+## 0. How this pass was produced
+
+Pass 7 was produced from a gap analysis of the existing state-graph and recreation-hazard
+surfaces:
+
+- `pkg/ast/ir.go` already builds an `EvaluationGraph` and `DetectAddressShifts`, but no renderer
+  consumes these structures for human-facing visual output; the only renderers are text, Markdown,
+  JSON and SARIF in `pkg/report/report.go`.
+- `pkg/recreation/autodiscover.go` provides built-in schemas only for `azurerm`, `kubernetes` and
+  `cloudflare`. AWS and Google Cloud providers have **no** built-in `ForceNew` catalog, so hazard
+  detection for them depends entirely on an externally supplied `provider-schema.json` or a populated
+  `--cache-dir`. This leaves the default, zero-configuration path blind to the most common
+  AWS/GCP recreation hazards.
+- `knownModuleHazards` in `pkg/recreation/heuristics.go` covers only three flagship modules
+  (`gke`, `eks`, `aks`) and a handful of variables each; it does not enumerate resource-level
+  `ForceNew` attributes for the broader AWS/GCP resource surface.
+
+Baseline verified before writing this document:
+
+| Check | Result |
+| :--- | :--- |
+| `go build ./...` | clean |
+| `go vet ./...` | clean |
+| `go test ./...` | all packages ok |
+| Working tree | clean (Go dependency update committed separately) |
+
+---
+
+## 1. Feature 1 — SVG state-graph transitions (`#131`)
+
+### 1.1 Goal
+
+For **any** state change operation analysed by `tfastdiff` (wrapper upgrade, module diff, plan
+verification, blast-radius scan), emit three deterministic SVG images:
+
+1. **Before graph** — the tfstate resource/module address graph of the old version.
+2. **After graph** — the tfstate resource/module address graph of the new version.
+3. **Transition graph** — an overlay diff showing removed, added, retained, and migrated
+   (`moved {}`) nodes and edges, colour-coded by fate.
+
+The images must be pure SVG (no external CSS, no JavaScript) so they render identically in
+GitHub PR comments, CI artifacts, and offline viewers, and must be byte-stable for golden tests.
+
+### 1.2 Gap
+
+- `BuildEvaluationGraph` and `DetectAddressShifts` (`pkg/ast/ir.go`) produce the necessary node
+  and shift data, but there is no consumer that turns them into a diagram.
+- `report.Findings` carries `AddressShifts`, yet no renderer emits a visual artifact.
+- The CLI (`cmd/tfastdiff/main.go`) exposes `--format` values `text`, `markdown`, `json`, `sarif`
+  only; there is no `--svg-*` output control.
+- Terraform's own `terraform graph` requires an initialized `.terraform` directory and live
+  provider binaries; `tfastdiff` must not inherit that dependency.
+
+### 1.3 Design
+
+**New package `pkg/visualize`** (or `pkg/graphsvg`) with a small, dependency-free API:
+
+```go
+type Options struct {
+    Title        string
+    Width, Height int
+    Theme        Theme // light/dark
+}
+
+func RenderBefore(old *ast.ModuleInfo, opts Options) ([]byte, error)
+func RenderAfter(new *ast.ModuleInfo, opts Options) ([]byte, error)
+func RenderTransition(old, new *ast.ModuleInfo, shifts []ast.ResourceAddressShift, opts Options) ([]byte, error)
+```
+
+Implementation strategy (no CGO, no external graphviz):
+
+1. **Graph model.** Build a layered directed graph from `EvaluationGraph`:
+   - Nodes: module calls (`mode == "module"`), managed resources, data resources.
+   - Edges: containment edges (module → child resource/module), plus dependency edges derived
+     from `eval.TaintReport` / expression references where available; absence of a dependency
+     edge must never drop a node.
+   - Node identity: `ResourceAddress.FullAddress()` so before/after nodes can be matched.
+2. **Layout.** Deterministic topological layering (Sugiyama-style) with stable tie-breaking by
+   sorted address, followed by horizontal compaction. No randomness; identical input yields
+   byte-identical SVG.
+3. **Rendering.** Hand-written SVG 1.1 with:
+   - `<rect>`/`<text>` nodes, `<path>` edges with arrowheads.
+   - Colour legend: removed (red), added (green), retained (grey), migrated (blue, dashed),
+     hazardous (amber outline when a `RecreationHazard` applies).
+   - Embedded `<title>` and `aria-label` for accessibility.
+   - No external stylesheets or scripts.
+4. **CLI integration.**
+   - New flags: `--svg-before <path>`, `--svg-after <path>`, `--svg-transition <path>`,
+     `--svg-width`, `--svg-height`, `--svg-theme`.
+   - In compare mode, write the requested files after `diff.Compare`; in wrapper mode, render
+     the wrapper's transition.
+   - LSP: expose `tfastdiff/renderSvg` code action returning a data URI for IDE preview.
+5. **Report integration.** `Findings` gains an optional `SVGArtifacts map[string]string` (paths
+   or base64) so JSON/SARIF consumers can reference the images; Markdown renderer embeds
+   `![before](...)` / `![after](...)` / `![transition](...)` links when paths are supplied.
+
+### 1.4 Acceptance
+
+- `tfastdiff --old X --new Y --svg-transition out.svg` produces a valid SVG (parses with
+  `encoding/xml`, `<svg>` root, finite dimensions) for every fixture in `test/fixtures`.
+- Identity transition (`X == Y`) renders every node as retained and zero removed/added nodes.
+- Unmigrated address shift renders the old node red, the new node green, and a dashed
+  migration edge labelled with the reason.
+- Golden tests: byte-identical SVG for a fixed fixture under `test/golden/svg/`.
+- 100 % statement coverage for `pkg/visualize`; fuzz target on arbitrary address strings
+  (no panic, valid XML).
+
+---
+
+## 2. Feature 2 — AWS and Google Cloud recreation hazard validation (`#132`)
+
+### 2.1 Goal
+
+Make `tfastdiff` detect, by default and with no external schema file, **every** `ForceNew` /
+`requires_replace` attribute that the AWS and Google Cloud Terraform providers declare as
+immutable, and validate that detection against real provider schemas and a curated regression
+matrix. Today AWS and GCP have zero built-in coverage (only `azurerm`, `kubernetes` and
+`cloudflare` are seeded in `GetBuiltinProviderSchema`).
+
+### 2.2 Gap
+
+- `GetBuiltinProviderSchema` (`pkg/recreation/autodiscover.go`) returns `nil` for `aws` and
+  `google` providers, so `AutoDiscoverAndRegister` produces no descriptors for them unless a
+  `provider-schema.json` or cached schema is present.
+- `knownModuleHazards` (`pkg/recreation/heuristics.go`) is module-name keyed and covers only
+  `eks`/`gke`/`aks` with a handful of variables; it cannot catch resource-level attribute
+  changes such as `aws_db_instance.engine` or `google_compute_instance.machine_type` where
+  applicable.
+- There is no validation harness that compares built-in descriptors against an actual
+  `terraform providers schema -json` dump, so drift between the seeded catalog and the live
+  provider goes unnoticed.
+
+### 2.3 Design
+
+**A. Built-in AWS and Google schema catalogs.** Extend `GetBuiltinProviderSchema` with
+synthetic `ProviderSchemas` for `hashicorp/aws` and `hashicorp/google` (and `google-beta`),
+seeded from the providers' published `requires_replace` metadata. Priority resource set:
+
+| Provider | Resources (seed catalog) |
+| :--- | :--- |
+| AWS | `aws_eks_cluster`, `aws_eks_node_group`, `aws_db_instance`, `aws_db_cluster`, `aws_s3_bucket`, `aws_lambda_function`, `aws_iam_role`, `aws_vpc`, `aws_subnet`, `aws_security_group`, `aws_instance`, `aws_autoscaling_group`, `aws_lb`, `aws_route_table`, `aws_nat_gateway`, `aws_kms_key`, `aws_dynamodb_table`, `aws_sqs_queue`, `aws_sns_topic` |
+| GCP | `google_container_cluster`, `google_container_node_pool`, `google_compute_instance`, `google_sql_database_instance`, `google_storage_bucket`, `google_compute_network`, `google_compute_subnetwork`, `google_project`, `google_service_account`, `google_compute_firewall`, `google_compute_disk`, `google_pubsub_topic`, `google_bigquery_dataset`, `google_cloud_run_service` |
+
+Each resource's ForceNew attributes are captured with the same `AttributeSchema{RequiresReplace: true}`
+encoding already used for `azurerm`, including nested blocks (`metadata`, `network_interface`,
+`boot_disk`, etc.) via `extractFromBlock`.
+
+**B. Hazard categories to validate.** Beyond the existing module-variable heuristics, every
+seeded descriptor must be exercised for these immutable-attribute families:
+
+- **Identity / naming:** `name`, `name_prefix`, `bucket`, `function_name`, `role_name`,
+  `cluster_name`, `database_name`, `topic_name`, `queue_name`.
+- **Placement:** `region`, `location`, `zone`, `availability_zone`, `availability_zones`,
+  `project`, `project_id`.
+- **Network attachment:** `vpc_id`, `subnet_id`, `subnetwork`, `network`, `vpc_config`,
+  `ip_configuration`, `secondary_ip_range`.
+- **Engine / runtime:** `engine`, `engine_version` (where `requires_replace`), `runtime`,
+  `machine_type` (GCP instance recreation), `instance_type` (AWS where ForceNew),
+  `database_version`.
+- **Encryption / keys:** `kms_key_id`, `cmek_key`, `encryption` (where immutable).
+- **IAM / security:** `assume_role_policy` (some providers ForceNew), `managed_policy_arns`
+  (attachment recreation), `role_arn`.
+
+**C. Validation harness.**
+1. `TestAWSGoogleHazardCatalog` — table-driven test asserting each seeded descriptor is
+   discoverable through both `LookupHazard` (heuristic path) and `DynamicHazardRegistry.Lookup`
+   (schema path) for a representative variable/attribute name.
+2. `TestBuiltinSchemaDrift` (build-tag `provider_schema`) — when `TF_PROVIDER_SCHEMA_DIR` or
+   `testdata/provider-schemas/aws.json` / `google.json` is present, load the real dump and
+   assert every `requires_replace` attribute in the dump is present in the built-in catalog
+   (reporting, not failing, on newly added upstream attributes so the catalog can be refreshed).
+3. `scripts/validate_hazards.py` (stdlib only) — parses provider schema dumps and emits a
+   diff between the dump's ForceNew set and `pkg/recreation`'s seeded set, for CI use.
+4. Golden fixtures under `test/golden/hazards/aws/` and `.../gcp/` covering at least one
+   breaking and one safe transition per priority resource.
+5. Oracle assertions (`scripts/oracle_verify.py`) extended to assert AWS/GCP hazard counts
+   for the new fixtures.
+
+**D. Heuristic fallback for unclassified modules.** When a module name carries no cloud token
+(e.g. a bare directory comparison), the generic hazard table must be augmented with the
+AWS/GCP attribute names above so that a changed `name`, `region`, `location`, `project_id`,
+`vpc_id`, `subnet_id`, `network`, or `subnetwork` is still flagged even without a provider
+classification. This must not reintroduce the cross-provider misattribution bug fixed in
+Pass 6 (`matchModuleCategory` token-aware matching stays authoritative when a cloud token
+is present).
+
+### 2.4 Acceptance
+
+- `AutoDiscoverSchemas` for a module whose `required_providers` block declares `hashicorp/aws`
+  or `hashicorp/google` yields a non-empty `DynamicHazardRegistry` with no external schema file.
+- For each priority resource, changing a seeded ForceNew attribute between two fixture
+  versions produces a `RecreationHazard` with severity `CRITICAL_HAZARD` and a non-empty
+  `Remediation`.
+- `go test ./pkg/recreation/...` passes with 100 % statement coverage, including the new
+  AWS/GCP paths.
+- Drift check reports zero missing seeded attributes against the vendored schema dumps in
+  `testdata/provider-schemas/`.
+- Oracle verification passes with the extended AWS/GCP assertions.
+
+---
+
+## 3. The 2 improvement items
+
+| ID | Class | Pri | Item |
+| :--- | :--- | :--- | :--- |
+| `#131` | Visualization | P1 | Render byte-stable SVG before/after/transition state graphs from `EvaluationGraph` and `DetectAddressShifts`, with CLI flags and Markdown embedding |
+| `#132` | Accuracy | P0 | AWS and Google Cloud `ForceNew` hazard catalog, built-in schemas, heuristic fallback, drift validation harness, and golden/oracle coverage |
+
+---
+
+## 4. Delivery sequence
+
+```mermaid
+flowchart TD
+    A["#132 AWS/GCP hazard catalog and validation (P0)"] --> B["#131 SVG state-graph rendering (P1)"]
+```
+
+| Batch | Items | Rationale |
+| :--- | :--- | :--- |
+| A — Hazard coverage | `#132` | Closes the largest default-configuration blind spot: zero built-in AWS/GCP ForceNew detection |
+| B — Visualization | `#131` | Depends on stable graph model and shift data already shipped in Pass 6; pure additive, no behavioural risk |
+
+---
+
+## 5. Definition of done
+
+Every item, without exception, satisfies the Pass 6 Definition of Done (§6 of
+`docs/roadmap.md` Pass 6), plus:
+
+1. **SVG validity.** Every emitted SVG parses as XML, has a single `<svg>` root, finite
+   width/height, and renders in at least one headless viewer (`rsvg-convert` or browser) without
+   error.
+2. **Byte stability.** Identical input produces byte-identical SVG; verified by golden tests.
+3. **Hazard drift gate.** CI runs the drift check against vendored AWS/GCP schema dumps and
+   fails on any seeded attribute that disappears upstream (additions are warnings).
+4. **No emoji** anywhere in sources, fixtures, goldens, documentation, or workflow files.

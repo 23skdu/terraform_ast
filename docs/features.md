@@ -75,7 +75,13 @@ flowchart LR
 - **Quick-Fix Code Actions**: `textDocument/codeAction` and `workspace/executeCommand` write `moved {}` blocks and inject missing required module inputs. Both commands are registered in `executeCommandProvider`, so a client can actually run them.
 - **Protocol Correctness**: Notifications are never answered, the `initialize`/`shutdown`/`exit` lifecycle is honoured, and message framing rejects an out-of-range `Content-Length` instead of allocating from it.
 
-### 9. Enterprise Supply Chain Security & SLSA Level 3 (`.github/workflows`)
+### 9. Deterministic SVG State-Graph Visualization (`pkg/visualize`)
+- **Pure-SVG Rendering**: Emits byte-stable SVG diagrams of before/after state address graphs and overlay transition graphs from `EvaluationGraph` and `DetectAddressShifts`, with no external CSS or JavaScript.
+- **Colour-Coded Fates**: Removed (red), added (green), retained (grey), and migrated (blue) nodes and edges, including dashed migration edges for unmigrated address shifts.
+- **CLI Integration**: `--svg-before`, `--svg-after`, and `--svg-transition` write the requested artifacts with least-privilege `0600` permissions.
+- **Accessibility**: Embedded `<title>` and accessible labels; finite dimensions default to 1200x800 and grow with the address count.
+
+### 10. Enterprise Supply Chain Security & SLSA Level 3 (`.github/workflows`)
 - **Hermetic SLSA Level 3 Provenance**: Automated cryptographic build attestations via GitHub Actions builders.
 - **Sigstore Cosign Keyless Signing**: Cryptographically signs release binaries and container images.
 - **Syft SBOM**: Generates both CycloneDX and SPDX Software Bill of Materials at build time.

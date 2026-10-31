@@ -27,6 +27,7 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/registry"
 	"github.com/23skdu/terraform_ast/pkg/report"
 	"github.com/23skdu/terraform_ast/pkg/semverutil"
+	"github.com/23skdu/terraform_ast/pkg/visualize"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
 )
 
@@ -96,6 +97,9 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		clearCache         bool
 		lspDaemon          bool
 		registryTimeout    time.Duration
+		svgBefore          string
+		svgAfter           string
+		svgTransition      string
 	)
 
 	fs.BoolVar(&showVersion, "version", false, "Print version and exit")
@@ -139,6 +143,9 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&clearCache, "clear-cache", false, "Remove cached module inspections from --cache-dir and exit")
 	fs.BoolVar(&lspDaemon, "lsp", false, "Start Language Server Protocol (LSP) daemon for IDE integration")
 	fs.DurationVar(&registryTimeout, "registry-timeout", defaultRegistryTimeout, "Maximum time to spend retrying and waiting on a single Terraform Registry request")
+	fs.StringVar(&svgBefore, "svg-before", "", "Write an SVG rendering of the before state graph to this path")
+	fs.StringVar(&svgAfter, "svg-after", "", "Write an SVG rendering of the after state graph to this path")
+	fs.StringVar(&svgTransition, "svg-transition", "", "Write an SVG rendering of the before/after transition graph to this path")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -289,7 +296,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stderr, "Error: --blast-radius is only available in wrapper audit mode")
 			return 2
 		}
-		return runCompareMode(ctx, registryTimeout, oldPath, newPath, oldVersion, newVersion, format, outputFile, checkRecreation, enforceExit1, upgradePath, policyConfig, regoPolicy, verbose, dynamicRegistry, stdout, stderr)
+		return runCompareMode(ctx, registryTimeout, oldPath, newPath, oldVersion, newVersion, format, outputFile, checkRecreation, enforceExit1, upgradePath, policyConfig, regoPolicy, verbose, dynamicRegistry, svgBefore, svgAfter, svgTransition, stdout, stderr)
 	}
 
 	_, _ = fmt.Fprintln(stderr, "Error: Must specify either --wrapper <dir> OR --old <path> and --new <path>")
@@ -704,7 +711,7 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 	return 0
 }
 
-func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath, newPath, oldVersion, newVersion, format, outputFile string, checkRecreation, enforceExit1, analyzeUpgradePath bool, policyConfig *policy.Policy, regoPolicy *policy.RegoPolicy, verbose bool, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
+func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath, newPath, oldVersion, newVersion, format, outputFile string, checkRecreation, enforceExit1, analyzeUpgradePath bool, policyConfig *policy.Policy, regoPolicy *policy.RegoPolicy, verbose bool, dynamicRegistry *recreation.DynamicHazardRegistry, svgBefore, svgAfter, svgTransition string, stdout, stderr io.Writer) int {
 	vlog := func(format string, a ...any) {
 		if verbose {
 			_, _ = fmt.Fprintf(stderr, "[verbose] "+format+"\\n", a...)
@@ -988,6 +995,40 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		}
 		findings.RecreationHazards = recreation.AnalyzeHazardsWithRegistry(diffReport, dynamicRegistry)
 	}
+	if svgBefore != "" {
+		data, err := visualize.RenderBefore(oldInfo, visualize.Options{Title: "Before"})
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error rendering SVG: %v\n", err)
+			return 1
+		}
+		if err := os.WriteFile(filepath.Clean(svgBefore), data, 0600); err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error writing SVG: %v\n", err)
+			return 1
+		}
+	}
+	if svgAfter != "" {
+		data, err := visualize.RenderAfter(newInfo, visualize.Options{Title: "After"})
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error rendering SVG: %v\n", err)
+			return 1
+		}
+		if err := os.WriteFile(filepath.Clean(svgAfter), data, 0600); err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error writing SVG: %v\n", err)
+			return 1
+		}
+	}
+	if svgTransition != "" {
+		data, err := visualize.RenderTransition(oldInfo, newInfo, diffReport.AddressShifts, visualize.Options{Title: "Transition"})
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error rendering SVG: %v\n", err)
+			return 1
+		}
+		if err := os.WriteFile(filepath.Clean(svgTransition), data, 0600); err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error writing SVG: %v\n", err)
+			return 1
+		}
+	}
+
 	outContent := renderDiffOutput(format, diffReport, findings)
 
 	if err := writeOutput(outputFile, outContent, stdout); err != nil {
