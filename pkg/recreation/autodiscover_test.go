@@ -32,6 +32,17 @@ func TestGetBuiltinProviderSchema(t *testing.T) {
 	require.NotNil(t, cfPS)
 	assert.Contains(t, cfPS.ProviderSchemas["registry.terraform.io/cloudflare/cloudflare"].ResourceSchemas, "cloudflare_zone")
 
+	awsPS := GetBuiltinProviderSchema("hashicorp/aws")
+	require.NotNil(t, awsPS)
+	assert.NotEmpty(t, awsPS.ProviderSchemas)
+
+	googlePS := GetBuiltinProviderSchema("hashicorp/google")
+	require.NotNil(t, googlePS)
+	assert.NotEmpty(t, googlePS.ProviderSchemas)
+
+	googleBetaPS := GetBuiltinProviderSchema("google-beta")
+	require.NotNil(t, googleBetaPS)
+
 	unknownPS := GetBuiltinProviderSchema("random/unknown")
 	assert.Nil(t, unknownPS)
 }

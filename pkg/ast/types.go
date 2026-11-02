@@ -109,14 +109,14 @@ type EncryptionBlockDef struct {
 
 // ResourceDef captures managed and data resource definitions in a Terraform module.
 type ResourceDef struct {
-	Mode         string             `json:"mode"` // "managed" or "data"
-	Type         string             `json:"type"`
-	Name         string             `json:"name"`
-	Provider     string             `json:"provider,omitempty"`
-	Count        string             `json:"count,omitempty"`
-	ForEach      string             `json:"for_each,omitempty"`
-	Lifecycle    LifecycleFlags     `json:"lifecycle,omitempty"`
-	Provisioners []string           `json:"provisioners,omitempty"`
+	Mode           string             `json:"mode"` // "managed" or "data"
+	Type           string             `json:"type"`
+	Name           string             `json:"name"`
+	Provider       string             `json:"provider,omitempty"`
+	Count          string             `json:"count,omitempty"`
+	ForEach        string             `json:"for_each,omitempty"`
+	Lifecycle      LifecycleFlags     `json:"lifecycle,omitempty"`
+	Provisioners   []string           `json:"provisioners,omitempty"`
 	Triggers       map[string]string  `json:"triggers,omitempty"`
 	Attributes     map[string]string  `json:"attributes,omitempty"`
 	Preconditions  []string           `json:"preconditions,omitempty"`

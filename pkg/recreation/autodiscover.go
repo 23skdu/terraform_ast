@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
 )

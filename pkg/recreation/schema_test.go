@@ -148,6 +148,16 @@ func TestDynamicHazardRegistryAndAnalysis(t *testing.T) {
 	_, found = reg.Lookup("unknown_attr")
 	assert.False(t, found)
 
+	// LookupHazard
+	isForce, impact, remediation := reg.LookupHazard("zone")
+	assert.True(t, isForce)
+	assert.NotEmpty(t, impact)
+	assert.NotEmpty(t, remediation)
+	isForce, _, _ = reg.LookupHazard("unknown_attr")
+	assert.False(t, isForce)
+	isForce, _, _ = nilReg.LookupHazard("zone")
+	assert.False(t, isForce)
+
 	// AnalyzeHazardsWithRegistry with nil diffReport
 	assert.Nil(t, AnalyzeHazardsWithRegistry(nil, reg))
 

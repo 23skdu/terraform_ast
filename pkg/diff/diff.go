@@ -1070,7 +1070,6 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 		newBackendType = newMod.Backend.Type
 	}
 
-
 	// backend <-> cloud transition
 	if (oldMod.Backend != nil && newMod.Cloud != nil) || (oldMod.Cloud != nil && newMod.Backend != nil) {
 		report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
@@ -1078,7 +1077,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 			Name:        "backend",
 			Severity:    SeverityBreaking,
 			Description: "State backend configuration transitioned between backend {} and cloud {}",
-			OldValue:    func() string {
+			OldValue: func() string {
 				if oldMod.Backend != nil {
 					return oldMod.Backend.Type
 				}
