@@ -515,7 +515,7 @@ func parseAndEnrichModuleWithOverlay(dir string, entries []os.DirEntry, info *Mo
 					condContent, _, _ := block.Body.PartialContent(&hcl.BodySchema{
 						Blocks: []hcl.BlockHeaderSchema{{Type: condType}},
 					})
-					if condContent == nil {
+					if condContent == nil || len(condContent.Blocks) == 0 {
 						continue
 					}
 					for _, cc := range condContent.Blocks {
@@ -725,6 +725,27 @@ func parseAndEnrichModuleWithOverlay(dir string, entries []os.DirEntry, info *Mo
 						if v, ok := lcAttrs["ignore_changes"]; ok {
 							res.Lifecycle.IgnoreChanges = append(res.Lifecycle.IgnoreChanges, splitHCLListExpr(string(src[v.Expr.Range().Start.Byte:v.Expr.Range().End.Byte]))...)
 						}
+						// precondition / postcondition blocks inside lifecycle (#140)
+						for _, condType := range []string{"precondition", "postcondition"} {
+							condContent, _, _ := lc.Body.PartialContent(&hcl.BodySchema{
+								Blocks: []hcl.BlockHeaderSchema{{Type: condType}},
+							})
+							if condContent == nil || len(condContent.Blocks) == 0 {
+								continue
+							}
+							for _, cc := range condContent.Blocks {
+								ccAttrs, _ := cc.Body.JustAttributes()
+								condStr := ""
+								if cAttr, ok := ccAttrs["condition"]; ok {
+									condStr = strings.TrimSpace(string(src[cAttr.Expr.Range().Start.Byte:cAttr.Expr.Range().End.Byte]))
+								}
+								if condType == "precondition" {
+									res.Preconditions = append(res.Preconditions, condStr)
+								} else {
+									res.Postconditions = append(res.Postconditions, condStr)
+								}
+							}
+						}
 					}
 				}
 				// provisioner blocks
@@ -746,7 +767,7 @@ func parseAndEnrichModuleWithOverlay(dir string, entries []os.DirEntry, info *Mo
 					condContent, _, _ := block.Body.PartialContent(&hcl.BodySchema{
 						Blocks: []hcl.BlockHeaderSchema{{Type: condType}},
 					})
-					if condContent == nil {
+					if condContent == nil || len(condContent.Blocks) == 0 {
 						continue
 					}
 					for _, cc := range condContent.Blocks {

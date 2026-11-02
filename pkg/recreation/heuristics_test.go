@@ -126,6 +126,7 @@ func TestAnalyzeWrapperHazards(t *testing.T) {
 		TargetModuleName: "terraform-aws-modules/eks/aws",
 		Issues: []wrapper.WrapperIssue{
 			{
+				Severity:    diff.SeverityBreaking,
 				Category:    "BreakingChange",
 				Target:      "vpc_id",
 				Description: "Changed",
@@ -146,7 +147,7 @@ func TestAnalyzeWrapperHazards(t *testing.T) {
 				{Category: "VariableDefault", Name: "not_a_hazard"},
 			},
 			Warnings: []diff.DifferenceItem{
-				{Category: "VariableDefault", Name: "location"},
+				{Category: "VariableDefault", Name: "name"},
 				{Category: "VariableDefault", Name: "not_a_hazard_2"},
 			},
 		},

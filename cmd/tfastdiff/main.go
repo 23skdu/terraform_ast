@@ -996,33 +996,21 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		findings.RecreationHazards = recreation.AnalyzeHazardsWithRegistry(diffReport, dynamicRegistry)
 	}
 	if svgBefore != "" {
-		data, err := visualize.RenderBefore(oldInfo, visualize.Options{Title: "Before"})
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "Error rendering SVG: %v\n", err)
-			return 1
-		}
+		data, _ := visualize.RenderBefore(oldInfo, visualize.Options{Title: "Before"})
 		if err := os.WriteFile(filepath.Clean(svgBefore), data, 0600); err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error writing SVG: %v\n", err)
 			return 1
 		}
 	}
 	if svgAfter != "" {
-		data, err := visualize.RenderAfter(newInfo, visualize.Options{Title: "After"})
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "Error rendering SVG: %v\n", err)
-			return 1
-		}
+		data, _ := visualize.RenderAfter(newInfo, visualize.Options{Title: "After"})
 		if err := os.WriteFile(filepath.Clean(svgAfter), data, 0600); err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error writing SVG: %v\n", err)
 			return 1
 		}
 	}
 	if svgTransition != "" {
-		data, err := visualize.RenderTransition(oldInfo, newInfo, diffReport.AddressShifts, visualize.Options{Title: "Transition"})
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "Error rendering SVG: %v\n", err)
-			return 1
-		}
+		data, _ := visualize.RenderTransition(oldInfo, newInfo, diffReport.AddressShifts, visualize.Options{Title: "Transition"})
 		if err := os.WriteFile(filepath.Clean(svgTransition), data, 0600); err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error writing SVG: %v\n", err)
 			return 1

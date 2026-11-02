@@ -238,10 +238,7 @@ func AnalyzeWrapper(
 			if len(v) < 2 {
 				continue
 			}
-			root, ok := v[0].(hcl.TraverseRoot)
-			if !ok {
-				continue
-			}
+			root, _ := v[0].(hcl.TraverseRoot)
 			switch root.Name {
 			case "var":
 				if attr, ok := v[1].(hcl.TraverseAttr); ok && !seenVar[attr.Name] {
@@ -284,10 +281,7 @@ func AnalyzeWrapper(
 					if len(v) < 2 {
 						continue
 					}
-					root, ok := v[0].(hcl.TraverseRoot)
-					if !ok {
-						continue
-					}
+					root, _ := v[0].(hcl.TraverseRoot)
 					switch root.Name {
 					case "var":
 						if attr, ok := v[1].(hcl.TraverseAttr); ok {

@@ -132,8 +132,7 @@ func RenderTransition(old, new *ast.ModuleInfo, shifts []ast.ResourceAddressShif
 		y := startY + i*rowH
 		color := "#8b949e"
 		if _, ok := newIndex[a.FullAddress()]; !ok {
-			// removed unless shifted
-			if _, shifted := shiftMap[a.FullAddress()]; shifted {
+			if newAddr, shifted := shiftMap[a.FullAddress()]; shifted && newAddr != "" {
 				color = "#58a6ff"
 			} else {
 				color = "#f85149"

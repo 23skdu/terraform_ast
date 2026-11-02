@@ -286,11 +286,6 @@ func EvaluateRego(policy *RegoPolicy, input Input) []Violation {
 				reportMapCache.put(key, reportHash, reportMap)
 			}
 		}
-		if reportMap == nil {
-			if rb, err := json.Marshal(input.Report); err == nil {
-				_ = json.Unmarshal(rb, &reportMap)
-			}
-		}
 		for k, v := range reportMap {
 			if _, exists := inputMap[k]; !exists {
 				inputMap[k] = v
