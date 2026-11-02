@@ -54,3 +54,23 @@ __pycache__/
 .pytest_cache/
 oracle_report.json
 
+# OpenCode local configuration
+opencode.json
+opencode.jsonc
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+
+# Security-sensitive material
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+*.secret
+secrets/
+credentials.json
+
