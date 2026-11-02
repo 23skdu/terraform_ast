@@ -2,7 +2,7 @@
 
 **Scope:** 20 numbered improvement items (`#153` – `#172`) covering analysis **accuracy**, analysis **performance**, test coverage, and an expanded taxonomy of **destructive changes** that must be classified as breaking.
 
-**Status:** Planned. Items are derived from a deep static audit after the Pass 8 delivery, focusing on incomplete wiring of newly added capabilities, dead entry points, correctness bugs in the new code, and missing regression coverage.
+**Status:** Completed. All 20 items (#153 - #172) implemented and verified with passing tests across all packages.
 
 ---
 
@@ -32,7 +32,7 @@ Baseline verified before writing this document:
 | Pass 6 | `#111` – `#130` | Detection blind spots, semantic/wrapper precision, performance/caching |
 | Pass 7 | `#131` – `#132` | SVG state-graph rendering, AWS/GCP ForceNew hazard catalog |
 | Pass 8 | `#133` – `#152` | Schema-driven diffing, module/provider/cloud deep diffing, taint precision, cache/LSP correctness |
-| **Pass 9** | **`#153` – `#172`** | **Planned: wiring, dead-code removal, correctness fixes, coverage, and taxonomy widening** |
+| **Pass 9** | **`#153` – `#172`** | **Delivered: wiring, dead-code removal, correctness fixes, coverage, and taxonomy widening** |
 
 ---
 
