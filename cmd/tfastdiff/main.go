@@ -461,7 +461,7 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 	}
 
 	vlog("Analyzing wrapper compatibility against target upstream")
-	res := wrapper.AnalyzeWrapper(wInfo, targetInfo, pinnedInfo, newVersion, oldVersion)
+	res := wrapper.AnalyzeWrapper(wInfo, targetInfo, pinnedInfo, newVersion, oldVersion, dynamicRegistry)
 	res.WrapperPath = wrapperPath
 	if policyConfig != nil || regoPolicy != nil {
 		policyInput := policy.Input{
@@ -906,7 +906,7 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 	}
 
 	vlog("Comparing modules: %s -> %s", oldVersion, newVersion)
-	diffReport := diff.Compare(oldInfo, newInfo, oldVersion, newVersion)
+	diffReport := diff.Compare(oldInfo, newInfo, oldVersion, newVersion, dynamicRegistry)
 	// Identify the compared module by the source the user asked for, so reports and SARIF
 	// artifact locations name the module instead of a temporary extraction directory.
 	comparedSource := comparisonSource(newPath, oldPath)

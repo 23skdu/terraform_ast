@@ -10,18 +10,18 @@ import (
 )
 
 func TestAnalyzeWrapper_NilInputs(t *testing.T) {
-	report := AnalyzeWrapper(nil, nil, nil, "1.0.0", "1.0.0")
+	report := AnalyzeWrapper(nil, nil, nil, "1.0.0", "1.0.0", nil)
 	assert.NotNil(t, report)
 	assert.True(t, report.CanSafelyUpdate)
 	assert.Equal(t, "SAFE_TO_PIN", report.Verdict)
 }
 
 func TestAnalyzeWrapper_NonSemverVersion(t *testing.T) {
-	report := AnalyzeWrapper(nil, nil, nil, "latest", "")
+	report := AnalyzeWrapper(nil, nil, nil, "latest", "", nil)
 	assert.NotNil(t, report)
 	assert.Equal(t, `version = "latest"`, report.RecommendedPin)
 
-	reportEmpty := AnalyzeWrapper(nil, nil, nil, "", "")
+	reportEmpty := AnalyzeWrapper(nil, nil, nil, "", "", nil)
 	assert.NotNil(t, reportEmpty)
 	assert.Equal(t, `version = ""`, reportEmpty.RecommendedPin)
 }
@@ -97,7 +97,7 @@ func TestAnalyzeWrapper_BreakingIssues(t *testing.T) {
 		},
 	}
 
-	report := AnalyzeWrapper(wrapperMod, targetUpstream, pinnedUpstream, "v30.0.0", "v29.0.0")
+	report := AnalyzeWrapper(wrapperMod, targetUpstream, pinnedUpstream, "v30.0.0", "v29.0.0", nil)
 
 	assert.False(t, report.CanSafelyUpdate)
 	assert.Equal(t, "BREAKING_CHANGES_DETECTED", report.Verdict)
@@ -141,7 +141,7 @@ func TestAnalyzeWrapper_SafeWithWarnings(t *testing.T) {
 		},
 	}
 
-	report := AnalyzeWrapper(wrapperMod, targetUpstream, nil, "20.0.0", "19.0.0")
+	report := AnalyzeWrapper(wrapperMod, targetUpstream, nil, "20.0.0", "19.0.0", nil)
 	assert.True(t, report.CanSafelyUpdate)
 	assert.Equal(t, "SAFE_WITH_WARNINGS", report.Verdict)
 	assert.Equal(t, 2, report.TotalWarnings)
@@ -165,6 +165,7 @@ func TestAnalyzeWrapper_NullabilityMismatch(t *testing.T) {
 		nil,
 		"v2.0.0",
 		"v1.0.0",
+		nil,
 	)
 
 	require.False(t, report.CanSafelyUpdate)
@@ -181,7 +182,7 @@ func TestAnalyzeWrapper_WithoutPinnedVersionRecommendsNoSafePin(t *testing.T) {
 	}
 	target := &ast.ModuleInfo{Variables: map[string]ast.VariableDef{}}
 
-	report := AnalyzeWrapper(wrapperMod, target, nil, "v30.0.0", "")
+	report := AnalyzeWrapper(wrapperMod, target, nil, "v30.0.0", "", nil)
 	require.False(t, report.CanSafelyUpdate)
 	assert.Equal(t, "BREAKING_CHANGES_DETECTED", report.Verdict)
 	assert.Empty(t, report.SafePinVersion)
@@ -189,7 +190,7 @@ func TestAnalyzeWrapper_WithoutPinnedVersionRecommendsNoSafePin(t *testing.T) {
 }
 
 func TestAnalyzeWrapper_NilInputsAreTolerated(t *testing.T) {
-	report := AnalyzeWrapper(nil, nil, nil, "v1.0.0", "v0.9.0")
+	report := AnalyzeWrapper(nil, nil, nil, "v1.0.0", "v0.9.0", nil)
 	require.NotNil(t, report)
 	assert.Empty(t, report.TargetModuleName)
 	assert.Equal(t, "SAFE_TO_PIN", report.Verdict)
@@ -198,7 +199,7 @@ func TestAnalyzeWrapper_NilInputsAreTolerated(t *testing.T) {
 }
 
 func TestAnalyzeWrapper_EmptyVersionKeepsRawPin(t *testing.T) {
-	report := AnalyzeWrapper(&ast.ModuleInfo{}, &ast.ModuleInfo{}, nil, "latest", "")
+	report := AnalyzeWrapper(&ast.ModuleInfo{}, &ast.ModuleInfo{}, nil, "latest", "", nil)
 	assert.Equal(t, `version = "latest"`, report.RecommendedPin)
 }
 
@@ -234,7 +235,7 @@ func TestAnalyzeWrapper_UpstreamBreakingChangesBlockThePin(t *testing.T) {
 		},
 	}
 
-	report := AnalyzeWrapper(wrapperMod, target, pinned, "v2.0.0", "v1.0.0")
+	report := AnalyzeWrapper(wrapperMod, target, pinned, "v2.0.0", "v1.0.0", nil)
 
 	// The wrapper side is clean (no wrapper-level issues)...
 	wrapperBreaking := 0
@@ -287,7 +288,7 @@ func TestAnalyzeWrapper_UpstreamWarningsOnlyStillPins(t *testing.T) {
 		RequiredProviders: map[string]ast.ProviderRequirement{},
 	}
 
-	report := AnalyzeWrapper(wrapperMod, target, pinned, "v2.0.0", "v1.0.0")
+	report := AnalyzeWrapper(wrapperMod, target, pinned, "v2.0.0", "v1.0.0", nil)
 	require.NotNil(t, report.UpstreamDiff)
 	assert.True(t, report.UpstreamDiff.CanSafelyUpdate, "precondition: only warnings upstream")
 	assert.True(t, report.CanSafelyUpdate)
@@ -322,7 +323,7 @@ func TestAnalyzeWrapper_UpstreamBreakWithoutPinnedVersionNeedsNoSafePin(t *testi
 		},
 	}
 
-	report := AnalyzeWrapper(wrapperMod, target, pinned, "v2.0.0", "")
+	report := AnalyzeWrapper(wrapperMod, target, pinned, "v2.0.0", "", nil)
 	assert.False(t, report.CanSafelyUpdate)
 	assert.Equal(t, "UPSTREAM_BREAKING_CHANGES_DETECTED", report.Verdict)
 	assert.Empty(t, report.SafePinVersion)
@@ -350,7 +351,7 @@ func TestAnalyzeWrapper_AuditsEveryModuleCall(t *testing.T) {
 		Outputs: map[string]ast.OutputDef{},
 	}
 
-	report := AnalyzeWrapper(wrapperMod, targetUpstream, nil, "v2.0.0", "")
+	report := AnalyzeWrapper(wrapperMod, targetUpstream, nil, "v2.0.0", "", nil)
 	require.NotZero(t, report.TotalBreaking,
 		"a removed input passed to the second call must still be reported")
 	assert.False(t, report.CanSafelyUpdate)
@@ -391,7 +392,7 @@ func TestAnalyzeWrapper_MissingRequiredInputIsPerCall(t *testing.T) {
 		Outputs: map[string]ast.OutputDef{},
 	}
 
-	report := AnalyzeWrapper(wrapperMod, targetUpstream, nil, "v2.0.0", "")
+	report := AnalyzeWrapper(wrapperMod, targetUpstream, nil, "v2.0.0", "", nil)
 	require.Len(t, report.Issues, 1)
 	assert.Equal(t, "MissingRequiredInput", report.Issues[0].Category)
 	assert.Equal(t, "needed", report.Issues[0].Target)
@@ -420,7 +421,7 @@ func TestAnalyzeWrapper_OutputDelegationScopedToAuditedCalls(t *testing.T) {
 		Outputs:   map[string]ast.OutputDef{},
 	}
 
-	report := AnalyzeWrapper(wrapperMod, targetUpstream, nil, "v2.0.0", "")
+	report := AnalyzeWrapper(wrapperMod, targetUpstream, nil, "v2.0.0", "", nil)
 	require.Len(t, report.Issues, 1)
 	assert.Equal(t, "BrokenOutputDelegation", report.Issues[0].Category)
 	assert.Equal(t, "mine", report.Issues[0].Target)
@@ -445,7 +446,7 @@ func TestAnalyzeWrapper_OptionalFeatureAdoptionIsPerCall(t *testing.T) {
 		Outputs: map[string]ast.OutputDef{},
 	}
 
-	report := AnalyzeWrapper(wrapperMod, targetUpstream, nil, "v2.0.0", "")
+	report := AnalyzeWrapper(wrapperMod, targetUpstream, nil, "v2.0.0", "", nil)
 	require.Len(t, report.NewFeatureAdoptions, 1)
 	assert.Equal(t, "optional_new", report.NewFeatureAdoptions[0].Target)
 }
@@ -466,7 +467,7 @@ func TestAnalyzeWrapper_NoModuleCallsStillAuditsTheUpstream(t *testing.T) {
 		Outputs: map[string]ast.OutputDef{},
 	}
 
-	report := AnalyzeWrapper(wrapperMod, targetUpstream, nil, "v2.0.0", "")
+	report := AnalyzeWrapper(wrapperMod, targetUpstream, nil, "v2.0.0", "", nil)
 	assert.Empty(t, report.TargetModuleName)
 	// With no call to attach a finding to, no per-call issue is reported. The upstream change is
 	// still invisible here, which is why the verdict must not claim compatibility.
@@ -545,7 +546,7 @@ func TestAnalyzeWrapper_RenamedInputExpressions(t *testing.T) {
 		Outputs: map[string]ast.OutputDef{},
 	}
 
-	report := AnalyzeWrapper(wrapperMod, targetUpstream, nil, "v2.0.0", "")
+	report := AnalyzeWrapper(wrapperMod, targetUpstream, nil, "v2.0.0", "", nil)
 	assert.NotEmpty(t, report.Issues)
 	var found bool
 	for _, issue := range report.Issues {

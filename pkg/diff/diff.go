@@ -613,7 +613,7 @@ func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			newC := normalizeConstraints(newReq.VersionConstraints)
 			if oldC == newC {
 				// constraint-only noise (whitespace/ordering) produces nothing
-			} else if isMajorProviderBump(oldReq.VersionConstraints, newReq.VersionConstraints) {
+			} else if isMajorProviderBump(oldReq.VersionConstraints, newReq.VersionConstraints) || isBreakingConstraintChange(oldReq.VersionConstraints, newReq.VersionConstraints) {
 				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
 					Category:    "ProviderMajorUpgrade",
 					Name:        name,
@@ -974,6 +974,34 @@ func isZeroMajorBreakingBump(oldC, newC string) bool {
 	return false
 }
 
+func isBreakingConstraintChange(oldConstraints, newConstraints []string) bool {
+	if len(oldConstraints) == 0 || len(newConstraints) == 0 {
+		return false
+	}
+	oldR := semverutil.ParseConstraintRange(strings.Join(oldConstraints, ", "))
+	newR := semverutil.ParseConstraintRange(strings.Join(newConstraints, ", "))
+	if oldR.MinVersion != "" && newR.MinVersion != "" {
+		oldMaj, _ := majorFromConstraint(oldR.MinVersion)
+		newMaj, _ := majorFromConstraint(newR.MinVersion)
+		if oldMaj != 0 && newMaj > oldMaj {
+			return true
+		}
+		if isZeroMajorBreakingBump(oldR.MinVersion, newR.MinVersion) {
+			return true
+		}
+	}
+	if oldR.MaxVersion != "" && newR.MaxVersion != "" {
+		if cmp := semverutil.Compare(newR.MaxVersion, oldR.MaxVersion); cmp < 0 {
+			return true
+		}
+	}
+	// New exclusions that narrow the allowed set.
+	if len(newR.Excluded) > len(oldR.Excluded) {
+		return true
+	}
+	return false
+}
+
 func upperBoundMajor(c string) (int, bool) {
 	for _, part := range strings.Split(c, ",") {
 		trimmed := strings.TrimSpace(part)
@@ -1237,16 +1265,45 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 				}
 			}
 			if oldRes.ForEach != "" && newRes.ForEach != "" && oldRes.ForEach != newRes.ForEach {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
-					Category:    "ResourceForEach",
-					Name:        key,
-					Severity:    SeverityBreaking,
-					Description: fmt.Sprintf("Resource '%s' for_each expression changed from '%s' to '%s' (may destroy or recreate instances)", key, oldRes.ForEach, newRes.ForEach),
-					OldValue:    oldRes.ForEach,
-					NewValue:    newRes.ForEach,
-					Remediation: "Add moved {} blocks or verify for_each key set preservation",
-					Evidence:    2,
-				})
+				oldKeys := extractQuotedKeys(oldRes.ForEach)
+				newKeys := extractQuotedKeys(newRes.ForEach)
+				shrink := false
+				if len(oldKeys) > 0 && len(newKeys) > 0 {
+					newSet := make(map[string]bool, len(newKeys))
+					for _, k := range newKeys {
+						newSet[k] = true
+					}
+					for _, k := range oldKeys {
+						if !newSet[k] {
+							shrink = true
+							break
+						}
+					}
+				} else {
+					shrink = true
+				}
+				if shrink {
+					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+						Category:    "ResourceForEach",
+						Name:        key,
+						Severity:    SeverityBreaking,
+						Description: fmt.Sprintf("Resource '%s' for_each key set shrank from '%s' to '%s'", key, oldRes.ForEach, newRes.ForEach),
+						OldValue:    oldRes.ForEach,
+						NewValue:    newRes.ForEach,
+						Remediation: "Add moved {} blocks or verify for_each key set preservation",
+						Evidence:    2,
+					})
+				} else {
+					report.Warnings = append(report.Warnings, DifferenceItem{
+						Category:    "ResourceForEach",
+						Name:        key,
+						Severity:    SeverityWarning,
+						Description: fmt.Sprintf("Resource '%s' for_each expression changed from '%s' to '%s'", key, oldRes.ForEach, newRes.ForEach),
+						OldValue:    oldRes.ForEach,
+						NewValue:    newRes.ForEach,
+						Remediation: "Verify for_each key set preservation",
+					})
+				}
 			}
 			// triggers / triggers_replace / keepers (#114)
 			if (len(oldRes.Triggers) > 0 || len(newRes.Triggers) > 0) && !reflect.DeepEqual(oldRes.Triggers, newRes.Triggers) {
@@ -1363,28 +1420,64 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					Remediation: "Review provisioner side effects before upgrading",
 				})
 			}
-			// precondition / postcondition changes (#140)
+			// precondition / postcondition changes (#140, #158)
+			hardcodedForceAttrs = map[string]bool{"cidr_block": true, "vpc_id": true, "availability_zone": true, "subnet_id": true, "ami": true, "engine": true, "location": true, "region": true, "project": true, "resource_group_name": true}
+			hasForceNew := false
+			for attr := range oldRes.Attributes {
+				if hardcodedForceAttrs[attr] {
+					hasForceNew = true
+					break
+				}
+				if hazardLookup != nil {
+					if isForce, _, _ := hazardLookup.LookupHazard(key + "." + attr); isForce {
+						hasForceNew = true
+						break
+					}
+					if isForce, _, _ := hazardLookup.LookupHazard(attr); isForce {
+						hasForceNew = true
+						break
+					}
+				}
+			}
 			if !sameStrings(oldRes.Preconditions, newRes.Preconditions) {
-				report.Warnings = append(report.Warnings, DifferenceItem{
+				sev := SeverityWarning
+				if hasForceNew {
+					sev = SeverityBreaking
+				}
+				item := DifferenceItem{
 					Category:    "PreconditionModified",
 					Name:        key,
-					Severity:    SeverityWarning,
+					Severity:    sev,
 					Description: fmt.Sprintf("precondition blocks changed for resource '%s'", key),
 					OldValue:    strings.Join(oldRes.Preconditions, "; "),
 					NewValue:    strings.Join(newRes.Preconditions, "; "),
 					Remediation: "Verify resource preconditions remain valid",
-				})
+				}
+				if sev == SeverityBreaking {
+					report.BreakingChanges = append(report.BreakingChanges, item)
+				} else {
+					report.Warnings = append(report.Warnings, item)
+				}
 			}
 			if !sameStrings(oldRes.Postconditions, newRes.Postconditions) {
-				report.Warnings = append(report.Warnings, DifferenceItem{
+				sev := SeverityWarning
+				if hasForceNew {
+					sev = SeverityBreaking
+				}
+				item := DifferenceItem{
 					Category:    "PostconditionModified",
 					Name:        key,
-					Severity:    SeverityWarning,
+					Severity:    sev,
 					Description: fmt.Sprintf("postcondition blocks changed for resource '%s'", key),
 					OldValue:    strings.Join(oldRes.Postconditions, "; "),
 					NewValue:    strings.Join(newRes.Postconditions, "; "),
 					Remediation: "Verify resource postconditions remain valid",
-				})
+				}
+				if sev == SeverityBreaking {
+					report.BreakingChanges = append(report.BreakingChanges, item)
+				} else {
+					report.Warnings = append(report.Warnings, item)
+				}
 			}
 			// data-source selector/filter drift (#138)
 			if s.isData {
@@ -1398,7 +1491,8 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					promote := false
 					for _, res := range oldMod.ManagedResources {
 						for attrName, attrVal := range res.Attributes {
-							if strings.Contains(attrVal, key) && forceAttrs[attrName] {
+							dataRefRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(key) + `\b`)
+							if dataRefRe.MatchString(attrVal) && forceAttrs[attrName] {
 								promote = true
 							}
 						}
@@ -1474,13 +1568,12 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 				}
 			}
 		} else {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			report.Warnings = append(report.Warnings, DifferenceItem{
 				Category:    "ProviderConfigRemoved",
 				Name:        pName,
-				Severity:    SeverityBreaking,
+				Severity:    SeverityWarning,
 				Description: fmt.Sprintf("Provider configuration block '%s' removed in upstream", pName),
 				Remediation: "Verify provider configuration before applying",
-				Evidence:    2,
 			})
 		}
 	}
@@ -1505,7 +1598,8 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 			promote := false
 			for _, res := range oldMod.ManagedResources {
 				for attrName, attrVal := range res.Attributes {
-					if strings.Contains(attrVal, "local."+lName) && forceAttrs[attrName] {
+					localRefRe := regexp.MustCompile(`\blocal\.` + regexp.QuoteMeta(lName) + `\b`)
+					if localRefRe.MatchString(attrVal) && forceAttrs[attrName] {
 						promote = true
 					}
 				}
@@ -1551,6 +1645,29 @@ func resourceFullAddress(mode string, res ast.ResourceDef) string {
 		return "data." + res.Type + "." + res.Name
 	}
 	return res.Type + "." + res.Name
+}
+
+func extractQuotedKeys(expr string) []string {
+	var keys []string
+	inQuote := false
+	var cur strings.Builder
+	for i := 0; i < len(expr); i++ {
+		c := expr[i]
+		if c == '"' {
+			if inQuote {
+				keys = append(keys, cur.String())
+				cur.Reset()
+				inQuote = false
+			} else {
+				inQuote = true
+			}
+			continue
+		}
+		if inQuote {
+			cur.WriteByte(c)
+		}
+	}
+	return keys
 }
 
 func modeLabel(mode string) string {
@@ -1755,6 +1872,9 @@ func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				if newUpper, okN := upperBoundMajor(newCall.Version); okN && newUpper < oldUpper {
 					breaking = true
 				}
+			}
+			if isBreakingConstraintChange([]string{oldCall.Version}, []string{newCall.Version}) {
+				breaking = true
 			}
 			if breaking {
 				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{

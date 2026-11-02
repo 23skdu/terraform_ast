@@ -58,7 +58,7 @@ func FuzzAnalyzeWrapper(f *testing.F) {
 			}
 		}
 
-		report := AnalyzeWrapper(wrapMod, targetUpstream, pinnedUpstream, targetVer, pinnedVer)
+		report := AnalyzeWrapper(wrapMod, targetUpstream, pinnedUpstream, targetVer, pinnedVer, nil)
 		if report == nil {
 			t.Fatal("expected non-nil report")
 		}

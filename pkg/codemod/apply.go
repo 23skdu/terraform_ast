@@ -262,7 +262,7 @@ func WriteMovedBlocks(targetPath string, blocks []MovedBlock) error {
 func CoveredMovedAddresses(blocks []ast.MovedBlockDef) map[string]struct{} {
 	covered := make(map[string]struct{})
 	for _, mb := range blocks {
-		covered[mb.From+"->"+mb.To] = struct{}{}
+		covered[ast.NormalizeMovedKey(mb.From, mb.To)] = struct{}{}
 	}
 	return covered
 }
@@ -284,7 +284,7 @@ func SynthesizeMovedBlocksForShifts(shifts []ast.ResourceAddressShift, covered .
 		if from == "" || to == "" || from == to {
 			continue
 		}
-		key := from + "->" + to
+		key := ast.NormalizeMovedKey(from, to)
 		if coveredSet != nil {
 			if _, ok := coveredSet[key]; ok {
 				continue

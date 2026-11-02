@@ -345,13 +345,13 @@ func DetectAddressShifts(oldMod, newMod *ModuleInfo) []ResourceAddressShift {
 	// whitespace or quoting in moved {} blocks does not defeat recognition.
 	covered := make(map[string]bool)
 	for _, mb := range newMod.MovedBlocks {
-		covered[normalizeMovedKey(mb.From, mb.To)] = true
+		covered[NormalizeMovedKey(mb.From, mb.To)] = true
 	}
 	for _, mb := range oldMod.MovedBlocks {
-		covered[normalizeMovedKey(mb.From, mb.To)] = true
+		covered[NormalizeMovedKey(mb.From, mb.To)] = true
 	}
 	for i := range shifts {
-		key := normalizeMovedKey(shifts[i].OldAddress.FullAddress(), shifts[i].NewAddress.FullAddress())
+		key := NormalizeMovedKey(shifts[i].OldAddress.FullAddress(), shifts[i].NewAddress.FullAddress())
 		if covered[key] {
 			shifts[i].IsRecreation = false
 			shifts[i].Reason = fmt.Sprintf("Resource address migrated via moved block from %s to %s", shifts[i].OldAddress.FullAddress(), shifts[i].NewAddress.FullAddress())
@@ -366,9 +366,9 @@ func DetectAddressShifts(oldMod, newMod *ModuleInfo) []ResourceAddressShift {
 	return shifts
 }
 
-// normalizeMovedKey canonicalises a moved {} from->to pair so that differing
+// NormalizeMovedKey canonicalises a moved {} from->to pair so that differing
 // whitespace or quoting does not prevent recognition of an already-covered shift.
-func normalizeMovedKey(from, to string) string {
+func NormalizeMovedKey(from, to string) string {
 	return normalizeAddress(from) + "->" + normalizeAddress(to)
 }
 

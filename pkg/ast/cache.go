@@ -220,7 +220,7 @@ func cachedModule(path, fingerprint string) (*ModuleInfo, bool, error) {
 			var info ModuleInfo
 			if err := json.Unmarshal(data, &info); err == nil {
 				_ = cacheModule(path, fingerprint, &info)
-				return &info, true, nil
+				return cloneModuleInfo(&info), true, nil
 			}
 		}
 	}

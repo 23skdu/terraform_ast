@@ -57,6 +57,10 @@ func AnalyzeVariableTaint(dir string, targetVar string, preParsed ...map[string]
 
 	if len(preParsed) > 0 && len(preParsed[0]) > 0 {
 		for name, body := range preParsed[0] {
+			if strings.HasSuffix(name, ".tf.json") {
+				// JSON bodies cannot be represented as *hclsyntax.Body; fall through to disk parsing.
+				continue
+			}
 			files = append(files, fileAST{name: name, body: body})
 		}
 	} else {
@@ -75,23 +79,7 @@ func AnalyzeVariableTaint(dir string, targetVar string, preParsed ...map[string]
 				continue
 			}
 			if isJSON {
-				var raw map[string]any
-				if err := json.Unmarshal(src, &raw); err == nil {
-					if locals, ok := raw["locals"].(map[string]any); ok {
-						for lname, lval := range locals {
-							if s, ok := lval.(string); ok && (strings.Contains(s, "var."+targetVar) || strings.Contains(s, "${var."+targetVar+"}")) {
-								taintedLocals["local."+lname] = struct{}{}
-								report.TracePath = append(report.TracePath, "local."+lname)
-							}
-						}
-					}
-					found := false
-					walkJSON(raw, "", targetVar, affectedAttrsMap, &found)
-					if found {
-						report.IsReachable = true
-						report.IsDeadCode = false
-					}
-				}
+				// JSON files are handled in a unified pass below.
 				continue
 			}
 			parsedFile, diags := hclsyntax.ParseConfig(src, entry.Name(), hcl.Pos{Line: 1, Column: 1})
@@ -101,6 +89,37 @@ func AnalyzeVariableTaint(dir string, targetVar string, preParsed ...map[string]
 			if body, ok := parsedFile.Body.(*hclsyntax.Body); ok {
 				files = append(files, fileAST{name: entry.Name(), body: body})
 			}
+		}
+	}
+
+	// Unified pass: handle .tf.json files from disk (works with or without preParsed).
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tf.json") {
+			continue
+		}
+		filePath := filepath.Join(dir, entry.Name())
+		// #nosec G304 -- directory entry read within inspected module
+		src, readErr := os.ReadFile(filepath.Clean(filePath))
+		if readErr != nil {
+			continue
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(src, &raw); err != nil {
+			continue
+		}
+		if locals, ok := raw["locals"].(map[string]any); ok {
+			for lname, lval := range locals {
+				if s, ok := lval.(string); ok && (strings.Contains(s, "var."+targetVar) || strings.Contains(s, "${var."+targetVar+"}")) {
+					taintedLocals["local."+lname] = struct{}{}
+					report.TracePath = append(report.TracePath, "local."+lname)
+				}
+			}
+		}
+		found := false
+		walkJSON(raw, "", targetVar, affectedAttrsMap, &found)
+		if found {
+			report.IsReachable = true
+			report.IsDeadCode = false
 		}
 	}
 
@@ -253,10 +272,7 @@ func walkJSON(v any, path, targetVar string, affected map[string]struct{}, found
 	case string:
 		if strings.Contains(val, "var."+targetVar) || strings.Contains(val, "${var."+targetVar+"}") {
 			*found = true
-			p := path
-			if strings.HasPrefix(p, "resource.") {
-				p = strings.TrimPrefix(p, "resource.")
-			}
+			p := strings.TrimPrefix(path, "resource.")
 			if p != "" {
 				affected[p] = struct{}{}
 			}

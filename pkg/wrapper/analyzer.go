@@ -119,6 +119,7 @@ func AnalyzeWrapper(
 	pinnedUpstream *ast.ModuleInfo,
 	targetVersion string,
 	pinnedVersion string,
+	hazardLookup ast.HazardLookup,
 ) *WrapperCompatibilityReport {
 	if wrapperMod == nil {
 		wrapperMod = &ast.ModuleInfo{
@@ -217,26 +218,54 @@ func AnalyzeWrapper(
 	// e.g. region = var.custom_region, region = coalesce(var.custom_region, "us-east-1"),
 	// or region = local.custom_region (resolved through local definitions).
 	localVars := make(map[string][]string)
-	for lName, lVal := range wrapperMod.Locals {
+	var resolveLocal func(name string, seen map[string]bool) []string
+	resolveLocal = func(name string, seen map[string]bool) []string {
+		if seen[name] {
+			return nil
+		}
+		seen[name] = true
+		lVal, ok := wrapperMod.Locals[name]
+		if !ok {
+			return nil
+		}
 		parsed, diags := hclsyntax.ParseExpression([]byte(lVal), "wrapper", hcl.Pos{Line: 1, Column: 1})
 		if diags.HasErrors() || parsed == nil {
-			continue
+			return nil
 		}
-		seen := make(map[string]bool)
+		var res []string
+		seenVar := make(map[string]bool)
 		for _, v := range parsed.Variables() {
 			if len(v) < 2 {
 				continue
 			}
 			root, ok := v[0].(hcl.TraverseRoot)
-			if !ok || root.Name != "var" {
+			if !ok {
 				continue
 			}
-			attr, ok := v[1].(hcl.TraverseAttr)
-			if !ok || seen[attr.Name] {
-				continue
+			switch root.Name {
+			case "var":
+				if attr, ok := v[1].(hcl.TraverseAttr); ok && !seenVar[attr.Name] {
+					seenVar[attr.Name] = true
+					res = append(res, attr.Name)
+				}
+			case "local":
+				if attr, ok := v[1].(hcl.TraverseAttr); ok {
+					for _, vn := range resolveLocal(attr.Name, seen) {
+						if !seenVar[vn] {
+							seenVar[vn] = true
+							res = append(res, vn)
+						}
+					}
+				}
 			}
-			seen[attr.Name] = true
-			localVars[lName] = append(localVars[lName], attr.Name)
+		}
+		return res
+	}
+	for lName := range wrapperMod.Locals {
+		seen := make(map[string]bool)
+		vars := resolveLocal(lName, seen)
+		if len(vars) > 0 {
+			localVars[lName] = vars
 		}
 	}
 
@@ -356,7 +385,7 @@ func AnalyzeWrapper(
 
 	// 6. Upstream-to-Upstream AST comparison (if pinnedUpstream provided)
 	if pinnedUpstream != nil {
-		report.UpstreamDiff = diff.Compare(pinnedUpstream, targetUpstream, pinnedVersion, targetVersion)
+		report.UpstreamDiff = diff.Compare(pinnedUpstream, targetUpstream, pinnedVersion, targetVersion, hazardLookup)
 		// Identify the diffed module by the wrapper's child module call name so nested reports and
 		// SARIF artifact locations never fall back to a temporary directory name.
 		if report.TargetModuleName != "" {

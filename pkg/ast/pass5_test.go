@@ -468,8 +468,8 @@ resource "aws_db_instance" "main" {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Backend == nil || info.Backend.Type != "cloud" || info.Backend.Attributes["organization"] != `"acme-prod"` {
-		t.Fatalf("cloud backend not captured: %+v", info.Backend)
+	if info.Cloud == nil || info.Cloud.Type != "cloud" || info.Cloud.Attributes["organization"] != `"acme-prod"` {
+		t.Fatalf("cloud backend not captured: %+v", info.Cloud)
 	}
 	if info.ProviderConfigs["aws.west"]["region"] != `"us-west-2"` {
 		t.Fatalf("provider config not captured: %+v", info.ProviderConfigs)

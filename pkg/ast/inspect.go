@@ -813,8 +813,6 @@ func parseAndEnrichModuleWithOverlay(dir string, entries []os.DirEntry, info *Mo
 						}
 						if bc.Type == "cloud" {
 							info.Cloud = bcfg
-							// Backward compatibility: older callers/tests expect cloud in Backend.
-							info.Backend = bcfg
 						} else {
 							info.Backend = bcfg
 						}

@@ -157,7 +157,7 @@ func TestGKE_WrapperAuditAndGolden(t *testing.T) {
 	gkeV2, err := ast.Inspect(gkeV2Dir)
 	require.NoError(t, err)
 
-	wrapperAudit := wrapper.AnalyzeWrapper(wrapperMod, gkeV2, gkeV1, "v30.0.0", "v29.0.0")
+	wrapperAudit := wrapper.AnalyzeWrapper(wrapperMod, gkeV2, gkeV1, "v30.0.0", "v29.0.0", nil)
 	wrapperAudit.WrapperPath = "test/fixtures/gke_wrapper"
 
 	// Verify wrapper cannot safely pin yet
@@ -242,7 +242,7 @@ func TestEKS_WrapperAuditAndGolden(t *testing.T) {
 	eksV20, err := ast.Inspect(eksV20Dir)
 	require.NoError(t, err)
 
-	wrapperAudit := wrapper.AnalyzeWrapper(wrapperMod, eksV20, eksV19, "v20.0.0", "v19.0.0")
+	wrapperAudit := wrapper.AnalyzeWrapper(wrapperMod, eksV20, eksV19, "v20.0.0", "v19.0.0", nil)
 	wrapperAudit.WrapperPath = "test/fixtures/eks_wrapper"
 
 	assert.False(t, wrapperAudit.CanSafelyUpdate)
@@ -433,7 +433,7 @@ func TestTerratest_BlastRadiusConsumerAnalysis(t *testing.T) {
 	gkeV2, err := ast.Inspect(gkeV2Dir)
 	require.NoError(t, err)
 
-	wrapperAudit := wrapper.AnalyzeWrapper(wrapperMod, gkeV2, gkeV1, "v30.0.0", "v29.0.0")
+	wrapperAudit := wrapper.AnalyzeWrapper(wrapperMod, gkeV2, gkeV1, "v30.0.0", "v29.0.0", nil)
 	wrapperAudit.WrapperPath = "test/fixtures/gke_wrapper"
 
 	blastReport, err := blastradius.ScanDirectory(consumerDir, "gke_wrapper", wrapperMod, wrapperAudit)
@@ -594,7 +594,7 @@ func TestTerratest_WrapperRecreationHazardsAndSARIF(t *testing.T) {
 	g2, err := ast.Inspect(gkeV2Dir)
 	require.NoError(t, err)
 
-	audit := wrapper.AnalyzeWrapper(wMod, g2, g1, "v30.0.0", "v29.0.0")
+	audit := wrapper.AnalyzeWrapper(wMod, g2, g1, "v30.0.0", "v29.0.0", nil)
 
 	// 1. AnalyzeWrapperHazards
 	hazards := recreation.AnalyzeWrapperHazards(audit)

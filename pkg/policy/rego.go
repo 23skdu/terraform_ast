@@ -266,9 +266,11 @@ func EvaluateRego(policy *RegoPolicy, input Input) []Violation {
 		inputMap["report"] = input.Report
 		var reportMap map[string]any
 		key := reportKey(input.Report)
+		var reportBytes []byte
 		var reportHash string
 		if key != 0 {
-			if reportBytes, err := json.Marshal(input.Report); err == nil {
+			if rb, err := json.Marshal(input.Report); err == nil {
+				reportBytes = rb
 				sum := sha256.Sum256(reportBytes)
 				reportHash = hex.EncodeToString(sum[:])
 			}
@@ -278,12 +280,15 @@ func EvaluateRego(policy *RegoPolicy, input Input) []Violation {
 				reportMap = cached
 			}
 		}
+		if reportMap == nil && reportBytes != nil {
+			_ = json.Unmarshal(reportBytes, &reportMap)
+			if key != 0 && reportHash != "" {
+				reportMapCache.put(key, reportHash, reportMap)
+			}
+		}
 		if reportMap == nil {
-			if reportBytes, err := json.Marshal(input.Report); err == nil {
-				_ = json.Unmarshal(reportBytes, &reportMap)
-				if key != 0 && reportHash != "" {
-					reportMapCache.put(key, reportHash, reportMap)
-				}
+			if rb, err := json.Marshal(input.Report); err == nil {
+				_ = json.Unmarshal(rb, &reportMap)
 			}
 		}
 		for k, v := range reportMap {
