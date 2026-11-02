@@ -1,25 +1,14 @@
-# Strategic Product Roadmap — Pass 8
+# Strategic Product Roadmap — Pass 9
 
-**Scope:** 20 numbered improvement items (`#133` – `#152`) covering analysis **accuracy**, analysis **performance**, and an expanded taxonomy of **destructive changes** that must be classified as breaking.
+**Scope:** 20 numbered improvement items (`#153` – `#172`) covering analysis **accuracy**, analysis **performance**, test coverage, and an expanded taxonomy of **destructive changes** that must be classified as breaking.
 
-**Status:** Completed. All 20 items (#133 - #152) implemented and verified with passing tests across all packages.
+**Status:** Planned. Items are derived from a deep static audit after the Pass 8 delivery, focusing on incomplete wiring of newly added capabilities, dead entry points, correctness bugs in the new code, and missing regression coverage.
 
 ---
 
 ## 0. How this pass was produced
 
-Pass 8 was produced by reading every non-test Go source file in `cmd/`, `pkg/`, and `internal/`, cross-referencing the implemented Pass 6/Pass 7 items against the actual code, and collecting the residual gaps that are not yet closed:
-
-- core `diff.Compare` still has no access to the recreation hazard registry, so schema-confirmed `requires_replace` attributes outside a hard-coded allow-list are invisible;
-- `compareModuleCalls` compares `Source` and indexing *mode* but never `Version` or cardinality *expressions*;
-- `ProviderConfigs` diffing only iterates the old side, so a provider block that exists only in the new version is never compared;
-- `terraform { backend {} }` and `terraform { cloud {} }` are collapsed into a single `Backend` field and only the first block is retained;
-- `cloneModuleInfo` does not deep-clone nested maps/slices, so cached entries can share mutable state;
-- `AnalyzeVariableTaint` falls back to `bytes.Contains` for `.tf.json` and ignores parsed ASTs passed by the caller;
-- `FilterTaintedCallSites` matches only when the consumer forwards the input under the identical variable name;
-- `moved {}` matching and LSP buffer caching have correctness gaps;
-- Rego report-map caching is unbounded and keyed by pointer;
-- provider schema loading is not memoised.
+Pass 9 was produced by reading every non-test Go source file in `cmd/`, `pkg/`, and `internal/`, running `deadcode`, `golangci-lint`, and `govulncheck`, and cross-referencing the Pass 8 items against the actual code. Several Pass 8 capabilities (schema-driven ForceNew, `ParseConstraintRange`, moved-block normalization, registry-aware hazards) were added but not wired into production entry points.
 
 Baseline verified before writing this document:
 
@@ -27,6 +16,7 @@ Baseline verified before writing this document:
 | :--- | :--- |
 | `go build ./...` | clean |
 | `go vet ./...` | clean |
+| `golangci-lint run ./...` | 0 issues |
 | `go test ./...` | all packages ok |
 | Working tree | clean |
 
@@ -41,38 +31,46 @@ Baseline verified before writing this document:
 | Pass 5 | `#91` – `#110` | Resource/modern-block diffing, single-pass AST cache, concurrent upgrade prefetch, LSP debounce |
 | Pass 6 | `#111` – `#130` | Detection blind spots, semantic/wrapper precision, performance/caching |
 | Pass 7 | `#131` – `#132` | SVG state-graph rendering, AWS/GCP ForceNew hazard catalog |
-| **Pass 8** | **`#133` – `#152`** | **Delivered: schema-driven diffing, module/provider/cloud deep diffing, taint precision, cache/LSP correctness** |
+| Pass 8 | `#133` – `#152` | Schema-driven diffing, module/provider/cloud deep diffing, taint precision, cache/LSP correctness |
+| **Pass 9** | **`#153` – `#172`** | **Planned: wiring, dead-code removal, correctness fixes, coverage, and taxonomy widening** |
 
 ---
 
 ## 1. What the analysis found
 
-### 1.1 Accuracy blind spots
+### 1.1 Wiring gaps
 
-- **ForceNew detection in `diff.Compare` is a hard-coded allow-list.** `pkg/diff/diff.go:1203-1218` only flags changes to `cidr_block`, `vpc_id`, `availability_zone`, `subnet_id`, `ami`, `engine`, `location`, `region`, `project`, `resource_group_name`. `Compare` has no registry parameter and `compareDestructiveToggles` never consults `LookupHazard` / `DynamicHazardRegistry`, so any schema-confirmed `requires_replace` attribute outside that list is silently treated as non-breaking, even though `AutoDiscoverAndRegister` already produces descriptors for it.
-- **Module-call version bumps are ignored.** `pkg/diff/diff.go:1458-1498` compares `Source` and `count`/`for_each` *mode* but never `ModuleCallDef.Version` (`pkg/ast/types.go:42`). A major version constraint bump on a child module call is therefore not reported.
-- **Provider blocks that exist only in the new version are never diffed.** `pkg/diff/diff.go:1246-1264` iterates only `oldMod.ProviderConfigs`, so a newly added `provider "aws" {}` block (with its own `region`/`assume_role`) is invisible.
-- **`backend` and `cloud` are collapsed into one field.** `pkg/ast/inspect.go:744-763` keeps only the first `backend`/`cloud` block and stores both in `Backend`. Changing the HCP Terraform / Terraform Cloud organization or workspace, or switching between the two, is either dropped or mis-attributed.
-- **Module-call cardinality expression changes are ignored.** `compareModuleCalls` reports a mode transition (`count` ↔ `for_each`) but never compares the actual `Count`/`ForEach` expression text, so `count = 2` → `count = 1` on a child module is silent.
-- **Data-source selector/filter drift is not propagated.** `DataResources` capture attributes, but no comparison checks `most_recent`, `filter`, `owners`, `query`, or `sort` changes, even though they feed managed-resource attributes.
-- **Locals drift is always a warning.** `pkg/diff/diff.go:1266-1279` emits `LocalValue` as `SeverityWarning` regardless of whether the local feeds a `ForceNew` resource attribute.
-- **`precondition`/`postcondition` blocks are not parsed.** `pkg/ast/inspect.go:324-341` schema and enrichment handle `lifecycle` but never `precondition`/`postcondition` on resources, data sources, or outputs.
-- **`import {}` provider changes are ignored.** `ImportBlockDef` captures `To` and `ID` only; a change in the `provider` argument of an import block is not captured.
-- **`.tf.json` taint analysis is shallow.** `pkg/eval/taint.go:77-85` uses `bytes.Contains` and ignores the parsed bodies the caller already passes via `preParsed`, so a variable used only inside a nested `.tf.json` block can be reported as dead code.
-- **`FilterTaintedCallSites` drops renamed inputs.** `pkg/blastradius/scanner.go:179-181` only matches when the consumer forwards the input under the same name as the tainted variable; a renamed argument (`region = var.custom_region`) is dropped from the blast radius.
-- **Wrapper variable tracing misses locals/functions.** `pkg/wrapper/analyzer.go:216-234` regex `\bvar\.([a-zA-Z0-9_-]+)\b` does not handle `local.*`, `coalesce(...)`, or `try(...)` expressions, so renamed variables passed through those are not type-checked.
-- **`AddressShifts` discard index expressions.** `pkg/ast/ir.go:147-151,168-172,190-194` set `IndexKey = "count"` / `"for_each"` rather than the expression text, so shift pairing can conflate resources that differ only in cardinality.
-- **`moved {}` matching requires byte-identical strings.** `pkg/ast/ir.go:328-342` builds keys as `mb.From+"->"+mb.To`; differing whitespace/quoting prevents recognition of an already-covered shift and can make `--fix` emit duplicate `moved.tf` entries.
+- **Schema-driven ForceNew is inactive in production.** `cmd/tfastdiff/main.go:909` calls `diff.Compare(oldInfo, newInfo, oldVersion, newVersion)` without `dynamicRegistry`, so the `HazardLookup` path added in `#133` never runs in direct compare mode. `pkg/wrapper/analyzer.go:116-122` has no registry parameter, so `report.UpstreamDiff` at `:359` never receives schema hazards. `pkg/planner/analysis.go:69` also omits the lookup.
+- **`ParseConstraintRange` is still unused.** `pkg/semverutil/semver.go:157` is test-only; `pkg/diff/diff.go:1743` and `:616` still use ad-hoc `majorFromConstraint`/`upperBoundMajor`.
+- **Moved-block normalization is not applied in codemod.** `pkg/codemod/apply.go:262` and `:287` build keys from raw strings; only `pkg/ast/ir.go:346` uses `normalizeMovedKey`.
+- **Terragrunt call sites still use a synthetic module name.** `pkg/blastradius/scanner.go:478`/`:481` key `OutputsReferenced` by `filepath.Base(filepath.Dir(path))`.
 
-### 1.2 Performance / correctness gaps
+### 1.2 Correctness bugs in new code
 
-- **Rego report-map cache is unbounded and pointer-keyed.** `pkg/policy/rego.go:18-32,217-237` caches `map[string]any` by `uintptr` of `*Report`; a reused pointer with mutated contents returns a stale map, and long upgrade paths retain every intermediate report.
-- **Provider schema loading is not memoised.** `pkg/recreation/autodiscover.go:150-206` re-reads and re-parses `provider-schema.json` once per provider in `RequiredProviders`.
-- **`cloneModuleInfo` is not a deep clone.** `pkg/ast/cache.go:41-59` clones top-level maps/slices but not `ProviderConfigs` inner maps, `WrapperOutputReferences` slice elements, or `ParsedBodies`; cached entries can share mutable state across callers.
-- **LSP `didClose` is a no-op.** `pkg/lsp/server.go:275` leaves stale buffers and cached ASTs for closed documents, which can be reused incorrectly on reopen.
-- **Terragrunt call-site module name is synthetic.** `pkg/blastradius/scanner.go:465` sets `ModuleName` to `filepath.Base(filepath.Dir(path))` rather than the actual module call label, so output-reference matching can attribute outputs to the wrong key.
-- **Heuristic severity over-promotion.** `pkg/recreation/heuristics.go:381-393` promotes every upstream *warning* whose name matches a hazard descriptor to `CRITICAL_HAZARD`, overstating severity for non-breaking warning categories.
-- **Heuristic fallback lacks generic hazard coverage.** When no cloud token is present, the generic hazard table does not include the AWS/GCP immutable-attribute names, so a changed `name`, `region`, `location`, `project_id`, `vpc_id`, `subnet_id`, `network`, or `subnetwork` is not flagged.
+- **`cloud {}` overwrites `Backend`.** `pkg/ast/inspect.go:815-817` assigns both `info.Cloud` and `info.Backend`, so the two cannot be distinguished when both appear, and `pkg/diff/diff.go:1047` transition detection is order-dependent.
+- **JSON taint is not AST-based for pre-parsed input.** `pkg/eval/taint.go:58-96` skips disk `.tf.json` files entirely when `preParsed` is supplied; the JSON path relies on substring scanning instead of traversal.
+- **Provider removal severity is misclassified.** `pkg/diff/diff.go:1477-1485` reports removed provider blocks as `SeverityBreaking` (`ProviderConfigRemoved`), while the intended taxonomy distinguishes configuration loss (warning) from target shift (breaking).
+- **ForceNew promotion uses fragile substring matching.** `pkg/diff/diff.go:1399-1405` and `:1506-1512` use `strings.Contains` instead of traversal-exact references.
+- **Wrapper local tracing is shallow.** `pkg/wrapper/analyzer.go:219-274` resolves only one level of `var.*` inside locals and does not resolve `module.*` roots or nested locals.
+- **`for_each` changes are always breaking.** `pkg/diff/diff.go:1239-1250` and `:1822-1833` make no warning-vs-breaking distinction, even for reformatting or widening.
+- **Precondition/postcondition changes are always warnings.** `pkg/diff/diff.go:1366-1388` never promotes removed/weakened conditions that guard ForceNew attributes.
+
+### 1.3 Dead entry points
+
+`deadcode` reports unused production-reachable candidates: `enrichFromHCLFiles`, `ParseResourceAddress`, `BuildEvaluationGraph`, `BuildEvalContext`, `AnalyzeHazards`, `AnalyzeWrapperHazards`, `DynamicHazardRegistry.LookupHazard`, `ParseConstraintRange`, `inspectModuleVersion`, `RunDaemon`. Some are intended public API; others should be removed or wired.
+
+### 1.4 Missing coverage
+
+- No tests exercise `diff.Compare` with a `HazardLookup` in CLI, wrapper, or planner paths.
+- `pkg/ast/pass5_test.go:471` locks the old cloud-in-`Backend` behavior.
+- `pkg/eval/eval_test.go:436` validates JSON only via substring scanning.
+- No tests cover Terragrunt attribution after `ModuleName` changes or moved-block dedup with non-normalized whitespace.
+
+### 1.5 Performance opportunities
+
+- `pkg/diff/diff.go:1399-1413` and `:1506-1512` repeatedly scan managed resources inside per-resource loops (O(n²)).
+- `pkg/policy/rego.go:271-286` marshals the report twice on cache misses (once for hash, once for map).
+- `pkg/ast/cache.go:220-223` returns an un-cloned `ModuleInfo` on disk-cache hits, allowing shared mutable state across callers.
 
 ---
 
@@ -80,222 +78,217 @@ Baseline verified before writing this document:
 
 | ID | Class | Pri | Item |
 | :--- | :--- | :--- | :--- |
-| `#133` | Accuracy | P0 | Schema-driven `ForceNew` detection in core `diff.Compare` (thread registry, report any changed requires_replace attribute) |
-| `#134` | Accuracy | P0 | Diff child module-call `version` constraint bumps (major/minor) as breaking |
-| `#135` | Accuracy | P0 | Diff provider blocks that exist only in the new version (union iteration) |
-| `#136` | Accuracy | P0 | Separate `terraform { cloud {} }` from `backend {}` and diff organization/workspace/project |
-| `#137` | Accuracy | P0 | Module-call cardinality & expression changes (count/for_each value reduction) |
-| `#138` | Accuracy | P1 | Data-source selector/filter drift propagation to managed resources |
-| `#139` | Accuracy | P1 | Promote `locals` drift to breaking when it feeds a `ForceNew` resource attribute |
-| `#140` | Accuracy | P1 | Parse and diff `precondition`/`postcondition` blocks on resources, data sources, outputs |
-| `#141` | Accuracy | P1 | Capture and diff `provider` argument on `import {}` blocks |
-| `#142` | Accuracy | P1 | AST-based `.tf.json` taint analysis reusing parsed bodies |
-| `#143` | Accuracy | P1 | Traversal-exact `FilterTaintedCallSites` and renamed-input matching |
-| `#144` | Accuracy | P1 | Wrapper variable tracing through `local.*`, `coalesce`, and `try` expressions |
-| `#145` | Accuracy | P1 | Preserve index expressions in `DetectAddressShifts` (`IndexKey`) |
-| `#146` | Accuracy | P1 | Normalize `moved {}` matching (whitespace/quoting) across IR and codemod |
-| `#147` | Performance | P1 | Bounded LRU Rego report-map cache keyed by content hash |
-| `#148` | Performance | P1 | Memoize provider schema loading and descriptor extraction |
-| `#149` | Performance | P1 | Deep-clone `ModuleInfo` in the inspection cache |
-| `#150` | Performance | P1 | LSP `didClose` invalidates buffers and cached ASTs |
-| `#151` | Performance | P2 | Terragrunt call-site `ModuleName` uses actual module label |
-| `#152` | Accuracy | P2 | Heuristic severity calibration + generic AWS/GCP hazard fallback |
+| `#153` | Accuracy | P0 | Wire `DynamicHazardRegistry` into `diff.Compare` in CLI, wrapper, and planner |
+| `#154` | Accuracy | P0 | Replace ad-hoc version heuristics with `ParseConstraintRange` in diff |
+| `#155` | Accuracy | P0 | Make `cloud {}` and `backend {}` fully distinct fields (no overwrite) |
+| `#156` | Accuracy | P0 | Classify provider-block removal as warning, addition as breaking |
+| `#157` | Accuracy | P0 | Distinguish `for_each` reformatting/widening (warning) from shrinkage (breaking) |
+| `#158` | Accuracy | P0 | Promote removed/weakened pre/postconditions guarding ForceNew to breaking |
+| `#159` | Accuracy | P1 | Traversal-exact ForceNew promotion for data sources and locals |
+| `#160` | Accuracy | P1 | Multi-level local and `module.*` root tracing in wrapper analysis |
+| `#161` | Accuracy | P1 | AST-based JSON taint for pre-parsed and disk inputs |
+| `#162` | Accuracy | P1 | Apply moved-block normalization in codemod deduplication |
+| `#163` | Accuracy | P1 | Terragrunt call-site attribution via parsed module label |
+| `#164` | Accuracy | P1 | Wire or remove dead entry points (`ParseConstraintRange`, `LookupHazard`, etc.) |
+| `#165` | Performance | P1 | Clone `ModuleInfo` on disk-cache hits |
+| `#166` | Performance | P1 | Single-pass report map computation in `EvaluateRego` |
+| `#167` | Performance | P1 | Precompute reference sets for ForceNew promotion |
+| `#168` | Accuracy | P1 | Tests for registry-aware `diff.Compare` and separate `Cloud` |
+| `#169` | Accuracy | P1 | Tests for JSON taint pre-parsed and nested-block reachability |
+| `#170` | Accuracy | P2 | Tests for Terragrunt attribution and moved-block dedup |
+| `#171` | Performance | P2 | Remove unused legacy helpers (`enrichFromHCLFiles`, `BuildEvalContext`, etc.) |
+| `#172` | Accuracy | P2 | Include module-call and provider/cloud deltas in golden-plan verification |
 
 ---
 
 ## 3. Item detail
 
-### `#133` — Schema-driven `ForceNew` detection in core `diff.Compare` (Accuracy, P0)
+### `#153` — Wire `DynamicHazardRegistry` into `diff.Compare` (Accuracy, P0)
 
-**Gap.** `pkg/diff/diff.go:1203-1218` only flags a fixed set of attribute names. `Compare` has no registry parameter, so `DynamicHazardRegistry` descriptors produced by `AutoDiscoverAndRegister` are never consulted in the core diff path.
+**Gap.** `cmd/tfastdiff/main.go:909`, `pkg/wrapper/analyzer.go:359`, and `pkg/planner/analysis.go:69` call `diff.Compare` without a registry, so `#133` is inert.
 
-**Change.** Add an optional `*recreation.DynamicHazardRegistry` parameter to `Compare` (nil-safe); in `compareDestructiveToggles`, when a managed/data resource attribute changes, look it up via the registry and, if flagged `requires_replace`, emit `BreakingChanges` (`Category: "ResourceForceNew"`) with the descriptor's `Impact`/`Remediation`. Keep the existing hard-coded list as a fallback when no registry is supplied.
+**Change.** Thread `dynamicRegistry` through `runCompareMode`, `AnalyzeWrapper` (new parameter), and upgrade-path analysis; pass it as the hazard lookup. Update golden tests to optionally supply a registry.
 
-**Acceptance.** Changing a schema-confirmed `requires_replace` attribute not in the hard-coded list (e.g. `aws_db_instance.engine` with a real schema) yields `TotalBreaking >= 1` and `CRITICAL_HAZARD` in wrapper mode; identity diff reports nothing; nil registry preserves current behaviour.
+**Acceptance.** A schema-confirmed `requires_replace` attribute changed in direct compare mode reports `ResourceForceNew`; wrapper `RecreationHazards` include registry descriptors.
 
-### `#134` — Diff child module-call `version` constraint bumps (Accuracy, P0)
+### `#154` — Replace ad-hoc version heuristics with `ParseConstraintRange` (Accuracy, P0)
 
-**Gap.** `compareModuleCalls` (`pkg/diff/diff.go:1458-1498`) compares `Source` and indexing *mode* but never `ModuleCallDef.Version` (`pkg/ast/types.go:42`), so a child module major-version bump is silent.
+**Gap.** `pkg/semverutil/semver.go:157` is unused; diff uses `majorFromConstraint`/`upperBoundMajor`.
 
-**Change.** When `oldCall.Version != newCall.Version`, classify using `semverutil`/`ParseConstraintRange`: a major bump or `0.x` minor bump or upper-bound major drop → `BreakingChanges` (`Category: "ModuleCallVersion"`); otherwise `Warnings` (`Category: "ModuleCallVersion"`).
+**Change.** Implement interval comparison in `pkg/diff/diff.go` using `ParseConstraintRange` for provider constraints and module-call versions; classify upper-bound major drops, `0.x` minor bumps, and `!=` exclusions.
 
-**Acceptance.** Bumping `version = ">= 4.0, < 6.0"` → `">= 5.0, < 6.0"` reports `ModuleCallVersion` breaking; a patch bump reports a warning; identical constraints report nothing.
+**Acceptance.** `ParseConstraintRange` becomes reachable; fuzz target added; narrowings report exact excluded range.
 
-### `#135` — Diff provider blocks that exist only in the new version (Accuracy, P0)
+### `#155` — Make `cloud {}` and `backend {}` fully distinct (Accuracy, P0)
 
-**Gap.** `pkg/diff/diff.go:1246-1264` iterates only `oldMod.ProviderConfigs`, so a provider block added in the new version is never compared.
+**Gap.** `pkg/ast/inspect.go:815-817` overwrites `Backend` with the cloud config.
 
-**Change.** Iterate the union of `oldMod.ProviderConfigs` and `newMod.ProviderConfigs` keys; for a newly added provider config, emit `BreakingChanges` (`Category: "ProviderConfigAdded"`) naming the provider and its attributes; for a removed one, emit `Warnings` (`Category: "ProviderConfigRemoved"`).
+**Change.** Populate `Cloud` only; keep `Backend` for `backend {}`; update `pkg/ast/pass5_test.go:471` to assert `info.Cloud`. Transition detection in diff keys off presence of each field independently.
 
-**Acceptance.** Adding `provider "aws" { region = "eu-central-1" }` in the new version reports `ProviderConfigAdded`; removing one reports `ProviderConfigRemoved`.
+**Acceptance.** A module with both `backend {}` and `cloud {}` (invalid but parseable) keeps both; cloud-only modules have `Backend == nil`.
 
-### `#136` — Separate `terraform { cloud {} }` from `backend {}` (Accuracy, P0)
+### `#156` — Classify provider-block removal as warning (Accuracy, P0)
 
-**Gap.** `pkg/ast/inspect.go:744-763` collapses both `backend` and `cloud` into `Backend` and keeps only the first block. `pkg/ast/types.go:139` has no separate `Cloud` field.
+**Gap.** `pkg/diff/diff.go:1477-1485` reports `ProviderConfigRemoved` as breaking.
 
-**Change.** Add `Cloud *BackendConfig` to `ModuleInfo`; populate it separately in `enrichFromHCLFiles` (keeping `Backend` for `backend {}`); in `compareDestructiveToggles`, diff `Cloud` with `Category: "StateBackendChange"` and report organization/workspace/project changes as breaking, including a backend↔cloud transition.
+**Change.** Report removed provider blocks as `Warnings` (`ProviderConfigRemoved`), added blocks as `BreakingChanges` (`ProviderConfigAdded`), attribute changes as breaking (`ProviderConfig`).
 
-**Acceptance.** Changing `terraform { cloud { organization = "acme-prod" } }` → `"acme-dev"` reports `StateBackendChange`; switching `backend "s3"` → `cloud {}` reports a breaking transition.
+**Acceptance.** Removing a provider block yields a warning; adding one yields breaking.
 
-### `#137` — Module-call cardinality & expression changes (Accuracy, P0)
+### `#157` — Distinguish `for_each` reformatting from shrinkage (Accuracy, P0)
 
-**Gap.** `compareModuleCalls` reports a `count` ↔ `for_each` *mode* transition but never compares `Count`/`ForEach` expression text, so `count = 2` → `count = 1` on a child module is silent.
+**Gap.** `pkg/diff/diff.go:1239-1250` and `:1822-1833` always mark `for_each` changes breaking.
 
-**Change.** When both old and new module calls have `Count` (or `ForEach`) expressions and they differ, apply the same logic as `#113`: literal integer reduction or empty collection → `BreakingChanges` (`Category: "ModuleCallCount"` / `"ModuleCallForEach"`); expression change → `Warnings` (promoted to breaking when changed to `0` or empty).
+**Change.** Compare parsed key sets when both expressions are static collections; report shrinkage as breaking (`ResourceForEach`), reformatting/widening as warning.
 
-**Acceptance.** Reducing `module "eks" { count = 2 }` → `count = 1` reports `ModuleCallCount` breaking; increasing reports a new feature; identity reports nothing.
+**Acceptance.** `for_each = toset(["a","b"])` → `toset(["a","b"])` (reordered) reports a warning; key removal reports breaking.
 
-### `#138` — Data-source selector/filter drift propagation (Accuracy, P1)
+### `#158` — Promote removed/weakened pre/postconditions (Accuracy, P0)
 
-**Gap.** `DataResources` capture attributes, but no comparison checks `most_recent`, `filter`, `owners`, `query`, or `sort` changes, nor propagates them to managed resources that reference the data source.
+**Gap.** `pkg/diff/diff.go:1366-1388` always warns.
 
-**Change.** In `compareDestructiveToggles`, for matching data resources, compare the selector attributes above; emit `Warnings` (`Category: "DataSelector"`) for any change, promoted to `BreakingChanges` when the data source feeds a `ForceNew` attribute of a managed resource (via `LookupHazard` or the hard-coded list).
+**Change.** When a removed/weakened condition references a ForceNew attribute, emit `BreakingChanges` (`PreconditionModified`/`PostconditionModified`); otherwise warn.
 
-**Acceptance.** Changing `data.aws_ami.latest.most_recent` from `true` to `false` reports `DataSelector`; when the AMI feeds `aws_instance.main.ami`, it is promoted to breaking.
+**Acceptance.** Removing a precondition guarding `cidr_block` reports breaking.
 
-### `#139` — Promote `locals` drift to breaking when feeding `ForceNew` (Accuracy, P1)
+### `#159` — Traversal-exact ForceNew promotion (Accuracy, P1)
 
-**Gap.** `pkg/diff/diff.go:1266-1279` always emits `LocalValue` as `SeverityWarning`.
+**Gap.** `pkg/diff/diff.go:1399-1405` and `:1506-1512` use `strings.Contains`.
 
-**Change.** Build a reference index of which `local.<name>` tokens appear in managed-resource attributes; when a changed local is referenced by a `ForceNew` attribute, emit `BreakingChanges` (`Category: "LocalValue"`) instead of `Warnings`.
+**Change.** Build a reference index mapping `local.<name>`/`data.<type>.<name>` to managed attributes; promote only on exact traversal matches.
 
-**Acceptance.** Changing a local that feeds `aws_vpc.main.cidr_block` reports a breaking finding; changing an unreferenced local or a non-ForceNew target yields a warning.
+**Acceptance.** O(n) reference index; no false promotions from substring matches.
 
-### `#140` — Parse and diff `precondition`/`postcondition` blocks (Accuracy, P1)
+### `#160` — Multi-level local and `module.*` root tracing (Accuracy, P1)
 
-**Gap.** `pkg/ast/inspect.go:324-341` schema and enrichment handle `lifecycle` but never `precondition`/`postcondition` blocks on resources, data sources, or outputs.
+**Gap.** `pkg/wrapper/analyzer.go:219-274` resolves one level of locals.
 
-**Change.** Add `Preconditions []string` and `Postconditions []string` to `ResourceDef` and `OutputDef`; parse them in `enrichFromHCLFiles`; in `compareDestructiveToggles` and `compareOutputs`, report removed or weakened conditions as `Warnings` (`Category: "PreconditionModified"` / `"PostconditionModified"`).
+**Change.** Resolve locals recursively to underlying `var.*`/`module.*` roots; handle `coalesce`/`try` arguments; register mappings for all roots.
 
-**Acceptance.** Removing a `precondition` block or weakening its condition reports the corresponding category; identical blocks report nothing.
+**Acceptance.** A local derived from another local that derives from `var.x` is type-checked.
 
-### `#141` — Capture and diff `provider` argument on `import {}` blocks (Accuracy, P1)
+### `#161` — AST-based JSON taint (Accuracy, P1)
 
-**Gap.** `ImportBlockDef` (`pkg/ast/types.go:86-91`) captures `To` and `ID` only; a change in the `provider` argument of an import block is not captured.
+**Gap.** `pkg/eval/taint.go:58-96` skips JSON when pre-parsed; JSON path uses substring scanning.
 
-**Change.** Add `Provider string` to `ImportBlockDef`; populate it in `enrichFromHCLFiles` (`pkg/ast/inspect.go:607-620`); in `compareModernBlocks`, report a changed `provider` as `BreakingChanges` (`Category: "ImportBlockProvider"`).
+**Change.** Parse `.tf.json` into `hcl.Body` via `hclparse` and traverse attributes; handle pre-parsed JSON bodies; record affected attributes as `type.name.attr`.
 
-**Acceptance.** Changing `import { to = aws_s3_bucket.b id = "x" provider = aws.west }` → `aws.east` reports `ImportBlockProvider`.
+**Acceptance.** Pre-parsed JSON bodies are honored; nested-block reachability is recorded.
 
-### `#142` — AST-based `.tf.json` taint analysis (Accuracy, P1)
+### `#162` — Moved-block normalization in codemod (Accuracy, P1)
 
-**Gap.** `pkg/eval/taint.go:77-85` uses `bytes.Contains` for `.tf.json` and ignores `preParsed` bodies, so a variable used only inside a nested JSON block can be reported as dead code, and already-parsed ASTs are discarded.
+**Gap.** `pkg/codemod/apply.go:262` and `:287` use raw keys.
 
-**Change.** When `preParsed` contains `.tf.json` entries, parse them with `hclsyntax.ParseJSON`/`hclparse` into `*hclsyntax.Body` and recurse with the same logic as `.tf`; otherwise fall back to reading from disk and parsing (never `bytes.Contains`). Record affected attributes as `resource.attr` / `module.x.input` rather than a synthetic `file.var.x`.
+**Change.** Use `normalizeMovedKey` (from `pkg/ast`) in codemod deduplication and synthesis.
 
-**Acceptance.** Repro R5 with a `.tf.json`-only usage reports `is_dead_code == false`, `is_reachable == true`, with the real affected attribute listed.
+**Acceptance.** Moved blocks differing only in whitespace are deduplicated.
 
-### `#143` — Traversal-exact `FilterTaintedCallSites` and renamed inputs (Accuracy, P1)
+### `#163` — Terragrunt attribution via parsed module label (Accuracy, P1)
 
-**Gap.** `pkg/blastradius/scanner.go:179-181` only matches `cs.PassedInputs[taintReport.TargetVariable]`; a consumer forwarding the input under a renamed argument is dropped. The regex at `:198` uses substring-ish `module.<name>.<outName>` boundaries but is compiled per iteration.
+**Gap.** `pkg/blastradius/scanner.go:478`/`:481` use directory base name.
 
-**Change.** Build a map from consumer input name → expression; match a call site when any passed expression contains a traversal whose root is `var.<target>` or `module.<m>.<taintedOutput>` with token boundaries; pre-compile the output-reference regex once per call.
+**Change.** Parse the Terragrunt `terraform { source = ... }` label or nearest module name and key outputs by it.
 
-**Acceptance.** A consumer passing `region = var.custom_region` where `custom_region` is tainted is retained; a consumer passing `var.identity` is not matched by a tainted output named `id`.
+**Acceptance.** Existing blast-radius tests pass; renamed arguments are attributed correctly.
 
-### `#144` — Wrapper variable tracing through `local.*`, `coalesce`, `try` (Accuracy, P1)
+### `#164` — Wire or remove dead entry points (Accuracy, P1)
 
-**Gap.** `pkg/wrapper/analyzer.go:216-234` regex only captures `var.x`; variables forwarded via `local.x`, `coalesce(var.x, ...)`, or `try(...)` are not type-checked.
+**Gap.** `deadcode` lists unused helpers.
 
-**Change.** Parse each `InputExpressions` value with `hclsyntax.ParseExpression` and walk `Variables()`; for each traversal whose root is `var`, `local`, or `module`, resolve to the wrapper variable/local and register the mapping; handle `coalesce`/`try` by inspecting all arguments.
+**Change.** Either expose `ParseConstraintRange`, `BuildEvaluationGraph`, `LookupHazard` via production entry points or remove them; document intentional public API.
 
-**Acceptance.** A wrapper passing `region = coalesce(var.custom_region, "us-east-1")` where `custom_region` has an incompatible type is flagged `TypeMismatch`.
+**Acceptance.** `deadcode ./...` reports only intentionally public helpers.
 
-### `#145` — Preserve index expressions in `DetectAddressShifts` (Accuracy, P1)
+### `#165` — Clone `ModuleInfo` on disk-cache hits (Performance, P1)
 
-**Gap.** `pkg/ast/ir.go:147-151,168-172,190-194` set `IndexKey = "count"` / `"for_each"` discarding the expression text.
+**Gap.** `pkg/ast/cache.go:220-223` returns un-cloned info.
 
-**Change.** Store the full expression text (`r.Count`/`r.ForEach`) in `IndexKey` (or a new `IndexExpr` field) so shift pairing and golden-plan correlation can distinguish `count = 3` from `count = 1`; update `ir.go` consumers and `models.go` accordingly.
+**Change.** Call `cloneModuleInfo` on disk-cache hits before returning.
 
-**Acceptance.** Two resources differing only in cardinality are no longer paired as the same shift; existing golden tests updated.
+**Acceptance.** Concurrent callers cannot mutate shared cached state.
 
-### `#146` — Normalize `moved {}` matching (Accuracy, P1)
+### `#166` — Single-pass report map in `EvaluateRego` (Performance, P1)
 
-**Gap.** `pkg/ast/ir.go:328-342` and `pkg/codemod/apply.go:172-177` build keys from raw strings, so differing whitespace/quoting prevents recognition of an already-covered shift.
+**Gap.** `pkg/policy/rego.go:271-286` marshals twice.
 
-**Change.** Add a `normalizeAddress` helper that trims whitespace and canonicalises quoting; use it for `moved {}` keys in `DetectAddressShifts` and `FormatMovedBlocks`; strip synthetic `[count]`/`[for_each]` markers while preserving concrete index keys.
+**Change.** Marshal once, compute hash from the same bytes, unmarshal into the map.
 
-**Acceptance.** A `moved {}` block with extra whitespace is still recognised as covering its shift; `FormatMovedBlocks` never emits `[count]` or `[for_each]`.
+**Acceptance.** ≥20% reduction in `B/op` on cache misses.
 
-### `#147` — Bounded LRU Rego report-map cache (Performance, P1)
+### `#167` — Precompute reference sets (Performance, P1)
 
-**Gap.** `pkg/policy/rego.go:18-32,217-237` caches by `uintptr` of `*Report` with no eviction and no content awareness.
+**Gap.** O(n²) scans in ForceNew promotion.
 
-**Change.** Key the cache by a content hash (or `*Report` + a monotonic version) in a bounded LRU (capacity 64); invalidate when the report pointer is reused with different contents; return immediately when `EvaluateRegoArbitrary` succeeds.
+**Change.** Precompute `map[localName]map[attr]bool` and `map[dataKey]...` once per comparison.
 
-**Acceptance.** Benchmark of `EvaluateRego` over a 20-step upgrade path shows ≥40% reduction in `B/op` and `allocs/op`; mutating a reused report does not return a stale map.
+**Acceptance.** Upgrade-path benchmarks show reduced allocations.
 
-### `#148` — Memoize provider schema loading and descriptor extraction (Performance, P1)
+### `#168` — Tests for registry-aware diff and separate Cloud (Accuracy, P1)
 
-**Gap.** `pkg/recreation/autodiscover.go:150-206` re-reads and re-parses `provider-schema.json` once per provider in `RequiredProviders`.
+**Gap.** No tests exercise these paths.
 
-**Change.** Cache parsed `*ProviderSchemas` and extracted `map[string]HazardDescriptor` in memory keyed by cleaned file path + mtime+size; load `mod.Path/provider-schema.json` at most once per module.
+**Change.** Add unit tests with a `HazardLookup` and cloud-only modules.
 
-**Acceptance.** A module declaring 5 providers with a local `provider-schema.json` parses the file once instead of 5 times.
+**Acceptance.** New tests pass and lock behavior.
 
-### `#149` — Deep-clone `ModuleInfo` in the inspection cache (Performance, P1)
+### `#169` — Tests for JSON taint (Accuracy, P1)
 
-**Gap.** `pkg/ast/cache.go:41-59` clones top-level maps/slices but not `ProviderConfigs` inner maps, `WrapperOutputReferences` slice elements, or `ParsedBodies`.
+**Gap.** `pkg/eval/eval_test.go:436` only substring-checks.
 
-**Change.** Deep-clone each map value (`ProviderConfigs` inner maps, `WrapperOutputReferences` slices, `ModuleCalls`, `ResourceDef` values) and copy `ParsedBodies` pointers (immutable) in `cloneModuleInfo`.
+**Change.** Add tests for pre-parsed JSON bodies and nested-block reachability.
 
-**Acceptance.** Mutating a cached `ModuleInfo`'s `ProviderConfigs` does not affect a second caller's copy; existing cache tests pass.
+**Acceptance.** New tests pass.
 
-### `#150` — LSP `didClose` invalidates buffers and cached ASTs (Performance, P1)
+### `#170` — Tests for Terragrunt attribution and moved dedup (Accuracy, P2)
 
-**Gap.** `pkg/lsp/server.go:275` is a no-op, so stale buffers and cached ASTs remain for closed documents.
+**Gap.** No coverage.
 
-**Change.** On `didClose`, delete the buffer and its cached AST entry keyed by the document URI/path; on reopen, re-parse from disk.
+**Change.** Add regression tests.
 
-**Acceptance.** Reopening a previously closed document re-parses from disk; no stale diagnostics are emitted.
+**Acceptance.** New tests pass.
 
-### `#151` — Terragrunt call-site `ModuleName` uses actual module label (Performance, P2)
+### `#171` — Remove unused legacy helpers (Performance, P2)
 
-**Gap.** `pkg/blastradius/scanner.go:465` sets `ModuleName` to `filepath.Base(filepath.Dir(path))` rather than the actual module call label.
+**Gap.** `enrichFromHCLFiles`, `BuildEvalContext`, etc. are dead.
 
-**Change.** Parse the `module "..." {}` (or Terragrunt `terraform { source = ... }`) label and store it in `CallSite.ModuleName`; use it in `extractModuleReferencesFromBody` matching.
+**Change.** Remove or gate behind exported API; update tests.
 
-**Acceptance.** A Terragrunt consumer passing an input under a renamed argument is attributed to the correct module key; existing blast-radius tests pass.
+**Acceptance.** `deadcode` clean; tests pass.
 
-### `#152` — Heuristic severity calibration + generic AWS/GCP fallback (Accuracy, P2)
+### `#172` — Golden-plan verification includes module/provider/cloud deltas (Accuracy, P2)
 
-**Gap.** `pkg/recreation/heuristics.go:381-393` promotes every upstream warning to `CRITICAL_HAZARD`; the generic fallback lacks AWS/GCP immutable-attribute names.
+**Gap.** Golden-plan verification does not include new delta categories.
 
-**Change.** Promote only upstream *breaking* items (or warnings whose category is in a defined set) to `CRITICAL_HAZARD`; keep others as `WARNING`; augment the generic hazard table with `name`, `region`, `location`, `project_id`, `vpc_id`, `subnet_id`, `network`, `subnetwork` so unclassified modules still flag them (without reintroducing cross-provider misattribution).
+**Change.** Extend `scripts/oracle_verify.py` and golden fixtures to assert module-call version/cardinality, provider add/remove, and cloud transition findings.
 
-**Acceptance.** An upstream `VariableDefault` change (warning) no longer produces `CRITICAL_HAZARD` unless it is a breaking change; a bare directory comparison changing `region` is still flagged.
+**Acceptance.** Oracle verification passes with extended assertions.
 
 ---
 
-## 4. Expanded destructive-change taxonomy (Pass 8 additions)
+## 4. Expanded destructive-change taxonomy (Pass 9 additions)
 
-Pass 7 established Classes I–VII. Pass 8 widens the scope with provider/cloud deep-diffing, module-call
-version/cardinality, data-source selector drift, precondition/postcondition, import provider, and
-index-expression preservation across those classes plus a new **Class VIII (Provider & Backend
-Composition Destruction)**:
+Pass 8 established Classes I–VIII. Pass 9 widens the scope with severity distinctions, cloud/provider lifecycle, and condition-guarded attributes, adding **Class IX (Severity & Condition Calibration)**:
 
-| Class | Change | Severity | Status before Pass 8 | Item |
+| Class | Change | Severity | Status before Pass 9 | Item |
 | :--- | :--- | :--- | :--- | :--- |
-| **I.11** | Unmigrated resource rename with cardinality change (`count`/`for_each` expr differs) | **Breaking (recreation)** | Shift pairing conflates by literal marker | `#145` |
-| **I.12** | `moved {}` block not recognised due to whitespace/quoting | **Breaking (duplicate migration)** | Exact string equality required | `#146` |
-| **II.10** | Schema-confirmed `requires_replace` attribute outside hard-coded list | **Breaking (recreation)** | Allow-list only | `#133` |
-| **II.11** | `precondition`/`postcondition` removed or weakened | **Warning → Breaking if ForceNew** | Not parsed | `#140` |
-| **II.12** | `import {}` `provider` argument changed | **Breaking** | Not captured | `#141` |
-| **III.9** | `deletion_protection`/`purge_protection_enabled` on data sources disabled | **Breaking (destruction guard removed)** | Data sources not diffed for toggles | `#133` |
-| **IV.11** | `terraform { cloud {} }` organization/workspace/project changed | **Breaking (state backend move)** | Collapsed into `Backend` | `#136` |
-| **IV.12** | `backend {}` ↔ `cloud {}` transition | **Breaking (state backend move)** | Collapsed into `Backend` | `#136` |
-| **IV.13** | Provider block added/removed in new version | **Breaking (provider target shift)** | Only old side iterated | `#135` |
-| **V.10** | `locals` expression change feeding a `ForceNew` attribute | **Breaking** (Warning if mutable) | Always warning | `#139` |
-| **V.11** | `data` source filter/selector change (`most_recent`, `filter`, `owners`) | **Warning → Breaking if ForceNew** | Not compared | `#138` |
-| **VI.7** | `.tf.json`-only variable usage reported as dead code | **False negative** | `bytes.Contains` shallow | `#142` |
-| **VI.8** | Blast radius drops renamed-input consumers | **False negative** | Exact-name match only | `#143` |
-| **VII.4** | Nested module-call `version` major bump | **Breaking** | Not compared | `#134` |
-| **VII.5** | Nested module-call `count`/`for_each` expression reduction | **Breaking (subtree destruction)** | Mode only | `#137` |
-| **VII.6** | Wrapper variable forwarded via `local.*`/`coalesce`/`try` not type-checked | **Breaking** | Regex misses them | `#144` |
-| **VIII.1** | Provider configuration block added in new version | **Breaking (provider target shift)** | Not detected | `#135` |
-| **VIII.2** | Heuristic severity inflation (warning → `CRITICAL_HAZARD`) | **False positive** | Over-promotion | `#152` |
-| **VIII.3** | Cached `ModuleInfo` shared mutable state across callers | **Correctness** | Shallow clone | `#149` |
-| **VIII.4** | Stale LSP buffer/AST after `didClose` | **Correctness** | No-op handler | `#150` |
+| **II.13** | Schema-confirmed `requires_replace` attribute changed (wired in production) | **Breaking (recreation)** | Inert (registry not passed) | `#153` |
+| **IV.14** | `terraform { cloud {} }` vs `backend {}` fully distinguished | **Breaking (state backend move)** | Overwritten | `#155` |
+| **IV.15** | Provider block removed (configuration loss) | **Warning** | Misclassified breaking | `#156` |
+| **IV.16** | Provider block added (target shift) | **Breaking** | Breaking (unchanged) | `#156` |
+| **V.12** | `for_each` reformatting/widening | **Warning** | Always breaking | `#157` |
+| **V.13** | `for_each` key removal | **Breaking** | Always breaking | `#157` |
+| **II.14** | Removed precondition guarding a ForceNew attribute | **Breaking** | Always warning | `#158` |
+| **II.15** | Weakened postcondition on a ForceNew attribute | **Breaking** | Always warning | `#158` |
+| **V.14** | Data-source selector drift with exact ForceNew reference | **Breaking if ForceNew** | Substring heuristic | `#159` |
+| **V.15** | Local drift through nested locals/module roots | **Breaking if ForceNew** | One-level resolution | `#160` |
+| **VI.9** | `.tf.json` variable usage via AST traversal | **Reachability** | Substring scanning | `#161` |
+| **VII.7** | Nested module-call version bump (interval-based) | **Breaking** | Regex heuristic | `#154` |
+| **VII.8** | Nested module-call `for_each` shrinkage | **Breaking** | Always breaking | `#157` |
+| **VIII.5** | Moved-block dedup with non-normalized whitespace | **Correctness** | Raw keys | `#162` |
+| **VIII.6** | Terragrunt output attribution via synthetic name | **Correctness** | Directory base | `#163` |
+| **IX.1** | Cloud/backend shared mutable state | **Correctness** | Un-cloned disk hit | `#165` |
+| **IX.2** | Rego report map double marshal | **Performance** | Two passes | `#166` |
+| **IX.3** | ForceNew promotion O(n²) | **Performance** | Repeated scans | `#167` |
 
 ---
 
@@ -303,24 +296,17 @@ Composition Destruction)**:
 
 ```mermaid
 flowchart TD
-    A["Batch A: Core Breaking Blind Spots<br/>#133 #134 #135 #136 #137"] --> B["Batch B: Semantic & Taint Precision<br/>#138 #139 #140 #141 #142 #143 #144 #145 #146"]
-    B --> C["Batch C: Performance & Correctness<br/>#147 #148 #149 #150 #151 #152"]
+    A["Batch A: Wiring & Correctness<br/>#153 #154 #155 #156 #157 #158"] --> B["Batch B: Precision & Performance<br/>#159 #160 #161 #162 #163 #164 #165 #166 #167"]
+    B --> C["Batch C: Coverage & Cleanup<br/>#168 #169 #170 #171 #172"]
 ```
-
-| Batch | Items | Rationale |
-| :--- | :--- | :--- |
-| A — Core breaking blind spots | `#133`–`#137` | Eliminates the `SAFE` false negatives from schema-confirmed ForceNew, module-call version/cardinality, provider/cloud deep diffing |
-| B — Semantic & taint precision | `#138`–`#146` | Fixes data-source/local propagation, precondition/postcondition/import provider, `.tf.json` taint, renamed-input blast radius, wrapper tracing, address-shift indexing, moved-block matching |
-| C — Performance & correctness | `#147`–`#152` | Bounds Rego cache, memoises provider schemas, deep-clones cached modules, fixes LSP close, Terragrunt labels, heuristic severity |
 
 ---
 
 ## 6. Definition of done
 
-Every item, without exception, satisfies the Pass 6 Definition of Done (§6 of the previous `docs/roadmap.md`), plus:
+Every item satisfies the Pass 6 Definition of Done, plus:
 
-1. **Schema-driven diffing.** When a `DynamicHazardRegistry` is supplied, `diff.Compare` reports every changed `requires_replace` attribute, not just the hard-coded allow-list.
-2. **No stale cache state.** `cloneModuleInfo` produces an independent copy; LSP `didClose` clears buffers and cached ASTs.
-3. **Taint fidelity.** `.tf.json` files are parsed, not substring-scanned; renamed-input consumers are retained in the blast radius.
-4. **Provider/cloud parity.** `backend` and `cloud` are distinct fields; provider blocks are diffed in both directions.
-"""
+1. **Wiring.** Schema-driven ForceNew, `ParseConstraintRange`, and moved-block normalization are reachable from production entry points.
+2. **Correctness.** `cloud {}` and `backend {}` are distinct; removed provider blocks are warnings; `for_each` and preconditions distinguish warning vs breaking.
+3. **Performance.** Disk-cache hits are cloned; Rego marshals once; ForceNew promotion is O(n).
+4. **Coverage.** New tests lock registry-aware diff, separate Cloud, JSON taint, Terragrunt attribution, and moved dedup.
