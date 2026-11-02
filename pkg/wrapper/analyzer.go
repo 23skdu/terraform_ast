@@ -11,6 +11,8 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/policy"
 	"github.com/23skdu/terraform_ast/pkg/semverutil"
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/terraform-config-inspect/tfconfig"
 )
 
@@ -211,15 +213,67 @@ func AnalyzeWrapper(
 		}
 	}
 
-	// Trace wrapper InputExpressions across renamed variables (#121)
-	// e.g. region = var.custom_region
+	// Trace wrapper InputExpressions across renamed variables (#121, #144)
+	// e.g. region = var.custom_region, region = coalesce(var.custom_region, "us-east-1"),
+	// or region = local.custom_region (resolved through local definitions).
+	localVars := make(map[string][]string)
+	for lName, lVal := range wrapperMod.Locals {
+		parsed, diags := hclsyntax.ParseExpression([]byte(lVal), "wrapper", hcl.Pos{Line: 1, Column: 1})
+		if diags.HasErrors() || parsed == nil {
+			continue
+		}
+		seen := make(map[string]bool)
+		for _, v := range parsed.Variables() {
+			if len(v) < 2 {
+				continue
+			}
+			root, ok := v[0].(hcl.TraverseRoot)
+			if !ok || root.Name != "var" {
+				continue
+			}
+			attr, ok := v[1].(hcl.TraverseAttr)
+			if !ok || seen[attr.Name] {
+				continue
+			}
+			seen[attr.Name] = true
+			localVars[lName] = append(localVars[lName], attr.Name)
+		}
+	}
+
 	varVarRe := regexp.MustCompile(`\bvar\.([a-zA-Z0-9_-]+)\b`)
 	for _, call := range calls {
 		for _, upInput := range sortedKeys(call.InputExpressions) {
 			expr := call.InputExpressions[upInput]
-			matches := varVarRe.FindAllStringSubmatch(expr, -1)
-			for _, m := range matches {
-				wVarName := m[1]
+			collected := make(map[string]bool)
+			parsed, diags := hclsyntax.ParseExpression([]byte(expr), "wrapper", hcl.Pos{Line: 1, Column: 1})
+			if diags.HasErrors() || parsed == nil {
+				for _, m := range varVarRe.FindAllStringSubmatch(expr, -1) {
+					collected[m[1]] = true
+				}
+			} else {
+				for _, v := range parsed.Variables() {
+					if len(v) < 2 {
+						continue
+					}
+					root, ok := v[0].(hcl.TraverseRoot)
+					if !ok {
+						continue
+					}
+					switch root.Name {
+					case "var":
+						if attr, ok := v[1].(hcl.TraverseAttr); ok {
+							collected[attr.Name] = true
+						}
+					case "local":
+						if attr, ok := v[1].(hcl.TraverseAttr); ok {
+							for _, vn := range localVars[attr.Name] {
+								collected[vn] = true
+							}
+						}
+					}
+				}
+			}
+			for wVarName := range collected {
 				if _, okW := wrapperMod.Variables[wVarName]; okW {
 					if _, okU := targetUpstream.Variables[upInput]; okU {
 						key := wVarName + ":" + upInput

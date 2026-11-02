@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"sort"
 	"strings"
 
@@ -25,12 +26,22 @@ func SanitizeProviderKey(source string) string {
 
 // GetBuiltinProviderSchema returns a synthetic ProviderSchemas for well-known providers
 // to ensure ForceNew protection even without an explicit terraform providers schema export.
-func GetBuiltinProviderSchema(providerName string) *ProviderSchemas {
+var builtinSchemaCache sync.Map
+
+func GetBuiltinProviderSchema(providerName string) (ps *ProviderSchemas) {
 	norm := strings.ToLower(strings.TrimSpace(providerName))
 	// Strip namespace if present
 	if idx := strings.LastIndex(norm, "/"); idx != -1 {
 		norm = norm[idx+1:]
 	}
+	if cached, ok := builtinSchemaCache.Load(norm); ok {
+		return cached.(*ProviderSchemas)
+	}
+	defer func() {
+		if ps != nil {
+			builtinSchemaCache.Store(norm, ps)
+		}
+	}()
 
 	switch norm {
 	case "azurerm":

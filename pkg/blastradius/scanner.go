@@ -173,12 +173,25 @@ func FilterTaintedCallSites(callSites []CallSite, taintReport *eval.TaintReport)
 	}
 
 	var filtered []CallSite
+	// Pre-compile output reference regexes once per tainted output.
+	outRegexes := make(map[string]*regexp.Regexp)
+	for outName := range taintedOutputs {
+		outRegexes[outName] = regexp.MustCompile(`\bmodule\.[a-zA-Z0-9_-]+\.` + regexp.QuoteMeta(outName) + `\b`)
+	}
+	targetVar := taintReport.TargetVariable
 	for _, cs := range callSites {
 		isTainted := false
 
-		// 1. Consumer explicitly passes the tainted input
-		if _, passed := cs.PassedInputs[taintReport.TargetVariable]; passed {
-			isTainted = true
+		// 1. Consumer explicitly passes the tainted input (exact name or expression referencing var.<target>)
+		for inputName, expr := range cs.PassedInputs {
+			if inputName == targetVar {
+				isTainted = true
+				break
+			}
+			if regexp.MustCompile(`\bvar\.` + regexp.QuoteMeta(targetVar) + `\b`).MatchString(expr) {
+				isTainted = true
+				break
+			}
 		}
 
 		// 2. Consumer references an output tainted by the target variable
@@ -194,8 +207,8 @@ func FilterTaintedCallSites(callSites []CallSite, taintReport *eval.TaintReport)
 		// 3. Consumer's passed input expression references a tainted output (e.g. module.wrapper.tainted_output)
 		if !isTainted {
 			for _, expr := range cs.PassedInputs {
-				for outName := range taintedOutputs {
-					re := regexp.MustCompile(`\bmodule\.[a-zA-Z0-9_-]+\.` + regexp.QuoteMeta(outName) + `\b`)
+				for outName, re := range outRegexes {
+					_ = outName
 					if re.MatchString(expr) {
 						isTainted = true
 						break

@@ -217,6 +217,15 @@ func (r *DynamicHazardRegistry) Lookup(name string) (HazardDescriptor, bool) {
 	return desc, ok
 }
 
+// LookupHazard implements ast.HazardLookup for schema-driven ForceNew detection.
+func (r *DynamicHazardRegistry) LookupHazard(key string) (bool, string, string) {
+	desc, ok := r.Lookup(key)
+	if !ok {
+		return false, "", ""
+	}
+	return true, desc.Impact, desc.Remediation
+}
+
 // Register adds a descriptor for a key into the registry.
 func (r *DynamicHazardRegistry) Register(key string, desc HazardDescriptor) {
 	if r == nil {

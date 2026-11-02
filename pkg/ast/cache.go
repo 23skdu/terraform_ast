@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 )
 
 const moduleCacheCapacity = 128
@@ -39,22 +41,44 @@ var fingerprintBufPool = sync.Pool{
 }
 
 func cloneModuleInfo(src *ModuleInfo) *ModuleInfo {
+	if src == nil {
+		return nil
+	}
 	dst := *src
 	dst.Variables = maps.Clone(src.Variables)
 	dst.Outputs = maps.Clone(src.Outputs)
 	dst.ModuleCalls = maps.Clone(src.ModuleCalls)
 	dst.RequiredProviders = maps.Clone(src.RequiredProviders)
-	dst.WrapperOutputReferences = maps.Clone(src.WrapperOutputReferences)
+	// deep-clone wrapper output references slices
+	if src.WrapperOutputReferences != nil {
+		dst.WrapperOutputReferences = make(map[string][]OutputReference, len(src.WrapperOutputReferences))
+		for k, v := range src.WrapperOutputReferences {
+			dst.WrapperOutputReferences[k] = slices.Clone(v)
+		}
+	}
 	dst.CheckBlocks = maps.Clone(src.CheckBlocks)
 	dst.Functions = maps.Clone(src.Functions)
 	dst.ManagedResources = maps.Clone(src.ManagedResources)
 	dst.DataResources = maps.Clone(src.DataResources)
-	dst.ProviderConfigs = maps.Clone(src.ProviderConfigs)
+	// deep-clone provider configs inner maps
+	if src.ProviderConfigs != nil {
+		dst.ProviderConfigs = make(map[string]map[string]string, len(src.ProviderConfigs))
+		for k, v := range src.ProviderConfigs {
+			dst.ProviderConfigs[k] = maps.Clone(v)
+		}
+	}
 	dst.Locals = maps.Clone(src.Locals)
 	dst.RemovedBlocks = slices.Clone(src.RemovedBlocks)
 	dst.MovedBlocks = slices.Clone(src.MovedBlocks)
 	dst.ImportBlocks = slices.Clone(src.ImportBlocks)
 	dst.EncryptionBlocks = slices.Clone(src.EncryptionBlocks)
+	// ParsedBodies are immutable *hclsyntax.Body pointers; share them.
+	if src.ParsedBodies != nil {
+		dst.ParsedBodies = make(map[string]*hclsyntax.Body, len(src.ParsedBodies))
+		for k, v := range src.ParsedBodies {
+			dst.ParsedBodies[k] = v
+		}
+	}
 	return &dst
 }
 

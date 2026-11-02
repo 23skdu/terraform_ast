@@ -1,7 +1,7 @@
 package eval
 
 import (
-	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -75,12 +75,22 @@ func AnalyzeVariableTaint(dir string, targetVar string, preParsed ...map[string]
 				continue
 			}
 			if isJSON {
-				if bytes.Contains(src, []byte("var."+targetVar)) || bytes.Contains(src, []byte("${var."+targetVar+"}")) {
-					report.IsReachable = true
-					report.IsDeadCode = false
-					dest := fmt.Sprintf("%s.var.%s", entry.Name(), targetVar)
-					affectedAttrsMap[dest] = struct{}{}
-					report.TracePath = append(report.TracePath, dest)
+				var raw map[string]any
+				if err := json.Unmarshal(src, &raw); err == nil {
+					if locals, ok := raw["locals"].(map[string]any); ok {
+						for lname, lval := range locals {
+							if s, ok := lval.(string); ok && (strings.Contains(s, "var."+targetVar) || strings.Contains(s, "${var."+targetVar+"}")) {
+								taintedLocals["local."+lname] = struct{}{}
+								report.TracePath = append(report.TracePath, "local."+lname)
+							}
+						}
+					}
+					found := false
+					walkJSON(raw, "", targetVar, affectedAttrsMap, &found)
+					if found {
+						report.IsReachable = true
+						report.IsDeadCode = false
+					}
 				}
 				continue
 			}
@@ -223,6 +233,35 @@ func AnalyzeVariableTaint(dir string, targetVar string, preParsed ...map[string]
 	report.TracePath = dedupTrace
 
 	return report, nil
+}
+
+func walkJSON(v any, path, targetVar string, affected map[string]struct{}, found *bool) {
+	switch val := v.(type) {
+	case map[string]any:
+		for k, vv := range val {
+			newPath := k
+			if path != "" {
+				newPath = path + "." + k
+			}
+			walkJSON(vv, newPath, targetVar, affected, found)
+		}
+	case []any:
+		for i, vv := range val {
+			newPath := fmt.Sprintf("%s[%d]", path, i)
+			walkJSON(vv, newPath, targetVar, affected, found)
+		}
+	case string:
+		if strings.Contains(val, "var."+targetVar) || strings.Contains(val, "${var."+targetVar+"}") {
+			*found = true
+			p := path
+			if strings.HasPrefix(p, "resource.") {
+				p = strings.TrimPrefix(p, "resource.")
+			}
+			if p != "" {
+				affected[p] = struct{}{}
+			}
+		}
+	}
 }
 
 func traversalToString(t hcl.Traversal) string {

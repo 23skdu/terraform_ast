@@ -510,6 +510,31 @@ func parseAndEnrichModuleWithOverlay(dir string, entries []os.DirEntry, info *Mo
 				if info.Outputs == nil {
 					info.Outputs = make(map[string]OutputDef)
 				}
+				outDef := info.Outputs[outName]
+				for _, condType := range []string{"precondition", "postcondition"} {
+					condContent, _, _ := block.Body.PartialContent(&hcl.BodySchema{
+						Blocks: []hcl.BlockHeaderSchema{{Type: condType}},
+					})
+					if condContent == nil {
+						continue
+					}
+					for _, cc := range condContent.Blocks {
+						ccAttrs, _ := cc.Body.JustAttributes()
+						condStr := ""
+						if cAttr, ok := ccAttrs["condition"]; ok {
+							condStr = strings.TrimSpace(string(src[cAttr.Expr.Range().Start.Byte:cAttr.Expr.Range().End.Byte]))
+						}
+						if condType == "precondition" {
+							outDef.Preconditions = append(outDef.Preconditions, condStr)
+						} else {
+							outDef.Postconditions = append(outDef.Postconditions, condStr)
+						}
+					}
+				}
+				if len(outDef.Preconditions) > 0 || len(outDef.Postconditions) > 0 {
+					outDef.Name = outName
+					info.Outputs[outName] = outDef
+				}
 				if valAttr, ok := attrs["value"]; ok {
 					valueExpr := strings.TrimSpace(string(src[valAttr.Expr.Range().Start.Byte:valAttr.Expr.Range().End.Byte]))
 					if out, exists := info.Outputs[outName]; exists {
@@ -613,10 +638,15 @@ func parseAndEnrichModuleWithOverlay(dir string, entries []os.DirEntry, info *Mo
 				if idAttr, ok := attrs["id"]; ok {
 					id = strings.Trim(strings.TrimSpace(string(src[idAttr.Expr.Range().Start.Byte:idAttr.Expr.Range().End.Byte])), `"'`)
 				}
+				provider := ""
+				if pAttr, ok := attrs["provider"]; ok {
+					provider = strings.TrimSpace(string(src[pAttr.Expr.Range().Start.Byte:pAttr.Expr.Range().End.Byte]))
+				}
 				info.ImportBlocks = append(info.ImportBlocks, ImportBlockDef{
-					To:  to,
-					ID:  id,
-					Pos: tfconfig.SourcePos{Filename: filePath, Line: block.DefRange.Start.Line},
+					To:       to,
+					ID:       id,
+					Provider: provider,
+					Pos:      tfconfig.SourcePos{Filename: filePath, Line: block.DefRange.Start.Line},
 				})
 
 			case "function":
@@ -711,6 +741,28 @@ func parseAndEnrichModuleWithOverlay(dir string, entries []os.DirEntry, info *Mo
 						res.Provisioners = append(res.Provisioners, when)
 					}
 				}
+				// precondition / postcondition blocks (#140)
+				for _, condType := range []string{"precondition", "postcondition"} {
+					condContent, _, _ := block.Body.PartialContent(&hcl.BodySchema{
+						Blocks: []hcl.BlockHeaderSchema{{Type: condType}},
+					})
+					if condContent == nil {
+						continue
+					}
+					for _, cc := range condContent.Blocks {
+						ccAttrs, _ := cc.Body.JustAttributes()
+						condStr := ""
+						if cAttr, ok := ccAttrs["condition"]; ok {
+							condStr = strings.TrimSpace(string(src[cAttr.Expr.Range().Start.Byte:cAttr.Expr.Range().End.Byte]))
+						}
+						if condType == "precondition" {
+							res.Preconditions = append(res.Preconditions, condStr)
+						} else {
+							res.Postconditions = append(res.Postconditions, condStr)
+						}
+					}
+				}
+
 				// triggers and resource attributes
 				blockAttrs, _ := block.Body.JustAttributes()
 				for attrName, attr := range blockAttrs {
@@ -748,18 +800,25 @@ func parseAndEnrichModuleWithOverlay(dir string, entries []os.DirEntry, info *Mo
 						{Type: "cloud"},
 					},
 				})
-				if bcContent != nil && len(bcContent.Blocks) > 0 {
-					bc := bcContent.Blocks[0]
-					bType := bc.Type
-					if len(bc.Labels) > 0 {
-						bType = bc.Labels[0]
+				if bcContent != nil {
+					for _, bc := range bcContent.Blocks {
+						bType := bc.Type
+						if len(bc.Labels) > 0 {
+							bType = bc.Labels[0]
+						}
+						bcfg := &BackendConfig{Type: bType, Attributes: make(map[string]string)}
+						bAttrs, _ := bc.Body.JustAttributes()
+						for an, av := range bAttrs {
+							bcfg.Attributes[an] = strings.TrimSpace(string(src[av.Expr.Range().Start.Byte:av.Expr.Range().End.Byte]))
+						}
+						if bc.Type == "cloud" {
+							info.Cloud = bcfg
+							// Backward compatibility: older callers/tests expect cloud in Backend.
+							info.Backend = bcfg
+						} else {
+							info.Backend = bcfg
+						}
 					}
-					bcfg := &BackendConfig{Type: bType, Attributes: make(map[string]string)}
-					bAttrs, _ := bc.Body.JustAttributes()
-					for an, av := range bAttrs {
-						bcfg.Attributes[an] = strings.TrimSpace(string(src[av.Expr.Range().Start.Byte:av.Expr.Range().End.Byte]))
-					}
-					info.Backend = bcfg
 				}
 
 			case "provider":

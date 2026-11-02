@@ -108,8 +108,16 @@ A breaking change is any modification that will prevent existing wrapper code or
   - A destroy-time `provisioner` (`when = destroy`) is added (`Provisioner` → `BREAKING`).
   - A `check {}` assertion condition is altered or weakened (`CheckBlockModified` → `WARNING`).
   - An `import {}` block changes its target `id` for the same resource address (`ImportBlockModified` → `BREAKING`).
+  - An `import {}` block changes its `provider` argument (`ImportBlockProvider` → `BREAKING`).
+  - A `precondition {}` or `postcondition {}` block is removed or weakened (`PreconditionModified`/`PostconditionModified` → `WARNING`).
 
-### Provider Configuration & State Backend Changes (`ProviderConfig`, `StateBackendChange`)
+### Module Call Version & Cardinality (`ModuleCallVersion`, `ModuleCallCount`, `ModuleCallForEach`)
+- **Condition**:
+  - A nested `module {}` call changes its `version` constraint in a major or `0.x`-minor breaking way (`ModuleCallVersion` → `BREAKING`).
+  - A nested `module {}` call reduces `count` or shrinks `for_each` (`ModuleCallCount`/`ModuleCallForEach` → `BREAKING`).
+- **Verdict**: `BREAKING`.
+
+### Provider Configuration & State Backend Changes (`ProviderConfig`, `ProviderConfigAdded`, `ProviderConfigRemoved`, `StateBackendChange`)
 - **Condition**:
   - `terraform { backend "..." { ... } }` or `terraform { cloud { ... } }` changes organization, workspace, backend type, or key attributes (`StateBackendChange` → `BREAKING`).
   - A `provider "..." {}` block changes its `region`, `project`, `subscription_id`, or `assume_role` configuration (`ProviderConfig` → `BREAKING`).

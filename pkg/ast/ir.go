@@ -14,6 +14,7 @@ type ResourceAddress struct {
 	Type       string `json:"type"`
 	Name       string `json:"name"`
 	IndexKey   string `json:"index_key,omitempty"`
+	IndexExpr  string `json:"index_expr,omitempty"`
 }
 
 // FullAddress renders the canonical Terraform resource instance address string.
@@ -144,16 +145,20 @@ func ExtractResourceAddresses(mod *ModuleInfo) []ResourceAddress {
 	for _, k := range moduleKeys {
 		mc := mod.ModuleCalls[k]
 		indexKey := ""
+		indexExpr := ""
 		if mc.Count != "" {
 			indexKey = "count"
+			indexExpr = mc.Count
 		} else if mc.ForEach != "" {
 			indexKey = "for_each"
+			indexExpr = mc.ForEach
 		}
 		addresses = append(addresses, ResourceAddress{
-			Mode:     "module",
-			Type:     "module",
-			Name:     mc.Name,
-			IndexKey: indexKey,
+			Mode:      "module",
+			Type:      "module",
+			Name:      mc.Name,
+			IndexKey:  indexKey,
+			IndexExpr: indexExpr,
 		})
 	}
 
@@ -166,16 +171,20 @@ func ExtractResourceAddresses(mod *ModuleInfo) []ResourceAddress {
 	for _, k := range managedKeys {
 		r := mod.ManagedResources[k]
 		indexKey := ""
+		indexExpr := ""
 		if r.Count != "" {
 			indexKey = "count"
+			indexExpr = r.Count
 		} else if r.ForEach != "" {
 			indexKey = "for_each"
+			indexExpr = r.ForEach
 		}
 		addresses = append(addresses, ResourceAddress{
-			Mode:     "managed",
-			Type:     r.Type,
-			Name:     r.Name,
-			IndexKey: indexKey,
+			Mode:      "managed",
+			Type:      r.Type,
+			Name:      r.Name,
+			IndexKey:  indexKey,
+			IndexExpr: indexExpr,
 		})
 	}
 
@@ -188,16 +197,20 @@ func ExtractResourceAddresses(mod *ModuleInfo) []ResourceAddress {
 	for _, k := range dataKeys {
 		r := mod.DataResources[k]
 		indexKey := ""
+		indexExpr := ""
 		if r.Count != "" {
 			indexKey = "count"
+			indexExpr = r.Count
 		} else if r.ForEach != "" {
 			indexKey = "for_each"
+			indexExpr = r.ForEach
 		}
 		addresses = append(addresses, ResourceAddress{
-			Mode:     "data",
-			Type:     r.Type,
-			Name:     r.Name,
-			IndexKey: indexKey,
+			Mode:      "data",
+			Type:      r.Type,
+			Name:      r.Name,
+			IndexKey:  indexKey,
+			IndexExpr: indexExpr,
 		})
 	}
 
@@ -296,7 +309,9 @@ func DetectAddressShifts(oldMod, newMod *ModuleInfo) []ResourceAddressShift {
 			if newAddr.ModulePath == oldAddr.ModulePath {
 				sc += 1
 			}
-			if newAddr.IndexKey == oldAddr.IndexKey && oldAddr.IndexKey != "" {
+			if oldAddr.IndexExpr != "" && newAddr.IndexExpr == oldAddr.IndexExpr {
+				sc += 2
+			} else if newAddr.IndexKey == oldAddr.IndexKey && oldAddr.IndexKey != "" {
 				sc += 1
 			}
 			c := newAddr
@@ -326,15 +341,17 @@ func DetectAddressShifts(oldMod, newMod *ModuleInfo) []ResourceAddressShift {
 	}
 
 	// Suppress IsRecreation when an upstream moved {} block covers the transition.
+	// Address strings are normalised (trimmed + canonicalised quoting) so differing
+	// whitespace or quoting in moved {} blocks does not defeat recognition.
 	covered := make(map[string]bool)
 	for _, mb := range newMod.MovedBlocks {
-		covered[mb.From+"->"+mb.To] = true
+		covered[normalizeMovedKey(mb.From, mb.To)] = true
 	}
 	for _, mb := range oldMod.MovedBlocks {
-		covered[mb.From+"->"+mb.To] = true
+		covered[normalizeMovedKey(mb.From, mb.To)] = true
 	}
 	for i := range shifts {
-		key := shifts[i].OldAddress.FullAddress() + "->" + shifts[i].NewAddress.FullAddress()
+		key := normalizeMovedKey(shifts[i].OldAddress.FullAddress(), shifts[i].NewAddress.FullAddress())
 		if covered[key] {
 			shifts[i].IsRecreation = false
 			shifts[i].Reason = fmt.Sprintf("Resource address migrated via moved block from %s to %s", shifts[i].OldAddress.FullAddress(), shifts[i].NewAddress.FullAddress())
@@ -347,4 +364,20 @@ func DetectAddressShifts(oldMod, newMod *ModuleInfo) []ResourceAddressShift {
 	})
 
 	return shifts
+}
+
+// normalizeMovedKey canonicalises a moved {} from->to pair so that differing
+// whitespace or quoting does not prevent recognition of an already-covered shift.
+func normalizeMovedKey(from, to string) string {
+	return normalizeAddress(from) + "->" + normalizeAddress(to)
+}
+
+// normalizeAddress trims surrounding whitespace and strips a single layer of
+// surrounding quotes from a Terraform address string.
+func normalizeAddress(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
+		s = s[1 : len(s)-1]
+	}
+	return strings.TrimSpace(s)
 }

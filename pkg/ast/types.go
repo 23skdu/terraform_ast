@@ -26,13 +26,15 @@ type VariableDef struct {
 
 // OutputDef represents an output exposed by a Terraform module.
 type OutputDef struct {
-	Name        string             `json:"name"`
-	Description string             `json:"description"`
-	Sensitive   bool               `json:"sensitive"`
-	Type        string             `json:"type,omitempty"`
-	Deprecated  string             `json:"deprecated,omitempty"`
-	Value       string             `json:"value,omitempty"`
-	Pos         tfconfig.SourcePos `json:"pos"`
+	Name           string             `json:"name"`
+	Description    string             `json:"description"`
+	Sensitive      bool               `json:"sensitive"`
+	Type           string             `json:"type,omitempty"`
+	Deprecated     string             `json:"deprecated,omitempty"`
+	Value          string             `json:"value,omitempty"`
+	Preconditions  []string           `json:"preconditions,omitempty"`
+	Postconditions []string           `json:"postconditions,omitempty"`
+	Pos            tfconfig.SourcePos `json:"pos"`
 }
 
 // ModuleCallDef represents a child module instantiation (e.g. `module "gke"` or `module "eks"`).
@@ -85,9 +87,10 @@ type CheckBlockDef struct {
 
 // ImportBlockDef captures Terraform 1.5+ programmatic import {} blocks.
 type ImportBlockDef struct {
-	To  string             `json:"to"`
-	ID  string             `json:"id"`
-	Pos tfconfig.SourcePos `json:"pos"`
+	To       string             `json:"to"`
+	ID       string             `json:"id"`
+	Provider string             `json:"provider,omitempty"`
+	Pos      tfconfig.SourcePos `json:"pos"`
 }
 
 // FunctionDef captures Terraform 1.8+ custom function blocks.
@@ -114,9 +117,11 @@ type ResourceDef struct {
 	ForEach      string             `json:"for_each,omitempty"`
 	Lifecycle    LifecycleFlags     `json:"lifecycle,omitempty"`
 	Provisioners []string           `json:"provisioners,omitempty"`
-	Triggers     map[string]string  `json:"triggers,omitempty"`
-	Attributes   map[string]string  `json:"attributes,omitempty"`
-	Pos          tfconfig.SourcePos `json:"pos"`
+	Triggers       map[string]string  `json:"triggers,omitempty"`
+	Attributes     map[string]string  `json:"attributes,omitempty"`
+	Preconditions  []string           `json:"preconditions,omitempty"`
+	Postconditions []string           `json:"postconditions,omitempty"`
+	Pos            tfconfig.SourcePos `json:"pos"`
 }
 
 // ModuleInfo is the normalized AST representation of a Terraform module.
@@ -137,6 +142,7 @@ type ModuleInfo struct {
 	ManagedResources        map[string]ResourceDef         `json:"managed_resources,omitempty"`
 	DataResources           map[string]ResourceDef         `json:"data_resources,omitempty"`
 	Backend                 *BackendConfig                 `json:"backend,omitempty"`
+	Cloud                   *BackendConfig                 `json:"cloud,omitempty"`
 	ProviderConfigs         map[string]map[string]string   `json:"provider_configs,omitempty"`
 	Locals                  map[string]string              `json:"locals,omitempty"`
 	ParsedBodies            map[string]*hclsyntax.Body     `json:"-"`
@@ -420,3 +426,10 @@ type BackendConfig struct {
 }
 
 // ModuleInfo lifecycle/backend/provisioner fields are stored below via enrichment.
+
+// HazardLookup is an optional interface for schema-driven ForceNew attribute detection.
+// Implementations (e.g. recreation.DynamicHazardRegistry) report whether an attribute is
+// immutable (requires replacement) for a given resource attribute key.
+type HazardLookup interface {
+	LookupHazard(key string) (bool, string, string)
+}

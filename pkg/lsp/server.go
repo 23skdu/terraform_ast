@@ -247,7 +247,20 @@ func (s *Server) HandleRequest(req Request) (*Response, *Notification) {
 		}
 		return &Response{JSONRPC: "2.0", ID: req.ID, Result: caps}, nil
 
-	case "initialized", "$/setTrace", "$/cancelRequest", "textDocument/didClose":
+	case "initialized", "$/setTrace", "$/cancelRequest":
+		return nil, nil
+
+	case "textDocument/didClose":
+		var params struct {
+			TextDocument struct {
+				URI string `json:"uri"`
+			} `json:"textDocument"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err == nil && params.TextDocument.URI != "" {
+			path := strings.TrimPrefix(params.TextDocument.URI, "file://")
+			s.buffers.Delete(path)
+			s.cachedAST.Delete(path)
+		}
 		return nil, nil
 
 	case "exit":

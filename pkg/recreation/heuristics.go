@@ -353,11 +353,15 @@ func AnalyzeWrapperHazardsWithRegistry(res *wrapper.WrapperCompatibilityReport, 
 	var hazards []RecreationHazard
 	for _, item := range res.Issues {
 		if desc, ok := lookup(item.Target); ok {
+			sev := "WARNING_HAZARD"
+			if item.Severity == diff.SeverityBreaking {
+				sev = "CRITICAL_HAZARD"
+			}
 			hazards = append(hazards, RecreationHazard{
 				Variable:    item.Target,
 				Resource:    desc.Resource,
 				HazardType:  item.Category,
-				Severity:    "CRITICAL_HAZARD",
+				Severity:    sev,
 				Description: fmt.Sprintf("Wrapper issue on immutable variable '%s': %s (%s)", item.Target, item.Description, desc.Impact),
 				Impact:      desc.Impact,
 				Remediation: desc.Remediation,
@@ -384,7 +388,7 @@ func AnalyzeWrapperHazardsWithRegistry(res *wrapper.WrapperCompatibilityReport, 
 					Variable:    item.Name,
 					Resource:    desc.Resource,
 					HazardType:  item.Category,
-					Severity:    "CRITICAL_HAZARD",
+					Severity:    "WARNING_HAZARD",
 					Description: fmt.Sprintf("Upstream warning on immutable variable '%s': %s (%s)", item.Name, item.Description, desc.Impact),
 					Impact:      desc.Impact,
 					Remediation: desc.Remediation,

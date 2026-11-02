@@ -2,6 +2,8 @@ package policy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,7 +17,55 @@ import (
 	"github.com/open-policy-agent/opa/v1/rego"
 )
 
-var reportMapCache sync.Map
+var reportMapCache = newReportMapCache(64)
+
+type reportMapCacheEntry struct {
+	hash string
+	data map[string]any
+}
+
+type reportMapCacheLRU struct {
+	mu      sync.Mutex
+	cap     int
+	order   []uintptr
+	entries map[uintptr]reportMapCacheEntry
+}
+
+func newReportMapCache(cap int) *reportMapCacheLRU {
+	return &reportMapCacheLRU{cap: cap, entries: make(map[uintptr]reportMapCacheEntry)}
+}
+
+func (c *reportMapCacheLRU) get(key uintptr, hash string) (map[string]any, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok || entry.hash != hash {
+		return nil, false
+	}
+	// touch
+	for i, k := range c.order {
+		if k == key {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			c.order = append(c.order, key)
+			break
+		}
+	}
+	return entry.data, true
+}
+
+func (c *reportMapCacheLRU) put(key uintptr, hash string, data map[string]any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.entries[key]; !exists {
+		c.order = append(c.order, key)
+	}
+	c.entries[key] = reportMapCacheEntry{hash: hash, data: data}
+	if len(c.order) > c.cap {
+		oldest := c.order[0]
+		c.order = c.order[1:]
+		delete(c.entries, oldest)
+	}
+}
 
 func reportKey(v any) uintptr {
 	if v == nil {
@@ -216,16 +266,23 @@ func EvaluateRego(policy *RegoPolicy, input Input) []Violation {
 		inputMap["report"] = input.Report
 		var reportMap map[string]any
 		key := reportKey(input.Report)
+		var reportHash string
 		if key != 0 {
-			if cached, ok := reportMapCache.Load(key); ok {
-				reportMap = cached.(map[string]any)
+			if reportBytes, err := json.Marshal(input.Report); err == nil {
+				sum := sha256.Sum256(reportBytes)
+				reportHash = hex.EncodeToString(sum[:])
+			}
+		}
+		if key != 0 && reportHash != "" {
+			if cached, ok := reportMapCache.get(key, reportHash); ok {
+				reportMap = cached
 			}
 		}
 		if reportMap == nil {
 			if reportBytes, err := json.Marshal(input.Report); err == nil {
 				_ = json.Unmarshal(reportBytes, &reportMap)
-				if key != 0 {
-					reportMapCache.Store(key, reportMap)
+				if key != 0 && reportHash != "" {
+					reportMapCache.put(key, reportHash, reportMap)
 				}
 			}
 		}

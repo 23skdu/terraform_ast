@@ -462,7 +462,7 @@ func TestPass5_DestructiveToggles(t *testing.T) {
 
 func TestPass5_DestructiveTogglesNilAndBackendAttrs(t *testing.T) {
 	report := &DiffReport{}
-	compareDestructiveToggles(nil, nil, report)
+	compareDestructiveToggles(nil, nil, report, nil)
 	require.NotNil(t, report)
 
 	// backend attribute removed + added
