@@ -1,7 +1,0 @@
-# Development and verification requirements for terraform_ast Python oracle
-# The oracle scripts (scripts/oracle_verify.py) rely strictly on the Python 3
-# standard library to guarantee zero external runtime dependencies and deterministic execution.
-#
-# Optional tooling packages may be added here:
-# pytest>=8.0.0
-# flake8>=7.0.0
