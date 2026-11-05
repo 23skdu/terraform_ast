@@ -426,10 +426,13 @@ func parseTerragruntCallSite(src []byte, path, targetIdentifier string) (CallSit
 	// hclsyntax.ParseConfig always returns an *hclsyntax.Body for native syntax.
 	body := file.Body.(*hclsyntax.Body)
 
-	var source string
+	var source, blockLabel string
 	for _, block := range body.Blocks {
 		if block.Type != "terraform" {
 			continue
+		}
+		if len(block.Labels) > 0 && block.Labels[0] != "" {
+			blockLabel = block.Labels[0]
 		}
 		if sourceAttr, exists := block.Body.Attributes["source"]; exists {
 			source = extractSourceVal(src, sourceAttr.Expr)
@@ -472,13 +475,25 @@ func parseTerragruntCallSite(src []byte, path, targetIdentifier string) (CallSit
 		}
 	}
 
+	dirBase := filepath.Base(filepath.Dir(path))
+	modName := dirBase
+	if blockLabel != "" {
+		modName = blockLabel
+	}
+	allRefs := extractModuleReferencesFromBody(body)
+	var outputs []string
+	outputs = append(outputs, allRefs[modName]...)
+	outputs = append(outputs, allRefs[dirBase]...)
+	outputs = append(outputs, allRefs[filepath.Base(filepath.Clean(source))]...)
+	outputs = dedupeSorted(outputs)
+
 	return CallSite{
 		Dir:                     filepath.Dir(path),
 		File:                    path,
-		ModuleName:              filepath.Base(filepath.Dir(path)),
+		ModuleName:              modName,
 		Source:                  source,
 		PassedInputs:            passedInputs,
-		OutputsReferenced:       extractModuleReferencesFromBody(body)[filepath.Base(filepath.Dir(path))],
+		OutputsReferenced:       outputs,
 		InputAnalysisIncomplete: inputAnalysisIncomplete,
 	}, true
 }
@@ -560,14 +575,6 @@ func isMatchingSource(callerFilePath, sourceVal, targetIdentifier string) bool {
 func extractSourceVal(src []byte, expr hcl.Expression) string {
 	raw := string(src[expr.Range().Start.Byte:expr.Range().End.Byte])
 	return strings.Trim(strings.TrimSpace(raw), `"'`)
-}
-
-func extractModuleReferences(src []byte) map[string][]string {
-	file, diags := hclsyntax.ParseConfig(src, "references.tf", hcl.Pos{Line: 1, Column: 1})
-	if diags.HasErrors() || file == nil {
-		return make(map[string][]string)
-	}
-	return extractModuleReferencesFromBody(file.Body.(*hclsyntax.Body))
 }
 
 func extractModuleReferencesFromBody(body *hclsyntax.Body) map[string][]string {
@@ -672,15 +679,6 @@ func buildAuditIndex(audit *wrapper.WrapperCompatibilityReport) *auditIndex {
 		}
 	}
 	return idx
-}
-
-func evaluateCallSiteImpact(
-	cs CallSite,
-	wrapperMod *ast.ModuleInfo,
-	audit *wrapper.WrapperCompatibilityReport,
-	registry *recreation.DynamicHazardRegistry,
-) RootModuleImpact {
-	return evaluateCallSiteImpactIndexed(cs, wrapperMod, audit, registry, buildAuditIndex(audit))
 }
 
 func evaluateCallSiteImpactIndexed(
@@ -807,15 +805,6 @@ func evaluateCallSiteImpactIndexed(
 	}
 
 	return impact
-}
-
-func attributeChangedInAudit(audit *wrapper.WrapperCompatibilityReport, name string) bool {
-	idx := buildAuditIndex(audit)
-	if idx == nil {
-		return false
-	}
-	_, ok := idx.changedAttrs[name]
-	return ok
 }
 
 func dedupeSorted(s []string) []string {

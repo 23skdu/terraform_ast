@@ -379,5 +379,9 @@ func normalizeAddress(s string) string {
 	if len(s) >= 2 && ((s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'')) {
 		s = s[1 : len(s)-1]
 	}
-	return strings.TrimSpace(s)
+	s = strings.Join(strings.Fields(s), "")
+	if parsed := ParseResourceAddress(s); parsed.Type != "" {
+		return parsed.FullAddress()
+	}
+	return s
 }

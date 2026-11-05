@@ -375,13 +375,9 @@ func resolveLocalAttributes(body *hclsyntax.Body, inherited map[string]cty.Value
 		remaining := pending[:0:0]
 		for _, name := range pending {
 			attr := attrs[name]
-			ctx := &hcl.EvalContext{
-				Functions: functions,
-				Variables: map[string]cty.Value{
-					"local":      localsObject(resolved),
-					"dependency": terragruntDependencies(body),
-				},
-			}
+			ctx := BuildEvalContext(nil, resolved)
+			ctx.Functions = functions
+			ctx.Variables["dependency"] = terragruntDependencies(body)
 			value, diags := attr.Expr.Value(ctx)
 			if diags.HasErrors() || value.IsNull() || !value.IsKnown() {
 				remaining = append(remaining, name)
@@ -409,9 +405,7 @@ func terragruntDependencies(body *hclsyntax.Body) cty.Value {
 		}
 		depName := block.Labels[0]
 		if mockAttr, exists := block.Body.Attributes["mock_outputs"]; exists {
-			val, diags := mockAttr.Expr.Value(&hcl.EvalContext{
-				Functions: StandardFunctions(),
-			})
+			val, diags := mockAttr.Expr.Value(BuildEvalContext(nil, nil))
 			if !diags.HasErrors() && val.IsKnown() && !val.IsNull() && val.Type().IsObjectType() {
 				deps[depName] = cty.ObjectVal(map[string]cty.Value{
 					"outputs": val,
@@ -458,13 +452,9 @@ func ReadTerragruntInputsWithContext(body *hclsyntax.Body, src []byte, configPat
 		opts.RootDir = filepath.Dir(includePath)
 	}
 
-	ctx := &hcl.EvalContext{
-		Functions: mergeFunctions(StandardFunctions(), TerragruntFunctions(opts)),
-		Variables: map[string]cty.Value{
-			"local":      localsObject(TerragruntLocals(body, src, opts)),
-			"dependency": terragruntDependencies(body),
-		},
-	}
+	ctx := BuildEvalContext(nil, TerragruntLocals(body, src, opts))
+	ctx.Functions = mergeFunctions(ctx.Functions, TerragruntFunctions(opts))
+	ctx.Variables["dependency"] = terragruntDependencies(body)
 
 	attr, exists := body.Attributes["inputs"]
 	if !exists {
@@ -486,12 +476,4 @@ func mergeFunctions(base, extra map[string]function.Function) map[string]functio
 		merged[name] = fn
 	}
 	return merged
-}
-
-// localsObject wraps resolved locals as a cty object, or an empty object when there are none.
-func localsObject(locals map[string]cty.Value) cty.Value {
-	if len(locals) == 0 {
-		return cty.EmptyObjectVal
-	}
-	return cty.ObjectVal(locals)
 }

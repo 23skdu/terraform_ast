@@ -110,3 +110,26 @@ func FuzzSort(f *testing.F) {
 		}
 	})
 }
+
+// FuzzParseConstraintRange verifies that constraint range parsing never panics and preserves the raw input.
+func FuzzParseConstraintRange(f *testing.F) {
+	for _, seed := range []string{
+		">= 1.0.0, < 2.0.0",
+		"~> 4.0",
+		"~> 0.12.0, != 0.12.3",
+		"= 1.2.3",
+		"<= 5.0.0, > 3.0.0",
+		"1.0.0",
+		"",
+		" , , ",
+	} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, constraint string) {
+		cr := ParseConstraintRange(constraint)
+		if cr.Raw != strings.TrimSpace(constraint) {
+			t.Fatalf("ParseConstraintRange(%q).Raw = %q", constraint, cr.Raw)
+		}
+	})
+}

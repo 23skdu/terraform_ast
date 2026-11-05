@@ -129,13 +129,13 @@ flowchart TD
         SMOKE --> F_LSP["pkg/lsp (FuzzLSPServe)"]
         SMOKE --> F_BLAST["pkg/blastradius (FuzzDiscoverCallSites, FuzzTerragruntInputKey...)"]
         SMOKE --> F_CODE["pkg/codemod (FuzzFormatMovedBlocks, FuzzUnifiedReplacement...)"]
-        SMOKE --> F_SEM["pkg/semverutil (FuzzDetermineBumpType, FuzzSort, FuzzNormalize...)"]
+        SMOKE --> F_SEM["pkg/semverutil (FuzzDetermineBumpType, FuzzSort, FuzzNormalize, FuzzParseConstraintRange)"]
         SMOKE --> F_REC["pkg/recreation (FuzzParseProviderSchema, FuzzParseGoldenPlan)"]
         SMOKE --> F_EVAL["pkg/eval (FuzzEvaluateExpression)"]
     end
 
     subgraph MERGE["5. Gate Verdict & CI Release"]
-        F_CMD --> PASS_ALL["All 30 Fuzz Targets Clean"]
+        F_CMD --> PASS_ALL["All 31 Fuzz Targets Clean"]
         F_AST --> PASS_ALL
         F_DIFF --> PASS_ALL
         F_GITOPS --> PASS_ALL
@@ -168,7 +168,7 @@ flowchart TD
    - Evaluated atomically via `go test -covermode=atomic -coverprofile=... ./...`.
    - Rejects the build if a single statement across all packages remains uncovered.
 5. **Universal Fuzz Testing Across All Packages**:
-   - Executes fuzz testing across all 30 native Go fuzz targets spanning every package in the repository (`cmd/tfastdiff`, `pkg/ast`, `pkg/blastradius`, `pkg/codemod`, `pkg/diff`, `pkg/eval`, `pkg/gitops`, `pkg/lsp`, `pkg/planner`, `pkg/policy`, `pkg/recreation`, `pkg/registry`, `pkg/report`, `pkg/semverutil`, `pkg/wrapper`).
+   - Executes fuzz testing across all 31 native Go fuzz targets spanning every package in the repository (`cmd/tfastdiff`, `pkg/ast`, `pkg/blastradius`, `pkg/codemod`, `pkg/diff`, `pkg/eval`, `pkg/gitops`, `pkg/lsp`, `pkg/planner`, `pkg/policy`, `pkg/recreation`, `pkg/registry`, `pkg/report`, `pkg/semverutil`, `pkg/wrapper`).
 
 6. **Pre-Commit Hook (`.pre-commit-hooks.yaml`)**:
    - Executes `tfastdiff --wrapper . --exit-code` on wrapper directories to catch backward-incompatible changes before code is staged or pushed.

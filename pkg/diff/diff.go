@@ -11,6 +11,8 @@ import (
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/23skdu/terraform_ast/pkg/semverutil"
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 )
 
 // Compare analyzes the syntactic and semantic differences between oldMod and newMod.
@@ -1181,6 +1183,8 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 		{oldMod.ManagedResources, newMod.ManagedResources, false},
 		{oldMod.DataResources, newMod.DataResources, true},
 	}
+	hardcodedForceAttrs := map[string]bool{"cidr_block": true, "vpc_id": true, "availability_zone": true, "subnet_id": true, "ami": true, "engine": true, "location": true, "region": true, "project": true, "resource_group_name": true}
+	localForceRefs, dataForceRefs := buildForceNewReferenceSets(oldMod, hardcodedForceAttrs, hazardLookup)
 	for _, s := range sets {
 		for key, oldRes := range s.old {
 			newRes, ok := s.new[key]
@@ -1264,24 +1268,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 				}
 			}
 			if oldRes.ForEach != "" && newRes.ForEach != "" && oldRes.ForEach != newRes.ForEach {
-				oldKeys := extractQuotedKeys(oldRes.ForEach)
-				newKeys := extractQuotedKeys(newRes.ForEach)
-				shrink := false
-				if len(oldKeys) > 0 && len(newKeys) > 0 {
-					newSet := make(map[string]bool, len(newKeys))
-					for _, k := range newKeys {
-						newSet[k] = true
-					}
-					for _, k := range oldKeys {
-						if !newSet[k] {
-							shrink = true
-							break
-						}
-					}
-				} else {
-					shrink = true
-				}
-				if shrink {
+				if isForEachShrinkage(oldRes.ForEach, newRes.ForEach) {
 					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
 						Category:    "ResourceForEach",
 						Name:        key,
@@ -1420,22 +1407,14 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 				})
 			}
 			// precondition / postcondition changes (#140, #158)
-			hardcodedForceAttrs = map[string]bool{"cidr_block": true, "vpc_id": true, "availability_zone": true, "subnet_id": true, "ami": true, "engine": true, "location": true, "region": true, "project": true, "resource_group_name": true}
-			hasForceNew := false
+			hasForceNew := referencesForceAttr(oldRes.Preconditions, hardcodedForceAttrs) ||
+				referencesForceAttr(newRes.Preconditions, hardcodedForceAttrs) ||
+				referencesForceAttr(oldRes.Postconditions, hardcodedForceAttrs) ||
+				referencesForceAttr(newRes.Postconditions, hardcodedForceAttrs)
 			for attr := range oldRes.Attributes {
-				if hardcodedForceAttrs[attr] {
+				if isResourceAttrForceNew(key, attr, hardcodedForceAttrs, hazardLookup) {
 					hasForceNew = true
 					break
-				}
-				if hazardLookup != nil {
-					if isForce, _, _ := hazardLookup.LookupHazard(key + "." + attr); isForce {
-						hasForceNew = true
-						break
-					}
-					if isForce, _, _ := hazardLookup.LookupHazard(attr); isForce {
-						hasForceNew = true
-						break
-					}
 				}
 			}
 			if !sameStrings(oldRes.Preconditions, newRes.Preconditions) {
@@ -1478,24 +1457,15 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					report.Warnings = append(report.Warnings, item)
 				}
 			}
-			// data-source selector/filter drift (#138)
+			// data-source selector/filter drift (#138, #159, #167)
 			if s.isData {
-				forceAttrs := map[string]bool{"cidr_block": true, "vpc_id": true, "availability_zone": true, "subnet_id": true, "ami": true, "engine": true, "location": true, "region": true, "project": true, "resource_group_name": true}
 				for _, selAttr := range []string{"most_recent", "filter", "owners", "query", "sort"} {
 					oldV, okO := oldRes.Attributes[selAttr]
 					newV, okN := newRes.Attributes[selAttr]
 					if !(okO && ((okN && oldV != newV) || !okN)) {
 						continue
 					}
-					promote := false
-					for _, res := range oldMod.ManagedResources {
-						for attrName, attrVal := range res.Attributes {
-							dataRefRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(key) + `\b`)
-							if dataRefRe.MatchString(attrVal) && forceAttrs[attrName] {
-								promote = true
-							}
-						}
-					}
+					promote := dataForceRefs[key]
 					sev := SeverityWarning
 					if promote {
 						sev = SeverityBreaking
@@ -1590,20 +1560,10 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 		}
 	}
 
-	// Locals comparison (#119, #139)
-	forceAttrs := map[string]bool{"cidr_block": true, "vpc_id": true, "availability_zone": true, "subnet_id": true, "ami": true, "engine": true, "location": true, "region": true, "project": true, "resource_group_name": true}
+	// Locals comparison (#119, #139, #159, #167)
 	for lName, oldVal := range oldMod.Locals {
 		if newVal, exists := newMod.Locals[lName]; exists && normalizeCondition(oldVal) != normalizeCondition(newVal) {
-			promote := false
-			for _, res := range oldMod.ManagedResources {
-				for attrName, attrVal := range res.Attributes {
-					localRefRe := regexp.MustCompile(`\blocal\.` + regexp.QuoteMeta(lName) + `\b`)
-					if localRefRe.MatchString(attrVal) && forceAttrs[attrName] {
-						promote = true
-					}
-				}
-			}
-			if promote {
+			if localForceRefs[lName] {
 				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
 					Category:    "LocalValue",
 					Name:        "local." + lName,
@@ -1644,6 +1604,79 @@ func resourceFullAddress(mode string, res ast.ResourceDef) string {
 		return "data." + res.Type + "." + res.Name
 	}
 	return res.Type + "." + res.Name
+}
+
+func isForEachShrinkage(oldExpr, newExpr string) bool {
+	oldKeys := extractQuotedKeys(oldExpr)
+	newKeys := extractQuotedKeys(newExpr)
+	if len(oldKeys) == 0 || len(newKeys) == 0 {
+		return true
+	}
+	newSet := make(map[string]bool, len(newKeys))
+	for _, k := range newKeys {
+		newSet[k] = true
+	}
+	for _, k := range oldKeys {
+		if !newSet[k] {
+			return true
+		}
+	}
+	return false
+}
+
+func isResourceAttrForceNew(resKey, attr string, hardcoded map[string]bool, hazardLookup ast.HazardLookup) bool {
+	if hardcoded[attr] {
+		return true
+	}
+	if hazardLookup != nil {
+		if isForce, _, _ := hazardLookup.LookupHazard(resKey + "." + attr); isForce {
+			return true
+		}
+		if isForce, _, _ := hazardLookup.LookupHazard(attr); isForce {
+			return true
+		}
+	}
+	return false
+}
+
+func referencesForceAttr(conds []string, forceAttrs map[string]bool) bool {
+	for _, c := range conds {
+		for attr := range forceAttrs {
+			if strings.Contains(c, attr) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func buildForceNewReferenceSets(oldMod *ast.ModuleInfo, forceAttrs map[string]bool, hazardLookup ast.HazardLookup) (map[string]bool, map[string]bool) {
+	localRefs := make(map[string]bool)
+	dataRefs := make(map[string]bool)
+	for resKey, res := range oldMod.ManagedResources {
+		for attrName, attrVal := range res.Attributes {
+			if !isResourceAttrForceNew(resKey, attrName, forceAttrs, hazardLookup) {
+				continue
+			}
+			expr, _ := hclsyntax.ParseExpression([]byte(attrVal), "ref.tf", hcl.Pos{Line: 1, Column: 1})
+			for _, v := range expr.Variables() {
+				if len(v) < 2 {
+					continue
+				}
+				root, _ := v[0].(hcl.TraverseRoot)
+				attr1, _ := v[1].(hcl.TraverseAttr)
+				if root.Name == "local" {
+					localRefs[attr1.Name] = true
+				} else if root.Name == "data" && len(v) >= 3 {
+					if attr2, ok2 := v[2].(hcl.TraverseAttr); ok2 {
+						dataRefs[attr1.Name+"."+attr2.Name] = true
+						dataRefs["data."+attr1.Name+"."+attr2.Name] = true
+					}
+				}
+			}
+		}
+	}
+	return localRefs, dataRefs
 }
 
 func extractQuotedKeys(expr string) []string {
@@ -1939,16 +1972,28 @@ func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			}
 		}
 		if oldCall.ForEach != "" && newCall.ForEach != "" && oldCall.ForEach != newCall.ForEach {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
-				Category:    "ModuleCallForEach",
-				Name:        "module." + name,
-				Severity:    SeverityBreaking,
-				Description: fmt.Sprintf("Nested module call 'module.%s' for_each expression changed from '%s' to '%s'", name, oldCall.ForEach, newCall.ForEach),
-				OldValue:    oldCall.ForEach,
-				NewValue:    newCall.ForEach,
-				Remediation: fmt.Sprintf("Verify child module instance keys for 'module.%s'", name),
-				Evidence:    2,
-			})
+			if isForEachShrinkage(oldCall.ForEach, newCall.ForEach) {
+				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					Category:    "ModuleCallForEach",
+					Name:        "module." + name,
+					Severity:    SeverityBreaking,
+					Description: fmt.Sprintf("Nested module call 'module.%s' for_each expression changed from '%s' to '%s'", name, oldCall.ForEach, newCall.ForEach),
+					OldValue:    oldCall.ForEach,
+					NewValue:    newCall.ForEach,
+					Remediation: fmt.Sprintf("Verify child module instance keys for 'module.%s'", name),
+					Evidence:    2,
+				})
+			} else {
+				report.Warnings = append(report.Warnings, DifferenceItem{
+					Category:    "ModuleCallForEach",
+					Name:        "module." + name,
+					Severity:    SeverityWarning,
+					Description: fmt.Sprintf("Nested module call 'module.%s' for_each expression changed from '%s' to '%s'", name, oldCall.ForEach, newCall.ForEach),
+					OldValue:    oldCall.ForEach,
+					NewValue:    newCall.ForEach,
+					Remediation: fmt.Sprintf("Verify child module instance keys for 'module.%s'", name),
+				})
+			}
 		}
 	}
 	for name, newCall := range newMod.ModuleCalls {

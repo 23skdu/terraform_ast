@@ -1653,6 +1653,17 @@ func TestInspectModuleVersion(t *testing.T) {
 	assert.Contains(t, err.Error(), "non-versioned local directory")
 }
 
+func inspectModuleVersion(ctx context.Context, registryTimeout time.Duration, source, version string) (*ast.ModuleInfo, error) {
+	dir, isTemp, err := resolveModuleVersionDir(ctx, registryTimeout, source, version)
+	if err != nil {
+		return nil, err
+	}
+	if isTemp {
+		defer func() { _ = os.RemoveAll(dir) }()
+	}
+	return ast.Inspect(dir)
+}
+
 func TestComparisonSource(t *testing.T) {
 	assert.Equal(t, "registry/mod/aws", comparisonSource("registry/mod/aws", "old/mod/aws"))
 	assert.Equal(t, "old/mod/aws", comparisonSource("   ", "  old/mod/aws  "))

@@ -38,7 +38,7 @@ type UpgradePathReport struct {
 
 // AnalyzeUpgradePath compares each adjacent version and recommends the last
 // contiguous version reachable without a breaking transition.
-func AnalyzeUpgradePath(snapshots []VersionSnapshot) (*UpgradePathReport, error) {
+func AnalyzeUpgradePath(snapshots []VersionSnapshot, hazardLookups ...ast.HazardLookup) (*UpgradePathReport, error) {
 	if len(snapshots) < 2 {
 		return nil, fmt.Errorf("at least two version snapshots are required")
 	}
@@ -66,7 +66,7 @@ func AnalyzeUpgradePath(snapshots []VersionSnapshot) (*UpgradePathReport, error)
 	}
 	for i := 0; i < len(snapshots)-1; i++ {
 		from, to := snapshots[i], snapshots[i+1]
-		comparison := diff.Compare(from.Module, to.Module, from.Version, to.Version)
+		comparison := diff.Compare(from.Module, to.Module, from.Version, to.Version, hazardLookups...)
 		report.Steps = append(report.Steps, UpgradeStep{
 			FromVersion:     from.Version,
 			ToVersion:       to.Version,

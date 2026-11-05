@@ -288,12 +288,6 @@ type parsedHCLFile struct {
 	file     *hcl.File
 }
 
-// enrichFromHCLFiles scans top-level Terraform files for module inputs, nullable settings,
-// and output delegations that are not exposed by terraform-config-inspect.
-func enrichFromHCLFiles(dir string, info *ModuleInfo) {
-	_ = parseAndEnrichModule(dir, info, false)
-}
-
 func splitHCLListExpr(raw string) []string {
 	trimmed := strings.TrimSpace(raw)
 	trimmed = strings.TrimPrefix(trimmed, "[")

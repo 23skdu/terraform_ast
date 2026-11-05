@@ -719,8 +719,8 @@ func TestLSP_ContentLengthAtTheLimitIsAccepted(t *testing.T) {
 func TestLSPServer_ExtendedDiagnosticsAndCodeActions(t *testing.T) {
 	server := NewServer(&bytes.Buffer{})
 
-	// 1. Direct codeActions() call
-	ca := server.codeActions()
+	// 1. Direct codeActionsFor(empty) call
+	ca := server.codeActionsFor(CodeActionParams{})
 	require.Len(t, ca, 2)
 	assert.Equal(t, ".", ca[0].Command.Arguments[0].(ApplyMovedBlocksArgs).Dir)
 

@@ -192,4 +192,9 @@ func TestDynamicHazardRegistryAndAnalysis(t *testing.T) {
 	wrapHazards := AnalyzeWrapperHazardsWithRegistry(wrapRep, reg)
 	require.Len(t, wrapHazards, 1)
 	assert.Equal(t, "zone", wrapHazards[0].Variable)
+
+	// 3-part resource-instance lookup ("type.label.attr" -> "type.attr") (#153, #168)
+	rule, found := reg.Lookup("google_compute_instance.vm_1.zone")
+	assert.True(t, found)
+	assert.NotEmpty(t, rule.Impact)
 }

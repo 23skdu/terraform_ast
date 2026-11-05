@@ -10,6 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func enrichFromHCLFiles(dir string, info *ModuleInfo) {
+	_ = parseAndEnrichModule(dir, info, false)
+}
+
 func TestInspect_InvalidPaths(t *testing.T) {
 	_, err := Inspect("/non/existent/path/for/ast/test")
 	assert.Error(t, err)
@@ -918,4 +922,15 @@ data "aws_region" "current" {}
 	require.NotNil(t, overlayInfo)
 	assert.Equal(t, mainPath, overlayInfo.ManagedResources["aws_vpc.main"].Pos.Filename)
 	assert.Equal(t, mainPath, overlayInfo.DataResources["data.aws_ami.ubuntu"].Pos.Filename)
+
+	// Test DetectAddressShifts with whitespace-padded moved block addresses (#162, #170)
+	shifts := DetectAddressShifts(
+		&ModuleInfo{ManagedResources: map[string]ResourceDef{`aws_s3_bucket.b["old"]`: {Type: "aws_s3_bucket", Name: `b["old"]`}}},
+		&ModuleInfo{
+			ManagedResources: map[string]ResourceDef{`aws_s3_bucket.b["new"]`: {Type: "aws_s3_bucket", Name: `b["new"]`}},
+			MovedBlocks:      []MovedBlockDef{{From: `aws_s3_bucket.b[ "old" ]`, To: `aws_s3_bucket.b[ "new" ]`}},
+		},
+	)
+	require.Len(t, shifts, 1)
+	assert.Contains(t, shifts[0].Reason, "migrated via moved block")
 }

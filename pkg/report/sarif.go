@@ -180,10 +180,6 @@ func sarifLocationWithLine(artifact string, line int) []SARIFLocation {
 	}}
 }
 
-func sarifLocation(artifact string) []SARIFLocation {
-	return sarifLocationWithLine(artifact, 1)
-}
-
 func artifactOrDefault(artifact string) string {
 	if artifact == "" {
 		return "main.tf"

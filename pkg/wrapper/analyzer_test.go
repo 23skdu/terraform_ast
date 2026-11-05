@@ -556,4 +556,23 @@ func TestAnalyzeWrapper_RenamedInputExpressions(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "expected TypeMismatch on custom_region")
+
+	// Test broken output delegation through wrapper locals (#160)
+	wrapperWithLocalOut := &ast.ModuleInfo{
+		ModuleCalls: map[string]ast.ModuleCallDef{
+			"vpc": {Name: "vpc", Source: "./upstream"},
+		},
+		Locals: map[string]string{
+			"mid":   "module.vpc.removed_id",
+			"final": "local.mid",
+		},
+		Outputs: map[string]ast.OutputDef{
+			"vpc_id": {Name: "vpc_id", Value: "local.final"},
+			"empty":  {Name: "empty", Value: ""},
+		},
+	}
+	repOut := AnalyzeWrapper(wrapperWithLocalOut, targetUpstream, nil, "v2.0.0", "", nil)
+	require.Len(t, repOut.Issues, 1)
+	assert.Equal(t, "BrokenOutputDelegation", repOut.Issues[0].Category)
+	assert.Equal(t, "vpc_id", repOut.Issues[0].Target)
 }

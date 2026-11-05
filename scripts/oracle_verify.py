@@ -21,6 +21,7 @@ import random
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -580,6 +581,98 @@ class VerificationOracle:
             print(f"PASSED (Safety: {safety:.1f}%)")
         else:
             print("FAILED")
+
+        # Case 6: Extended Compatibility Rules Oracle (#172)
+        print("  Evaluating Extended Rules (ModuleCall, ProviderConfig, Cloud Backend) ... ", end="", flush=True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_dir = Path(tmpdir) / "v1"
+            new_dir = Path(tmpdir) / "v2"
+            old_dir.mkdir()
+            new_dir.mkdir()
+            (old_dir / "main.tf").write_text(
+                'terraform {\n'
+                '  cloud {\n'
+                '    organization = "org-a"\n'
+                '  }\n'
+                '}\n'
+                'provider "aws" {\n'
+                '  region = "us-east-1"\n'
+                '}\n'
+                'module "net" {\n'
+                '  source  = "terraform-aws-modules/vpc/aws"\n'
+                '  version = "~> 3.0"\n'
+                '  count   = 3\n'
+                '}\n'
+                'module "shrunk" {\n'
+                '  source   = "./sub"\n'
+                '  for_each = toset(["a", "b"])\n'
+                '}\n'
+                'module "reformatted" {\n'
+                '  source   = "./sub"\n'
+                '  for_each = toset(["a", "b"])\n'
+                '}\n'
+            )
+            (new_dir / "main.tf").write_text(
+                'terraform {\n'
+                '  cloud {\n'
+                '    organization = "org-b"\n'
+                '  }\n'
+                '}\n'
+                'provider "google" {\n'
+                '  region = "us-central1"\n'
+                '}\n'
+                'module "net" {\n'
+                '  source  = "terraform-aws-modules/vpc/aws"\n'
+                '  version = "~> 5.0"\n'
+                '  count   = 1\n'
+                '}\n'
+                'module "shrunk" {\n'
+                '  source   = "./sub"\n'
+                '  for_each = toset(["a"])\n'
+                '}\n'
+                'module "reformatted" {\n'
+                '  source   = "./sub"\n'
+                '  for_each = toset(["b", "a", "c"])\n'
+                '}\n'
+            )
+            code, stdout, stderr = self.run_command(
+                ["--old", str(old_dir), "--new", str(new_dir), "--format", "json"]
+            )
+            self.record_assertion(suite, "extended_rules:exit_zero", code == 0, stderr)
+            try:
+                ext_data = json.loads(stdout)
+                ext_ok = True
+            except Exception:
+                ext_ok = False
+                ext_data = {}
+            self.record_assertion(suite, "extended_rules:json_valid", ext_ok, stdout[:100])
+            if ext_ok:
+                b_cats = {i.get("category") for i in ext_data.get("breaking_changes", [])}
+                w_cats = {i.get("category") for i in ext_data.get("warnings", [])}
+                for req_b in (
+                    "StateBackendChange",
+                    "ProviderConfigAdded",
+                    "ModuleCallVersion",
+                    "ModuleCallCount",
+                    "ModuleCallForEach",
+                ):
+                    self.record_assertion(
+                        suite,
+                        f"extended_rules:breaking_{req_b}",
+                        req_b in b_cats,
+                        f"Missing {req_b} in breaking_changes: {b_cats}",
+                    )
+                for req_w in ("ProviderConfigRemoved", "ModuleCallForEach"):
+                    self.record_assertion(
+                        suite,
+                        f"extended_rules:warning_{req_w}",
+                        req_w in w_cats,
+                        f"Missing {req_w} in warnings: {w_cats}",
+                    )
+                safety = self.audit_confidence_and_safety(suite, "extended_rules", ext_data)
+                print(f"PASSED (Safety: {safety:.1f}%)")
+            else:
+                print("FAILED")
 
     # --------------------------------------------------------------------------
     # Oracle Suite 2: Upstream Git Module Upgrade Paths

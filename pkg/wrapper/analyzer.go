@@ -218,21 +218,23 @@ func AnalyzeWrapper(
 	// e.g. region = var.custom_region, region = coalesce(var.custom_region, "us-east-1"),
 	// or region = local.custom_region (resolved through local definitions).
 	localVars := make(map[string][]string)
-	var resolveLocal func(name string, seen map[string]bool) []string
-	resolveLocal = func(name string, seen map[string]bool) []string {
+	localModRefs := make(map[string][]ast.OutputReference)
+	var resolveLocal func(name string, seen map[string]bool) ([]string, []ast.OutputReference)
+	resolveLocal = func(name string, seen map[string]bool) ([]string, []ast.OutputReference) {
 		if seen[name] {
-			return nil
+			return nil, nil
 		}
 		seen[name] = true
 		lVal, ok := wrapperMod.Locals[name]
 		if !ok {
-			return nil
+			return nil, nil
 		}
 		parsed, diags := hclsyntax.ParseExpression([]byte(lVal), "wrapper", hcl.Pos{Line: 1, Column: 1})
 		if diags.HasErrors() || parsed == nil {
-			return nil
+			return nil, nil
 		}
 		var res []string
+		var modRefs []ast.OutputReference
 		seenVar := make(map[string]bool)
 		for _, v := range parsed.Variables() {
 			if len(v) < 2 {
@@ -247,22 +249,35 @@ func AnalyzeWrapper(
 				}
 			case "local":
 				if attr, ok := v[1].(hcl.TraverseAttr); ok {
-					for _, vn := range resolveLocal(attr.Name, seen) {
+					subVars, subMods := resolveLocal(attr.Name, seen)
+					for _, vn := range subVars {
 						if !seenVar[vn] {
 							seenVar[vn] = true
 							res = append(res, vn)
 						}
 					}
+					modRefs = append(modRefs, subMods...)
+				}
+			case "module":
+				if len(v) >= 3 {
+					modAttr, okM := v[1].(hcl.TraverseAttr)
+					outAttr, okO := v[2].(hcl.TraverseAttr)
+					if okM && okO {
+						modRefs = append(modRefs, ast.OutputReference{TargetModule: modAttr.Name, TargetOutput: outAttr.Name})
+					}
 				}
 			}
 		}
-		return res
+		return res, modRefs
 	}
 	for lName := range wrapperMod.Locals {
 		seen := make(map[string]bool)
-		vars := resolveLocal(lName, seen)
+		vars, modRefs := resolveLocal(lName, seen)
 		if len(vars) > 0 {
 			localVars[lName] = vars
+		}
+		if len(modRefs) > 0 {
+			localModRefs[lName] = modRefs
 		}
 	}
 
@@ -358,12 +373,34 @@ func AnalyzeWrapper(
 	// 5. Check broken wrapper output delegations, in name order for a stable report.
 	// Only delegations aimed at a selected call are checked: an output reading from a module the
 	// audit did not target cannot be judged against this upstream.
-	for _, outName := range sortedKeys(wrapperMod.WrapperOutputReferences) {
-		refs := wrapperMod.WrapperOutputReferences[outName]
+	outputRefs := make(map[string][]ast.OutputReference, len(wrapperMod.WrapperOutputReferences))
+	for outName, refs := range wrapperMod.WrapperOutputReferences {
+		outputRefs[outName] = append(outputRefs[outName], refs...)
+	}
+	for outName, outDef := range wrapperMod.Outputs {
+		if outDef.Value == "" || len(localModRefs) == 0 {
+			continue
+		}
+		parsed, _ := hclsyntax.ParseExpression([]byte(outDef.Value), "wrapper", hcl.Pos{Line: 1, Column: 1})
+		for _, v := range parsed.Variables() {
+			if len(v) >= 2 {
+				root, _ := v[0].(hcl.TraverseRoot)
+				attr, ok := v[1].(hcl.TraverseAttr)
+				if root.Name == "local" && ok {
+					outputRefs[outName] = append(outputRefs[outName], localModRefs[attr.Name]...)
+				}
+			}
+		}
+	}
+	for _, outName := range sortedKeys(outputRefs) {
+		refs := outputRefs[outName]
+		seenRef := make(map[string]bool)
 		for _, ref := range refs {
-			if !targetsAnyCall(ref.TargetModule, calls) {
+			refKey := ref.TargetModule + "." + ref.TargetOutput
+			if seenRef[refKey] || !targetsAnyCall(ref.TargetModule, calls) {
 				continue
 			}
+			seenRef[refKey] = true
 			if _, exists := targetUpstream.Outputs[ref.TargetOutput]; !exists {
 				report.Issues = append(report.Issues, WrapperIssue{
 					Severity:    diff.SeverityBreaking,

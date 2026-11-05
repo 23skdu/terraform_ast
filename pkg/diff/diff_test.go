@@ -602,3 +602,67 @@ func TestCompare_NewlyAddedRequiredProvider(t *testing.T) {
 	assert.Equal(t, "ProviderConfigurationAlias", report.BreakingChanges[0].Category)
 	assert.Equal(t, "aws.west", report.BreakingChanges[0].Name)
 }
+
+func TestPass9_ModuleCallForEachAndPreconditionForceNew(t *testing.T) {
+	oldMod := &ast.ModuleInfo{
+		ModuleCalls: map[string]ast.ModuleCallDef{
+			"reformatted": {Name: "reformatted", Source: "./sub", ForEach: `toset(["a", "b"])`},
+			"shrunk":      {Name: "shrunk", Source: "./sub", ForEach: `toset(["a", "b"])`},
+		},
+		ManagedResources: map[string]ast.ResourceDef{
+			"aws_subnet.main": {
+				Type:          "aws_subnet",
+				Name:          "main",
+				Attributes:    map[string]string{"tags": `{}`},
+				Preconditions: []string{`self.cidr_block != ""`},
+			},
+		},
+	}
+	newMod := &ast.ModuleInfo{
+		ModuleCalls: map[string]ast.ModuleCallDef{
+			"reformatted": {Name: "reformatted", Source: "./sub", ForEach: `toset(["b", "a", "c"])`},
+			"shrunk":      {Name: "shrunk", Source: "./sub", ForEach: `toset(["a"])`},
+		},
+		ManagedResources: map[string]ast.ResourceDef{
+			"aws_subnet.main": {
+				Type:          "aws_subnet",
+				Name:          "main",
+				Attributes:    map[string]string{"tags": `{}`},
+				Preconditions: []string{`self.cidr_block != "0.0.0.0/0"`},
+			},
+		},
+	}
+	report := Compare(oldMod, newMod, "1.0.0", "2.0.0")
+	var foundWarnForEach, foundBreakForEach, foundBreakPrecond bool
+	for _, w := range report.Warnings {
+		if w.Category == "ModuleCallForEach" && w.Name == "module.reformatted" {
+			foundWarnForEach = true
+		}
+	}
+	for _, b := range report.BreakingChanges {
+		if b.Category == "ModuleCallForEach" && b.Name == "module.shrunk" {
+			foundBreakForEach = true
+		}
+		if b.Category == "PreconditionModified" && b.Name == "aws_subnet.main" {
+			foundBreakPrecond = true
+		}
+	}
+	assert.True(t, foundWarnForEach, "expected ModuleCallForEach warning for widened/reformatted static keys")
+	assert.True(t, foundBreakForEach, "expected ModuleCallForEach breaking for shrunk static keys")
+	assert.True(t, foundBreakPrecond, "expected PreconditionModified breaking when condition references cidr_block")
+}
+
+func TestPass9_CloudConfigIndependentOfBackend(t *testing.T) {
+	oldMod := &ast.ModuleInfo{
+		Backend: &ast.BackendConfig{Type: "s3"},
+		Cloud:   &ast.BackendConfig{Type: "cloud:org-a:ws-1"},
+	}
+	newMod := &ast.ModuleInfo{
+		Backend: &ast.BackendConfig{Type: "s3"},
+		Cloud:   &ast.BackendConfig{Type: "cloud:org-b:ws-1"},
+	}
+	report := Compare(oldMod, newMod, "1.0.0", "2.0.0")
+	require.Len(t, report.BreakingChanges, 1)
+	assert.Equal(t, "StateBackendChange", report.BreakingChanges[0].Category)
+	assert.Equal(t, "backend", report.BreakingChanges[0].Name)
+}

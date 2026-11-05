@@ -213,8 +213,15 @@ func (r *DynamicHazardRegistry) Lookup(name string) (HazardDescriptor, bool) {
 	if r == nil || len(r.hazards) == 0 {
 		return HazardDescriptor{}, false
 	}
-	desc, ok := r.hazards[name]
-	return desc, ok
+	if desc, ok := r.hazards[name]; ok {
+		return desc, true
+	}
+	if parts := strings.SplitN(name, ".", 3); len(parts) == 3 {
+		if desc, ok := r.hazards[parts[0]+"."+parts[2]]; ok {
+			return desc, true
+		}
+	}
+	return HazardDescriptor{}, false
 }
 
 // LookupHazard implements ast.HazardLookup for schema-driven ForceNew detection.

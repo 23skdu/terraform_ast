@@ -18,6 +18,32 @@ import (
 	"github.com/zclconf/go-cty/cty"
 )
 
+func extractModuleReferences(src []byte) map[string][]string {
+	file, diags := hclsyntax.ParseConfig(src, "references.tf", hcl.Pos{Line: 1, Column: 1})
+	if diags.HasErrors() || file == nil {
+		return make(map[string][]string)
+	}
+	return extractModuleReferencesFromBody(file.Body.(*hclsyntax.Body))
+}
+
+func evaluateCallSiteImpact(
+	cs CallSite,
+	wrapperMod *ast.ModuleInfo,
+	audit *wrapper.WrapperCompatibilityReport,
+	registry *recreation.DynamicHazardRegistry,
+) RootModuleImpact {
+	return evaluateCallSiteImpactIndexed(cs, wrapperMod, audit, registry, buildAuditIndex(audit))
+}
+
+func attributeChangedInAudit(audit *wrapper.WrapperCompatibilityReport, name string) bool {
+	idx := buildAuditIndex(audit)
+	if idx == nil {
+		return false
+	}
+	_, ok := idx.changedAttrs[name]
+	return ok
+}
+
 func TestScanDirectory_ErrorsAndEmpty(t *testing.T) {
 	// 1. Non-existent path
 	_, err := ScanDirectory("/non/existent/dir", "my-wrapper", nil, nil)
@@ -571,6 +597,20 @@ inputs = merge({ region = "us-west1" }, { cluster_name = "prod-eks" })
 	assert.False(t, site.InputAnalysisIncomplete)
 	assert.Equal(t, `"us-west1"`, site.PassedInputs["region"])
 	assert.Equal(t, `"prod-eks"`, site.PassedInputs["cluster_name"])
+
+	labeledSrc := `
+terraform "labeled_call" {
+  source = "../wrapper"
+}
+inputs = {
+  a = module.wrapper.out1
+  b = module.labeled_call.out2
+}
+`
+	labeledSite, ok := parseTerragruntCallSite([]byte(labeledSrc), "envs/dev/terragrunt.hcl", "wrapper")
+	require.True(t, ok)
+	assert.Equal(t, "labeled_call", labeledSite.ModuleName)
+	assert.Equal(t, []string{"out1", "out2"}, labeledSite.OutputsReferenced)
 }
 
 func TestTerragruntInputKey(t *testing.T) {

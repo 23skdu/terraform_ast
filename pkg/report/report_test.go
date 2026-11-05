@@ -366,7 +366,7 @@ func TestTaintRendering(t *testing.T) {
 }
 
 func TestSARIF_EdgeCases(t *testing.T) {
-	loc1 := sarifLocation("custom.tf")
+	loc1 := sarifLocationWithLine("custom.tf", 1)
 	assert.Equal(t, 1, loc1[0].PhysicalLocation.Region.StartLine)
 	assert.Equal(t, "custom.tf", loc1[0].PhysicalLocation.ArtifactLocation.URI)
 

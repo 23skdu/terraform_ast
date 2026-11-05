@@ -9,34 +9,28 @@
 
 ## Key Features
 
-- **AST Inspection & Parsing**: Uses [`github.com/hashicorp/terraform-config-inspect`](https://github.com/hashicorp/terraform-config-inspect) and HCL parsing to extract variables, outputs, module calls, provider requirements and aliases, validation rules, and type constraints from both `.tf` and `.tf.json` files. Module meta-arguments are excluded from forwarded input analysis, and statically declared variable nullability is tracked.
-- **Terraform Registry Protocol**: Directly downloads and inspects modules from the Terraform Registry (e.g. `terraform-google-modules/kubernetes-engine/google`, `terraform-aws-modules/eks/aws`).
-- **Deep Structural Object Schema Diffing**: Analyzes nested `object({ ... })` type constraints attribute-by-attribute (attribute additions, removals, optional-to-required transitions, and type shifts).
-- **Blast-Radius & Consumer Analysis**: Recursively scans Terraform root modules and Terragrunt `terragrunt.hcl` configurations to evaluate consumer-level impact (`--blast-radius ./environments`). Findings are embedded in the same document for every output format, so JSON and SARIF stay machine-parseable.
-- **Confidence-Scored Findings & Incremental Inspection**: Adds per-finding confidence scores to reports and reuses module inspections while source files remain unchanged; edits invalidate cached results.
-- **State Destruction & Recreation Heuristics**: Flags `ForceNew` destruction hazards on critical immutable cloud resources (GKE cluster name, project ID, location, secondary subnet CIDRs, EKS cluster name, VPC ID). `--check-recreation` applies to every output format, including `TF-RECREATION-HAZARD` SARIF rules for GitHub Code Scanning.
-- **OASIS SARIF v2.1.0 Export**: Generates industry-standard SARIF reports (`--format sarif`) for direct integration with GitHub Code Scanning.
-- **Git Optimization & In-Memory Caching**: Implements shallow cloning (`--depth 1`) and a thread-safe repository cache that clones each repository once per run and reuses the local copy for every tag evaluation, so `--upgrade-path` across a major version no longer re-downloads the repository for each intermediate release.
-- **Semantic Versioning & Pinning**: Uses [`golang.org/x/mod/semver`](https://pkg.go.dev/golang.org/x/mod/semver) to detect major breaking bumps, minor additions, patch updates, and downgrade hazards.
-- **Breaking Change Detection**:
-  - **Removed inputs**: Arguments passed to upstream that are no longer supported.
-  - **Newly required inputs without defaults**: Variables introduced upstream that require values.
-  - **Type constraint shifts**: Incompatible type changes (e.g., `string` $\rightarrow$ `number` or `list(string)`).
-  - **Removed outputs**: Outputs that downstream root modules or the wrapper rely on.
-- **Wrapper Compatibility Audit**:
-  - Validates passed arguments in child `module` blocks.
-  - Verifies wrapper variable types match upstream types.
-  - Detects broken output delegations (`module.<name>.<output>`).
-  - Generates recommended pinning constraints (e.g. `version = "30.0.0"`).
-  - Outlines exact remediation steps for engineers.
-- **State Graph & Intermediate Representation (IR)**: Tracks canonical hierarchical Terraform resource instance addresses (`module.vpc.aws_subnet.this["a"]`) and detects state destruction hazards when topology or naming shifts between module versions.
-- **Automated `moved {}` Block Synthesis**: Translates detected resource address shifts directly into Terraform 1.1+ `moved {}` blocks (`moved { from = ... to = ... }`), eliminating manual remediation.
-- **Dynamic Provider Schema Auto-Discovery**: Automatically inspects `required_providers`, discovers local schemas or queries built-in ForceNew attribute tables for standard cloud providers (AWS, GCP, AzureRM, Kubernetes, Cloudflare), and caches them in the persistent L2 disk cache.
-- **Multi-Format Output**: Terminal text with visual indicators, GitHub-flavored Markdown for PR comments, machine-readable JSON for CI/CD gates, and SARIF for code scanning.
-- **Enterprise Policy Governance (OPA Rego v1)**: Enforce JSON or official OPA SDK-powered Rego policies (`--policy`, `--rego-policy`) evaluating arbitrary findings; trace input variable taint dependency graphs across module boundaries (`--taint`); preview unified patches for removed wrapper arguments.
-- **Upgrade-Path Analysis**: Compare adjacent semantic-version Git tags or Registry releases across a major-version jump, identify the last continuously safe version, and emit text, Markdown, or JSON reports.
-- **Language Server Protocol (LSP)**: Built-in JSON-RPC 2.0 language server (`tfastdiff daemon` / `--lsp`) with buffer-aware diagnostics and automated quick fixes.
-- **Enterprise Test Coverage**: **100% statement coverage** across every package, enforced in CI. Validated via [Terratest](test/terratest/) on realistic GKE/EKS fixtures, [Golden Image / Golden File](test/golden/) regression testing, and 30 native Go fuzz targets over every parser.
+- **Single-Pass AST Inspection & Multi-Tier Caching (`pkg/ast`)**: Uses [`github.com/hashicorp/terraform-config-inspect`](https://github.com/hashicorp/terraform-config-inspect) and HCL/JSON parsing (`parseAndEnrichModule`) to extract variables, outputs, module calls, resources, data sources, provider requirements/aliases/configs, `lifecycle` preconditions/postconditions, independent `backend {}` and `cloud {}` configurations, and modern Terraform 1.7+ / OpenTofu blocks (`moved`, `removed`, `check`, `import`, `function`, `encryption`) from `.tf` and `.tf.json` files in a single pass. Includes in-memory overlay inspection (`InspectSource`) and L1 in-memory / L2 persistent disk caching (`--cache-dir`).
+- **Terraform Registry Protocol (`pkg/registry`)**: Directly downloads and inspects modules from the Terraform Registry (e.g. `terraform-google-modules/kubernetes-engine/google`, `terraform-aws-modules/eks/aws`) with SSRF protection and path-traversal guards.
+- **Deep Structural Object Schema Diffing**: Analyzes nested `object({ ... })` type constraints attribute-by-attribute (attribute additions, removals, `optional()` default transitions, and type shifts).
+- **Parallel Blast-Radius & Terragrunt Consumer Analysis (`pkg/blastradius`)**: Uses a bounded worker pool to scan Terraform root modules (`.tf`, `.tf.json`) and Terragrunt `terragrunt.hcl` configurations (`--blast-radius ./environments`), evaluating `merge(...)`, `find_in_parent_folders()`, and `read_terragrunt_config()` chains with evidence-gated risk attribution (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`).
+- **Evidence-Calibrated Confidence & Safety Scoring**: Assigns evidence-backed confidence scores (`[1, 10]`) to every finding, computes safety verdicts (`SAFE`, `WARNINGS_ONLY`, `BREAKING_CHANGES`, `DOWNGRADE`), and recommends the highest contiguous safe-harbor version (`SafePinVersion`).
+- **ForceNew Destruction Heuristics & Golden Plan Verification (`pkg/recreation`)**: Flags `ForceNew` (`requires_replace`) hazards using built-in cloud catalogs (AWS, GCP, AzureRM, Kubernetes, Cloudflare), auto-discovered `terraform providers schema -json` dumps (`DynamicHazardRegistry`), and Terraform execution plan JSON (`--golden-plan` or automatic `tfplan.json`/`golden-plan.json` discovery).
+- **OASIS SARIF v2.1.0 Export (`pkg/report`)**: Generates line-exact SARIF v2.1.0 reports (`--format sarif`), including `TF-RECREATION-HAZARD` and `TF-POLICY-VIOLATION` rules for GitHub Code Scanning.
+- **Git Optimization & Shared Repository Cache (`pkg/gitops`)**: Implements shallow cloning (`--depth 1`), Terraform VCS source normalization (`git::`, `github.com/`, `//subdir?ref=`), and a thread-safe `RepositoryCache` that clones each repository once per run.
+- **Semantic Versioning & Constraint Range Analysis (`pkg/semverutil`)**: Uses [`golang.org/x/mod/semver`](https://pkg.go.dev/golang.org/x/mod/semver) and interval constraint parsing (`ParseConstraintRange`) to detect major breaking bumps, `0.x` minor breaking bumps, upper-bound major narrowings, and downgrade hazards.
+- **Comprehensive Breaking Change Detection (`pkg/diff`)**:
+  - **Interface & Type Contracts**: Removed inputs/outputs, newly required inputs without defaults, changed defaults, disallowed `null`, incompatible type shifts, and output expression changes paired with type/sensitivity shifts.
+  - **Resource & Module Cardinality**: Unmigrated resource/module removals or address shifts, `count` reductions, static `for_each` key-set shrinkage (while key-set preservation/widening emits `WARNING`), and indexing mode transitions.
+  - **Infrastructure & Lifecycle Hazards**: Resource-body `ForceNew` attribute changes (`ResourceForceNew`), `triggers`/`keepers` drift, disabled `deletion_protection` or enabled `force_destroy`, `local.*` and `data.*` selector drift feeding `ForceNew` attributes, `precondition`/`postcondition` modifications on `ForceNew` resources, `provider {}` block additions/modifications (`ProviderConfigRemoved` emitted as `WARNING`), and `backend {}` / `cloud {}` state migrations (`StateBackendChange`).
+- **Wrapper Compatibility Audit (`pkg/wrapper`)**:
+  - Validates passed arguments and required inputs across every child `module` call in the wrapper.
+  - Traces renamed variables and transitive `local.*` expressions across input forwarding and output delegations (`module.<name>.<output>`).
+  - Generates recommended pinning constraints, safe-harbor fallback pins, and actionable remediation steps.
+- **State Graph, Dependency Visualization & Automated `moved {}` Synthesis (`pkg/ast`, `pkg/visualize`, `pkg/codemod`)**: Tracks canonical Terraform resource instance addresses, exports DOT/Mermaid dependency graphs (`--graph-format dot|mermaid`), generates unified diffs removing dead wrapper inputs (`--fix-preview`), and synthesizes Terraform 1.1+ `moved {}` blocks (`--generate-moved`).
+- **Enterprise Policy Governance & Variable Taint Analysis (`pkg/policy`, `pkg/eval`)**: Enforces JSON or official OPA SDK Rego v1 policies (`--policy`, `--rego-policy`) and traces input variable taint paths across `.tf` and `.tf.json` `locals`, resources, data sources, modules, and outputs (`--taint`).
+- **Multi-Step Upgrade-Path Planner (`pkg/planner`)**: Evaluates adjacent Git tags or Registry releases across a major-version jump (`--upgrade-path`) with schema-aware `ForceNew` detection to identify the furthest contiguous safe version.
+- **Language Server Protocol (`pkg/lsp`)**: Built-in JSON-RPC 2.0 language server (`tfastdiff daemon` / `--lsp`) with in-memory buffer overlay diagnostics, hover inspection, and code-action quick fixes.
+- **Enterprise Verification & Test Coverage**: **100.0% statement coverage** across every package, enforced in CI, backed by [Terratest](test/terratest/), [Golden File](test/golden/) regression suites, **31 native Go fuzz targets**, and an [Independent Python Verification Oracle](scripts/oracle_verify.py).
 
 ---
 
@@ -177,11 +171,12 @@ repos:
 Full architectural and technical specifications are available under [`docs/`](docs/):
 
 - [Architecture & Design](docs/architecture.md): Component breakdown, pipelines, and class diagrams.
+- [Features & Capabilities](docs/features.md): Detailed breakdown of core capabilities, enterprise extensions, and outputs.
 - [CLI Reference & CI/CD Guide](docs/cli_usage.md): Complete flag reference, exit codes, and GitHub Actions integration.
-- [Compatibility Rules](docs/compatibility_rules.md): Detailed classification taxonomy for breaking changes, downgrades, and new features.
-- [Testing Methodology](docs/testing_methodology.md): Unit, fuzz and Terratest validation, golden file verification, and the 100% coverage gate.
-- [Quality & Accuracy Gates](docs/gates.md): Upgrade path accuracy validation, invariant assertions, and the pre-commit quality gate.
-- [Strategic Roadmap](docs/roadmap.md): Evolution plan covering pre-commit hooks, codemods, and multi-version planning.
+- [Compatibility Rules](docs/compatibility_rules.md): Detailed classification taxonomy for breaking changes, warnings, downgrades, and new features.
+- [Testing Methodology](docs/testing_methodology.md): Unit, fuzz, and Terratest validation, golden file verification, and the 100% coverage gate.
+- [Quality & Accuracy Gates](docs/gates.md): Upgrade path accuracy validation, invariant assertions, independent oracle verification, and the pre-commit quality gate.
+- [Strategic Roadmap](docs/roadmap.md): Completed engineering milestones across Passes 1–9.
 
 ---
 
@@ -214,31 +209,56 @@ Native Go fuzz targets cover every untrusted-input parser. Each one is seeded, r
 
 | Target | Package | Invariant |
 | :--- | :--- | :--- |
+| `FuzzCLI` | `cmd/tfastdiff` | CLI entry point handles arbitrary argument sets safely without unhandled panic |
 | `FuzzInspect` | `pkg/ast` | Inspect never panics and re-inspection is stable |
 | `FuzzCheckTypeCompatibility` | `pkg/ast` | Compatible is never breaking; `any` widening/narrowing rules hold |
 | `FuzzParseObjectSchema` | `pkg/ast` | Parsed attribute keys always match their recorded names |
-| `FuzzParseModernHCLBlocks` | `pkg/ast` | Modern HCL blocks parse stably or fail gracefully |
+| `FuzzParseModernHCLBlocks` | `pkg/ast` | Modern HCL/OpenTofu blocks parse stably or fail gracefully |
 | `FuzzParseMovedLifecycleBackend` | `pkg/ast` | `moved`, `lifecycle`, `backend`, and `count`/`for_each` enrich cleanly |
-| `FuzzDifferentialValidation` | `pkg/ast` | AST parser matches compiler validation invariants |
+| `FuzzDifferentialValidation` | `pkg/ast` | In-memory overlay inspection produces identical ASTs to disk inspection |
 | `FuzzDiscoverCallSites` | `pkg/blastradius` | Consumer scanning never panics and always yields a complete call site |
 | `FuzzDiscoverJSONCallSites` | `pkg/blastradius` | Terraform JSON scanning never panics |
 | `FuzzTerragruntInputKey` | `pkg/blastradius` | Terragrunt keys resolve to a name or cleanly fail |
 | `FuzzPreviewRemovedInputs` | `pkg/codemod` | Patch generation never modifies the wrapper it inspects |
 | `FuzzUnifiedReplacement` | `pkg/codemod` | Generated patches always carry a valid unified diff header |
 | `FuzzFormatMovedBlocks` | `pkg/codemod` | Generated `moved {}` blocks are syntactically valid |
+| `FuzzCompare` | `pkg/diff` | AST module comparison preserves verdict soundness and confidence bounds |
 | `FuzzEvaluateExpression` | `pkg/eval` | HCL expression evaluation never panics |
+| `FuzzParseGitSource` | `pkg/gitops` | Git module source normalizer never panics on malformed URLs or refs |
+| `FuzzResolveSubDir` | `pkg/gitops` | Subdirectory resolution never escapes repository boundaries |
 | `FuzzLSPServe` | `pkg/lsp` | LSP JSON-RPC framing handles arbitrary payloads safely |
+| `FuzzAnalyzeUpgradePath` | `pkg/planner` | Upgrade path planning preserves contiguous safe-harbor version bounds |
+| `FuzzPolicyDecode` | `pkg/policy` | JSON policy unmarshaling never crashes on malformed policy schemas |
+| `FuzzParseRego` | `pkg/policy` | Rego parser handles arbitrary rules with fail-closed security |
+| `FuzzParseGoldenPlan` | `pkg/recreation` | Plan JSON ingestion normalizes actions and resource changes safely |
 | `FuzzParseProviderSchema` | `pkg/recreation` | Dynamic provider schema parsing never panics |
 | `FuzzIsRegistrySource` | `pkg/registry` | Local paths and VCS addresses are never treated as Registry sources |
 | `FuzzParseRegistrySource` | `pkg/registry` | Registry addresses parse completely or are rejected |
+| `FuzzRenderReports` | `pkg/report` | Multi-format report renderer produces valid text, Markdown, JSON, and SARIF |
 | `FuzzNormalizeAndIsValid` | `pkg/semverutil` | Normalisation is idempotent and agrees with the semver library |
 | `FuzzDetermineBumpType` | `pkg/semverutil` | Bump classification always matches semver ordering |
 | `FuzzSort` | `pkg/semverutil` | Sorting preserves every element and enforces strict weak ordering |
+| `FuzzParseConstraintRange` | `pkg/semverutil` | Constraint range parser handles arbitrary version constraint strings without panic |
+| `FuzzAnalyzeWrapper` | `pkg/wrapper` | Wrapper analysis preserves safety equivalence (`TotalBreaking == 0 <=> Safe`) |
 
 Run a single target:
 
 ```bash
 go test ./pkg/ast -run '^FuzzInspect$' -fuzz '^FuzzInspect$' -fuzztime 60s
+```
+
+### Independent Verification Oracle & Performance Benchmarks
+
+Run the decoupled Python verification oracle against golden fixtures and extended compatibility rules:
+
+```bash
+python3 scripts/oracle_verify.py --skip-upstream -v
+```
+
+Run the benchmark suite across `pkg/ast`, `pkg/diff`, `pkg/blastradius`, and `pkg/report`:
+
+```bash
+make perf
 ```
 
 ### Terratest

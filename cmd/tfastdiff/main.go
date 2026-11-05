@@ -460,6 +460,10 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		return 1
 	}
 
+	if checkRecreation && dynamicRegistry == nil {
+		dynamicRegistry, _ = recreation.AutoDiscoverSchemas(wInfo, ast.GetPersistentCacheDir())
+	}
+
 	vlog("Analyzing wrapper compatibility against target upstream")
 	res := wrapper.AnalyzeWrapper(wInfo, targetInfo, pinnedInfo, newVersion, oldVersion, dynamicRegistry)
 	res.WrapperPath = wrapperPath
@@ -646,9 +650,6 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		findings.AddressShifts = res.UpstreamDiff.AddressShifts
 	}
 	if checkRecreation {
-		if dynamicRegistry == nil {
-			dynamicRegistry, _ = recreation.AutoDiscoverSchemas(wInfo, ast.GetPersistentCacheDir())
-		}
 		findings.RecreationHazards = recreation.AnalyzeWrapperHazardsWithRegistry(res, dynamicRegistry)
 	}
 	var taintReport *eval.TaintReport
@@ -905,6 +906,10 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		}
 	}
 
+	if checkRecreation && dynamicRegistry == nil {
+		dynamicRegistry, _ = recreation.AutoDiscoverSchemas(newInfo, ast.GetPersistentCacheDir())
+	}
+
 	vlog("Comparing modules: %s -> %s", oldVersion, newVersion)
 	diffReport := diff.Compare(oldInfo, newInfo, oldVersion, newVersion, dynamicRegistry)
 	// Identify the compared module by the source the user asked for, so reports and SARIF
@@ -915,7 +920,7 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 	}
 	if analyzeUpgradePath {
 		vlog("Analyzing upgrade path between %s and %s", oldVersion, newVersion)
-		pathReport, err := analyzeUpgradePathVersions(ctx, registryTimeout, oldPath, newPath, oldVersion, newVersion, oldInfo, newInfo)
+		pathReport, err := analyzeUpgradePathVersions(ctx, registryTimeout, oldPath, newPath, oldVersion, newVersion, oldInfo, newInfo, dynamicRegistry)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error analyzing upgrade path: %v\n", err)
 			return 1
@@ -990,9 +995,6 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		findings.AddressShifts = ast.DetectAddressShifts(oldInfo, newInfo)
 	}
 	if checkRecreation {
-		if dynamicRegistry == nil {
-			dynamicRegistry, _ = recreation.AutoDiscoverSchemas(newInfo, ast.GetPersistentCacheDir())
-		}
 		findings.RecreationHazards = recreation.AnalyzeHazardsWithRegistry(diffReport, dynamicRegistry)
 	}
 	if svgBefore != "" {
@@ -1085,7 +1087,7 @@ func comparisonSource(newPath, oldPath string) string {
 	return strings.TrimSpace(oldPath)
 }
 
-func analyzeUpgradePathVersions(ctx context.Context, registryTimeout time.Duration, source, newSource, oldVersion, newVersion string, oldInfo, newInfo *ast.ModuleInfo) (*planner.UpgradePathReport, error) {
+func analyzeUpgradePathVersions(ctx context.Context, registryTimeout time.Duration, source, newSource, oldVersion, newVersion string, oldInfo, newInfo *ast.ModuleInfo, hazardLookups ...ast.HazardLookup) (*planner.UpgradePathReport, error) {
 	if (registry.IsRegistrySource(source) || isGitURL(source) || isGitRepo(source)) && source != newSource {
 		return nil, fmt.Errorf("intermediate version analysis requires --old and --new to use the same source")
 	}
@@ -1173,18 +1175,7 @@ func analyzeUpgradePathVersions(ctx context.Context, registryTimeout time.Durati
 		}
 	}
 
-	return planner.AnalyzeUpgradePath(snapshots)
-}
-
-func inspectModuleVersion(ctx context.Context, registryTimeout time.Duration, source, version string) (*ast.ModuleInfo, error) {
-	dir, isTemp, err := resolveModuleVersionDir(ctx, registryTimeout, source, version)
-	if err != nil {
-		return nil, err
-	}
-	if isTemp {
-		defer func() { _ = os.RemoveAll(dir) }()
-	}
-	return ast.Inspect(dir)
+	return planner.AnalyzeUpgradePath(snapshots, hazardLookups...)
 }
 
 func resolveModuleVersionDir(ctx context.Context, registryTimeout time.Duration, source, version string) (string, bool, error) {

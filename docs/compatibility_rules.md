@@ -84,7 +84,7 @@ A breaking change is any modification that will prevent existing wrapper code or
 ### Instance Cardinality & Count / ForEach Destruction (`ResourceCount`, `ResourceForEach`)
 - **Condition**:
   - Literal integer `count` reduction ($n_{\text{new}} < n_{\text{old}}$) or explicit `count = 0` (`ResourceCount` → `BREAKING`).
-  - Static `for_each` key-set shrinkage (e.g. `toset(["a", "b"])` → `toset(["a"])`) (`ResourceForEach` → `BREAKING`).
+  - Static `for_each` key-set shrinkage (e.g. `toset(["a", "b"])` → `toset(["a"])`) (`ResourceForEach` → `BREAKING`), while key-set preservation or widening (e.g. `toset(["a", "b"])` → `toset(["b", "a", "c"])`) is reported as `WARNING`.
   - Dynamic `count` or `for_each` expression drift (`WARNING`, promoted to `BREAKING` if evaluated to empty or 0).
 - **Impact**: Higher-indexed instances ($[n_{\text{new}} \dots n_{\text{old}}-1]$) or omitted keys are immediately destroyed in cloud state.
 
@@ -109,18 +109,18 @@ A breaking change is any modification that will prevent existing wrapper code or
   - A `check {}` assertion condition is altered or weakened (`CheckBlockModified` → `WARNING`).
   - An `import {}` block changes its target `id` for the same resource address (`ImportBlockModified` → `BREAKING`).
   - An `import {}` block changes its `provider` argument (`ImportBlockProvider` → `BREAKING`).
-  - A `precondition {}` or `postcondition {}` block is removed or weakened (`PreconditionModified`/`PostconditionModified` → `WARNING`).
+  - A `precondition {}` or `postcondition {}` block is modified or removed (`PreconditionModified`/`PostconditionModified` → `WARNING`, promoted to `BREAKING` when the resource has or references a `ForceNew` attribute).
 
 ### Module Call Version & Cardinality (`ModuleCallVersion`, `ModuleCallCount`, `ModuleCallForEach`)
 - **Condition**:
   - A nested `module {}` call changes its `version` constraint in a major or `0.x`-minor breaking way (`ModuleCallVersion` → `BREAKING`).
-  - A nested `module {}` call reduces `count` or shrinks `for_each` (`ModuleCallCount`/`ModuleCallForEach` → `BREAKING`).
-- **Verdict**: `BREAKING`.
+  - A nested `module {}` call reduces `count` or shrinks static `for_each` keys (`ModuleCallCount`/`ModuleCallForEach` → `BREAKING`), while non-shrinking count/key-set updates emit `WARNING`.
+- **Verdict**: `BREAKING` on shrinkage/major bump; `WARNING` on non-shrinking updates.
 
 ### Provider Configuration & State Backend Changes (`ProviderConfig`, `ProviderConfigAdded`, `ProviderConfigRemoved`, `StateBackendChange`)
 - **Condition**:
   - `terraform { backend "..." { ... } }` or `terraform { cloud { ... } }` changes organization, workspace, backend type, or key attributes (`StateBackendChange` → `BREAKING`).
-  - A `provider "..." {}` block changes its `region`, `project`, `subscription_id`, or `assume_role` configuration (`ProviderConfig` → `BREAKING`).
+  - A `provider "..." {}` block is newly added (`ProviderConfigAdded` → `BREAKING`) or changes its `region`, `project`, `subscription_id`, or `assume_role` configuration (`ProviderConfig` → `BREAKING`), while removing an upstream `provider {}` block (aligning with Terraform best practices) emits `ProviderConfigRemoved` (`WARNING`).
 - **Impact**: Modifies target deployment cloud tenant or state storage destination, risking cross-account state or resource corruption.
 
 ### Local Value & Data Selector Drift (`LocalValue`, `DataSelector`)

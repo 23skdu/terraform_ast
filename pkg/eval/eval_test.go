@@ -444,6 +444,29 @@ check "health" {
 	repPre, err := AnalyzeVariableTaint(tmpDir, "machine_type", map[string]*hclsyntax.Body{"main.tf": body})
 	require.NoError(t, err)
 	assert.False(t, repPre.IsDeadCode)
+
+	// Test JSON locals chain, bare expression reference, and no substring false-positives (#161, #169)
+	jsonDir := t.TempDir()
+	jsonConfig := `{
+  "locals": {
+    "l1": "${var.env}",
+    "l2": "local.l1"
+  },
+  "resource": {
+    "aws_s3_bucket": {
+      "main": {
+        "bucket": "local.l2",
+        "other": "${var.env_other}"
+      }
+    }
+  }
+}`
+	require.NoError(t, os.WriteFile(filepath.Join(jsonDir, "main.tf.json"), []byte(jsonConfig), 0o600))
+	repEnv, err := AnalyzeVariableTaint(jsonDir, "env")
+	require.NoError(t, err)
+	assert.True(t, repEnv.IsReachable)
+	assert.Contains(t, repEnv.AffectedResourceAttributes, "aws_s3_bucket.main.bucket")
+	assert.NotContains(t, repEnv.AffectedResourceAttributes, "aws_s3_bucket.main.other")
 }
 
 // writeTerragrunt lays out a Terragrunt config and returns its path.

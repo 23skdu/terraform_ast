@@ -357,11 +357,6 @@ func (s *Server) publish(uri string) *Notification {
 	}
 }
 
-// codeActions builds the quick fixes the server can actually perform.
-func (s *Server) codeActions() []CodeAction {
-	return s.codeActionsFor(CodeActionParams{})
-}
-
 // codeActionsFor builds the quick fixes pre-populated with context from params.
 func (s *Server) codeActionsFor(params CodeActionParams) []CodeAction {
 	dir := "."

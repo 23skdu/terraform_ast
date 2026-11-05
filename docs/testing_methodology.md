@@ -216,6 +216,7 @@ same targets can then be run as an open-ended campaign.
 | `FuzzNormalizeAndIsValid` | `pkg/semverutil` | Normalisation is idempotent and agrees with the semver library |
 | `FuzzDetermineBumpType` | `pkg/semverutil` | Bump classification matches semver ordering |
 | `FuzzSort` | `pkg/semverutil` | Sorting preserves every element |
+| `FuzzParseConstraintRange` | `pkg/semverutil` | Constraint range parser handles arbitrary version constraint strings without panic |
 | `FuzzAnalyzeWrapper` | `pkg/wrapper` | Wrapper analysis preserves safety equivalence theorem TotalBreaking == 0 <=> Safe |
 
 Run one target as a campaign:

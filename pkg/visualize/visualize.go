@@ -198,7 +198,7 @@ func sortedAddresses(mod *ast.ModuleInfo) []ast.ResourceAddress {
 	if mod == nil {
 		return nil
 	}
-	addrs := ast.ExtractResourceAddresses(mod)
+	addrs := append([]ast.ResourceAddress(nil), ast.BuildEvaluationGraph(mod).Addresses...)
 	sort.Slice(addrs, func(i, j int) bool {
 		return addrs[i].FullAddress() < addrs[j].FullAddress()
 	})
