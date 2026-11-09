@@ -8,7 +8,7 @@ require (
 	github.com/gruntwork-io/terratest v1.0.1
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/hashicorp/terraform-config-inspect v0.0.0-20260904064934-75d64de68c31
-	github.com/open-policy-agent/opa v1.22.1
+	github.com/open-policy-agent/opa v1.22.2
 	github.com/stretchr/testify v1.12.1
 	github.com/zclconf/go-cty v1.19.0
 	golang.org/x/mod v0.42.0
