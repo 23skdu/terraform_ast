@@ -117,6 +117,292 @@ var knownModuleHazards = map[string]map[string]HazardDescriptor{
 			Remediation: "Maintain constant dns_prefix across upgrades.",
 		},
 	},
+	// Rancher / RKE / RKE2 cluster hazards
+	"rancher": {
+		"name": {
+			Resource:    "rancher2_cluster_v2",
+			Impact:      "Rancher cluster name is immutable; changing it triggers ForceNew cluster destruction.",
+			Remediation: "Keep cluster name unchanged.",
+		},
+		"cluster_name": {
+			Resource:    "rancher2_cluster_v2",
+			Impact:      "Cluster name is immutable; changing it triggers ForceNew cluster destruction.",
+			Remediation: "Keep cluster_name unchanged.",
+		},
+		"kubernetes_version": {
+			Resource:    "rancher2_cluster_v2",
+			Impact:      "Kubernetes version downgrade or incompatible bump may force cluster rebuild.",
+			Remediation: "Plan version changes carefully and validate against Rancher support matrix.",
+		},
+		"location": {
+			Resource:    "rancher2_cluster_v2",
+			Impact:      "Cluster location is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep location unchanged.",
+		},
+	},
+	"rke": {
+		"name": {
+			Resource:    "rke_cluster",
+			Impact:      "RKE cluster name is immutable; triggers ForceNew destruction.",
+			Remediation: "Keep name unchanged.",
+		},
+		"cluster_name": {
+			Resource:    "rke_cluster",
+			Impact:      "Cluster name is immutable; triggers ForceNew destruction.",
+			Remediation: "Keep cluster_name unchanged.",
+		},
+		"nodes": {
+			Resource:    "rke_cluster",
+			Impact:      "Node pool definition is largely immutable; altering it may rebuild the cluster.",
+			Remediation: "Add nodes via separate pools rather than mutating the base definition.",
+		},
+	},
+	"k3s": {
+		"cluster_name": {
+			Resource:    "k3s_cluster",
+			Impact:      "k3s cluster name is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep cluster_name unchanged.",
+		},
+		"name": {
+			Resource:    "k3s_cluster",
+			Impact:      "k3s cluster name is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep name unchanged.",
+		},
+		"token": {
+			Resource:    "k3s_cluster",
+			Impact:      "Cluster join token rotation may force node re-registration.",
+			Remediation: "Rotate tokens via supported procedures, not by mutating this argument.",
+		},
+	},
+	// OpenShift / OCP hazards
+	"openshift": {
+		"cluster_name": {
+			Resource:    "azurerm_redhat_openshift_cluster",
+			Impact:      "OpenShift cluster name is immutable; triggers ForceNew destruction.",
+			Remediation: "Keep cluster_name unchanged.",
+		},
+		"name": {
+			Resource:    "azurerm_redhat_openshift_cluster",
+			Impact:      "Cluster name is immutable; triggers ForceNew destruction.",
+			Remediation: "Keep name unchanged.",
+		},
+		"location": {
+			Resource:    "azurerm_redhat_openshift_cluster",
+			Impact:      "Azure region is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep location unchanged.",
+		},
+		"resource_group_name": {
+			Resource:    "azurerm_redhat_openshift_cluster",
+			Impact:      "Resource group cannot be migrated in-place; triggers ForceNew destruction.",
+			Remediation: "Keep resource_group_name unchanged.",
+		},
+		"vnet_cidr": {
+			Resource:    "azurerm_redhat_openshift_cluster",
+			Impact:      "VNet CIDR is immutable after creation; triggers ForceNew recreation.",
+			Remediation: "Keep vnet_cidr unchanged.",
+		},
+	},
+	"ocp": {
+		"cluster_name": {
+			Resource:    "openshift_cluster",
+			Impact:      "OpenShift cluster name is immutable; triggers ForceNew destruction.",
+			Remediation: "Keep cluster_name unchanged.",
+		},
+		"base_domain": {
+			Resource:    "openshift_cluster",
+			Impact:      "Base domain is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep base_domain unchanged.",
+		},
+	},
+	// EKS addons
+	"eksaddon": {
+		"addon_name": {
+			Resource:    "aws_eks_addon",
+			Impact:      "Addon name is immutable; changing it recreates the addon.",
+			Remediation: "Keep addon_name unchanged.",
+		},
+		"cluster_name": {
+			Resource:    "aws_eks_addon",
+			Impact:      "Cluster attachment is immutable; recreates the addon.",
+			Remediation: "Keep cluster_name unchanged.",
+		},
+	},
+	"eksaddons": {
+		"addon_name": {
+			Resource:    "aws_eks_addon",
+			Impact:      "Addon name is immutable; changing it recreates the addon.",
+			Remediation: "Keep addon_name unchanged.",
+		},
+		"cluster_name": {
+			Resource:    "aws_eks_addon",
+			Impact:      "Cluster attachment is immutable; recreates the addon.",
+			Remediation: "Keep cluster_name unchanged.",
+		},
+	},
+	// AKS extensions
+	"aksextension": {
+		"name": {
+			Resource:    "azurerm_kubernetes_cluster_extension",
+			Impact:      "Extension name is immutable; recreates the extension.",
+			Remediation: "Keep name unchanged.",
+		},
+		"cluster_id": {
+			Resource:    "azurerm_kubernetes_cluster_extension",
+			Impact:      "Cluster attachment is immutable; recreates the extension.",
+			Remediation: "Keep cluster_id unchanged.",
+		},
+		"extension_type": {
+			Resource:    "azurerm_kubernetes_cluster_extension",
+			Impact:      "Extension type is immutable; recreates the extension.",
+			Remediation: "Keep extension_type unchanged.",
+		},
+	},
+	// GKE addons / features
+	"gkeaddon": {
+		"name": {
+			Resource:    "google_gke_hub_feature",
+			Impact:      "Feature name is immutable; recreates the feature.",
+			Remediation: "Keep name unchanged.",
+		},
+		"location": {
+			Resource:    "google_gke_hub_feature",
+			Impact:      "Location is immutable; recreates the feature.",
+			Remediation: "Keep location unchanged.",
+		},
+		"project_id": {
+			Resource:    "google_gke_hub_feature",
+			Impact:      "Project ID is immutable; recreates the feature.",
+			Remediation: "Keep project_id unchanged.",
+		},
+	},
+	// AWS VPC module
+	"vpc": {
+		"name": {
+			Resource:    "aws_vpc",
+			Impact:      "VPC name tag is immutable-ish; changing may recreate.",
+			Remediation: "Keep name unchanged.",
+		},
+		"cidr": {
+			Resource:    "aws_vpc",
+			Impact:      "Primary CIDR block is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep cidr unchanged or add secondary CIDRs.",
+		},
+		"cidr_block": {
+			Resource:    "aws_vpc",
+			Impact:      "CIDR block is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep cidr_block unchanged.",
+		},
+		"region": {
+			Resource:    "aws_vpc",
+			Impact:      "Region is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep region unchanged.",
+		},
+	},
+	// AWS RDS module
+	"rds": {
+		"identifier": {
+			Resource:    "aws_db_instance",
+			Impact:      "DB identifier is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep identifier unchanged.",
+		},
+		"engine": {
+			Resource:    "aws_db_instance",
+			Impact:      "Database engine is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep engine unchanged.",
+		},
+		"username": {
+			Resource:    "aws_db_instance",
+			Impact:      "Master username is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep username unchanged.",
+		},
+		"region": {
+			Resource:    "aws_db_instance",
+			Impact:      "Region is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep region unchanged.",
+		},
+	},
+	// AWS S3 module
+	"s3": {
+		"bucket": {
+			Resource:    "aws_s3_bucket",
+			Impact:      "Bucket name is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep bucket unchanged.",
+		},
+		"bucket_name": {
+			Resource:    "aws_s3_bucket",
+			Impact:      "Bucket name is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep bucket_name unchanged.",
+		},
+		"region": {
+			Resource:    "aws_s3_bucket",
+			Impact:      "Region is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep region unchanged.",
+		},
+	},
+	// GCP Cloud SQL
+	"sql": {
+		"name": {
+			Resource:    "google_sql_database_instance",
+			Impact:      "Instance name is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep name unchanged.",
+		},
+		"region": {
+			Resource:    "google_sql_database_instance",
+			Impact:      "Region is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep region unchanged.",
+		},
+		"database_version": {
+			Resource:    "google_sql_database_instance",
+			Impact:      "Database version major changes may recreate the instance.",
+			Remediation: "Plan version changes carefully.",
+		},
+		"project_id": {
+			Resource:    "google_sql_database_instance",
+			Impact:      "Project ID is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep project_id unchanged.",
+		},
+	},
+	// Azure storage account
+	"storage": {
+		"name": {
+			Resource:    "azurerm_storage_account",
+			Impact:      "Storage account name is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep name unchanged.",
+		},
+		"location": {
+			Resource:    "azurerm_storage_account",
+			Impact:      "Location is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep location unchanged.",
+		},
+		"resource_group_name": {
+			Resource:    "azurerm_storage_account",
+			Impact:      "Resource group is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep resource_group_name unchanged.",
+		},
+		"account_kind": {
+			Resource:    "azurerm_storage_account",
+			Impact:      "Account kind is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep account_kind unchanged.",
+		},
+	},
+	// Azure Cosmos DB
+	"cosmosdb": {
+		"name": {
+			Resource:    "azurerm_cosmosdb_account",
+			Impact:      "Account name is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep name unchanged.",
+		},
+		"location": {
+			Resource:    "azurerm_cosmosdb_account",
+			Impact:      "Location is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep location unchanged.",
+		},
+		"resource_group_name": {
+			Resource:    "azurerm_cosmosdb_account",
+			Impact:      "Resource group is immutable; triggers ForceNew recreation.",
+			Remediation: "Keep resource_group_name unchanged.",
+		},
+	},
 }
 
 // genericHazards are immutable on essentially every cloud resource, so they apply whatever the
@@ -213,12 +499,53 @@ func matchModuleCategory(moduleName string) string {
 		return "gke"
 	}
 	tokens := moduleTokens(trimmed)
+
+	// Compound addon/extension modules are classified by their (provider, addon) pair
+	// rather than by either token alone, so a bare "addon" module is not misclassified.
+	if _, ok := tokens["eks"]; ok {
+		if _, ok2 := tokens["addon"]; ok2 {
+			return "eksaddon"
+		}
+	}
+	if _, ok := tokens["aks"]; ok {
+		if _, ok2 := tokens["extension"]; ok2 {
+			return "aksextension"
+		}
+	}
+	if _, ok := tokens["gke"]; ok {
+		if _, ok2 := tokens["addon"]; ok2 {
+			return "gkeaddon"
+		}
+	}
+
 	// Ordered so the more specific Azure signals win over the generic "eks" token.
 	for _, candidate := range []struct{ token, category string }{
-		{"azurerm", "aks"},
 		{"aks", "aks"},
 		{"gke", "gke"},
+		{"autopilot", "gke"},
 		{"eks", "eks"},
+		{"rancher", "rancher"},
+		{"rke2", "rke"},
+		{"rke", "rke"},
+		{"k3s", "k3s"},
+		{"openshift", "openshift"},
+		{"ocp", "ocp"},
+		{"eksaddon", "eksaddon"},
+		{"eksaddons", "eksaddon"},
+		{"aksextension", "aksextension"},
+		{"aksextensions", "aksextension"},
+		{"gkeaddon", "gkeaddon"},
+		{"gkeaddons", "gkeaddon"},
+		{"vpc", "vpc"},
+		{"rds", "rds"},
+		{"s3bucket", "s3"},
+		{"s3_bucket", "s3"},
+		{"s3", "s3"},
+		{"sql", "sql"},
+		{"storage", "storage"},
+		{"cosmosdb", "cosmosdb"},
+		{"cosmos", "cosmosdb"},
+		{"azurerm", "aks"},
 	} {
 		if _, ok := tokens[candidate.token]; ok {
 			return candidate.category

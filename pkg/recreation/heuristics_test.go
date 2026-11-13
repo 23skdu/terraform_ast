@@ -51,6 +51,22 @@ func TestMatchModuleCategory(t *testing.T) {
 		{"my-eks-wrapper", "eks"},
 		{"Azure/aks/azurerm", "aks"},
 		{"azurerm_aks_wrapper", "aks"},
+		{"rancher-cluster", "rancher"},
+		{"rke2-cluster", "rke"},
+		{"my-k3s-wrapper", "k3s"},
+		{"openshift-cluster", "openshift"},
+		{"ocp-cluster", "ocp"},
+		{"terraform-aws-modules/eks/aws", "eks"},
+		{"my-eks-addon", "eksaddon"},
+		{"aks-extension", "aksextension"},
+		{"gke-addon", "gkeaddon"},
+		{"terraform-aws-modules/vpc/aws", "vpc"},
+		{"terraform-aws-modules/rds/aws", "rds"},
+		{"terraform-aws-modules/s3-bucket/aws", "s3"},
+		{"terraform-google-modules/sql/google", "sql"},
+		{"terraform-azurerm-modules/storage/azurerm", "storage"},
+		{"cosmosdb-account", "cosmosdb"},
+		{"autopilot-cluster", "gke"},
 		{"custom-module", ""},
 		{"checks", ""},
 		{"weekends", ""},
@@ -186,6 +202,29 @@ func TestFormatHazardsText(t *testing.T) {
 // TestFormatHazards_RendersUnattributedResource covers a hazard that came from the
 // provider-agnostic table. It has no resource type, and the formatters must say so rather than
 // print an empty column or invent a provider.
+func BenchmarkLookupHazard(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_, _ = LookupHazard("terraform-google-modules/kubernetes-engine/google", "ip_range_pods")
+		_, _ = LookupHazard("custom-module", "some_random_var")
+	}
+}
+
+func BenchmarkAnalyzeHazards(b *testing.B) {
+	report := &diff.DiffReport{
+		ModuleName: "terraform-google-modules/kubernetes-engine/google",
+		BreakingChanges: []diff.DifferenceItem{
+			{Category: "Variable", Name: "ip_range_services", Description: "Input variable removed"},
+		},
+		Warnings: []diff.DifferenceItem{
+			{Category: "VariableType", Name: "location", Description: "Widened"},
+		},
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = AnalyzeHazards(report)
+	}
+}
+
 func TestFormatHazards_RendersUnattributedResource(t *testing.T) {
 	hazards := []RecreationHazard{
 		{Variable: "location", Severity: "CRITICAL_HAZARD", Description: "region changed", Remediation: "keep it"},

@@ -28,7 +28,7 @@ IMAGE_TAG ?= latest
 .PHONY: all help ci release build build-release build-debug build-race clean \
 	deps deps-upgrade lint lint-fast lint-fix vet staticcheck deadcode fmt fmt-check \
 	security secure sec-gosec sec-vulncheck sec-audit \
-	perf test test-short test-all race test-coverage coverage-gate coverage-html test-fuzz \
+	perf memprofile cpuprofile test test-short test-all race test-coverage coverage-gate coverage-html test-fuzz \
 	accuracy-gate oracle venv docker markdown-lint verify pre-commit makehooks install-hooks fuzz
 
 # Default target
@@ -228,7 +228,17 @@ sec-audit: sec-vulncheck
 # Performance
 # ==============================================================================
 perf:
-	$(GO) test -bench . -benchtime=3s -count=5 -run '^$$' ./pkg/ast/ ./pkg/diff/ ./pkg/report/ ./pkg/blastradius/ 2>&1 | tee perf.out
+	$(GO) test -bench . -benchtime=3s -count=5 -benchmem -run '^$$' ./pkg/ast/ ./pkg/diff/ ./pkg/report/ ./pkg/blastradius/ ./pkg/recreation/ 2>&1 | tee perf.out
+
+memprofile:
+	@echo "Collecting memory profiles for hot packages..."
+	$(GO) test -run '^$$' -bench . -benchmem -memprofile=mem.out ./pkg/ast/ ./pkg/diff/ ./pkg/recreation/ 2>&1 | tee memprofile.out
+	$(GO) tool pprof -top mem.out | head -40
+
+cpuprofile:
+	@echo "Collecting CPU profiles for hot packages..."
+	$(GO) test -run '^$$' -bench . -cpuprofile=cpu.out ./pkg/ast/ ./pkg/diff/ ./pkg/recreation/ 2>&1 | tee cpuprofile.out
+	$(GO) tool pprof -top cpu.out | head -40
 
 # ==============================================================================
 # Testing & Quality Gates
