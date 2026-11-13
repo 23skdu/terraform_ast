@@ -14,7 +14,11 @@
 - **Deep Structural Object Schema Diffing**: Analyzes nested `object({ ... })` type constraints attribute-by-attribute (attribute additions, removals, `optional()` default transitions, and type shifts).
 - **Parallel Blast-Radius & Terragrunt Consumer Analysis (`pkg/blastradius`)**: Uses a bounded worker pool to scan Terraform root modules (`.tf`, `.tf.json`) and Terragrunt `terragrunt.hcl` configurations (`--blast-radius ./environments`), evaluating `merge(...)`, `find_in_parent_folders()`, and `read_terragrunt_config()` chains with evidence-gated risk attribution (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW`).
 - **Evidence-Calibrated Confidence & Safety Scoring**: Assigns evidence-backed confidence scores (`[1, 10]`) to every finding, computes safety verdicts (`SAFE`, `WARNINGS_ONLY`, `BREAKING_CHANGES`, `DOWNGRADE`), and recommends the highest contiguous safe-harbor version (`SafePinVersion`).
-- **ForceNew Destruction Heuristics & Golden Plan Verification (`pkg/recreation`)**: Flags `ForceNew` (`requires_replace`) hazards using built-in cloud catalogs (AWS, GCP, AzureRM, Kubernetes, Cloudflare), auto-discovered `terraform providers schema -json` dumps (`DynamicHazardRegistry`), and Terraform execution plan JSON (`--golden-plan` or automatic `tfplan.json`/`golden-plan.json` discovery).
+- **ForceNew Destruction Heuristics & Golden Plan Verification (`pkg/recreation`)**: Flags `ForceNew` (`requires_replace`) hazards using built-in cloud catalogs (AWS, GCP, AzureRM, Kubernetes, Cloudflare), expanded with Rancher/RKE/k3s/OpenShift, EKS/AKS/GKE addons and extensions, VPC/RDS/S3/Cloud SQL/Storage/Cosmos DB, auto-discovered `terraform providers schema -json` dumps (`DynamicHazardRegistry`), and Terraform execution plan JSON (`--golden-plan` or automatic `tfplan.json`/`golden-plan.json` discovery).
+- **State Encryption Helpers (`pkg/encryption`)**: AES-256-GCM encrypt/decrypt helpers for state and module artefacts (OpenTofu-style state encryption) with password-derived keys.
+- **Module Dependency Graph (`pkg/modulegraph`)**: Builds and renders (DOT) module dependency graphs from parsed module calls and input references.
+- **CLI Hook Points (`pkg/hooks`)**: Terragrunt-style pre/post command hooks for plan/apply workflows.
+- **Streaming Report Writers (`pkg/report`)**: `RenderTextTo`/`RenderMarkdownTo`/`RenderJSONTo` stream reports to any `io.Writer` for large outputs.
 - **OASIS SARIF v2.1.0 Export (`pkg/report`)**: Generates line-exact SARIF v2.1.0 reports (`--format sarif`), including `TF-RECREATION-HAZARD` and `TF-POLICY-VIOLATION` rules for GitHub Code Scanning.
 - **Git Optimization & Shared Repository Cache (`pkg/gitops`)**: Implements shallow cloning (`--depth 1`), Terraform VCS source normalization (`git::`, `github.com/`, `//subdir?ref=`), and a thread-safe `RepositoryCache` that clones each repository once per run.
 - **Semantic Versioning & Constraint Range Analysis (`pkg/semverutil`)**: Uses [`golang.org/x/mod/semver`](https://pkg.go.dev/golang.org/x/mod/semver) and interval constraint parsing (`ParseConstraintRange`) to detect major breaking bumps, `0.x` minor breaking bumps, upper-bound major narrowings, and downgrade hazards.
@@ -259,6 +263,19 @@ Run the benchmark suite across `pkg/ast`, `pkg/diff`, `pkg/blastradius`, and `pk
 
 ```bash
 make perf
+```
+
+Collect CPU and memory profiles for the hot packages:
+
+```bash
+make cpuprofile
+make memprofile
+```
+
+Run all benchmarks:
+
+```bash
+make bench
 ```
 
 ### Terratest
