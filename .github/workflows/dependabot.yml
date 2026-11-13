@@ -47,16 +47,14 @@ jobs:
         run: |
           go test -v ./test/terratest
 
-      - name: Auto-Approve Dependabot PR for Patch & Minor Updates
-        if: steps.metadata.outputs.update-type == 'version-update:semver-patch' || steps.metadata.outputs.update-type == 'version-update:semver-minor'
+      - name: Auto-Approve Dependabot PRs
         run: |
           gh pr review --approve "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Enable Auto-Merge for Safe Dependabot PRs
-        if: steps.metadata.outputs.update-type == 'version-update:semver-patch' || steps.metadata.outputs.update-type == 'version-update:semver-minor'
+      - name: Enable Auto-Merge for Dependabot PRs
         run: |
           gh pr merge --auto --squash "$PR_URL"
         env:
