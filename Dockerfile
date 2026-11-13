@@ -1,7 +1,7 @@
 # ==============================================================================
 # Build Stage: Secure Multi-Stage Go Builder
 # ==============================================================================
-FROM golang:1.27.3-alpine AS builder
+FROM golang:1.27.4-alpine AS builder
 
 # Install ca-certificates and git for secure Go module retrieval
 RUN apk --no-cache add ca-certificates git
