@@ -3,6 +3,7 @@ package report
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
@@ -414,4 +415,30 @@ func FormatTaintMarkdown(t *eval.TaintReport) string {
 		}
 	}
 	return sb.String()
+}
+
+// RenderTextTo streams a text report to w.
+func RenderTextTo(w io.Writer, r *diff.DiffReport, findings Findings) error {
+	_, err := io.WriteString(w, RenderText(r, findings))
+	return err
+}
+
+// RenderMarkdownTo streams a Markdown report to w.
+func RenderMarkdownTo(w io.Writer, r *diff.DiffReport, findings ...Findings) error {
+	f := Findings{}
+	if len(findings) > 0 {
+		f = findings[0]
+	}
+	_, err := io.WriteString(w, RenderMarkdown(r, f))
+	return err
+}
+
+// RenderJSONTo streams a JSON report to w.
+func RenderJSONTo(w io.Writer, r *diff.DiffReport, findings Findings) error {
+	_, err := w.Write(RenderJSON(r, findings))
+	if err != nil {
+		return err
+	}
+	_, err = w.Write([]byte("\n"))
+	return err
 }

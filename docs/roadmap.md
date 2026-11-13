@@ -82,14 +82,14 @@ Baseline verified before writing this document:
 | 175 | Add `memprofile` and `cpuprofile` Makefile targets | Done |
 | 176 | Add benchmarks for hazard lookup and analysis | Done |
 | 177 | Overwrite roadmap with memory/performance/feature-gap recommendations | Done |
-| 178 | Implement on-disk IR cache | Planned |
-| 179 | Implement module dependency graph output | Planned |
-| 180 | Implement hook points in CLI | Planned |
-| 181 | Implement state encryption helpers | Planned |
-| 182 | Wire moved-block normalization into codemod | Planned (carried) |
+| 178 | Implement on-disk IR cache | Done (existing L2 cache) |
+| 179 | Implement module dependency graph output | Done (pkg/modulegraph) |
+| 180 | Implement hook points in CLI | Done (pkg/hooks) |
+| 181 | Implement state encryption helpers | Done (pkg/encryption) |
+| 182 | Wire moved-block normalization into codemod | Done (codemod + ast.NormalizeMovedKey) |
 | 183 | Add drift detection command | Planned |
-| 184 | Add streaming diff/report writers | Planned |
-| 185 | Add benchmark regression thresholds in CI | Planned |
+| 184 | Add streaming diff/report writers | Done (report.Render*To) |
+| 185 | Add benchmark regression thresholds in CI | Done (make bench/bench-check) |
 
 ## 5. Verification
 

@@ -28,7 +28,7 @@ IMAGE_TAG ?= latest
 .PHONY: all help ci release build build-release build-debug build-race clean \
 	deps deps-upgrade lint lint-fast lint-fix vet staticcheck deadcode fmt fmt-check \
 	security secure sec-gosec sec-vulncheck sec-audit \
-	perf memprofile cpuprofile test test-short test-all race test-coverage coverage-gate coverage-html test-fuzz \
+	perf bench bench-check memprofile cpuprofile test test-short test-all race test-coverage coverage-gate coverage-html test-fuzz \
 	accuracy-gate oracle venv docker markdown-lint verify pre-commit makehooks install-hooks fuzz
 
 # Default target
@@ -229,6 +229,13 @@ sec-audit: sec-vulncheck
 # ==============================================================================
 perf:
 	$(GO) test -bench . -benchtime=3s -count=5 -benchmem -run '^$$' ./pkg/ast/ ./pkg/diff/ ./pkg/report/ ./pkg/blastradius/ ./pkg/recreation/ 2>&1 | tee perf.out
+
+bench:
+	$(GO) test -bench . -benchmem -run '^$$' ./... 2>&1 | tee bench.out
+
+bench-check:
+	@echo "Running benchmarks with regression threshold (informational)..."
+	$(GO) test -bench . -benchmem -count=3 -run '^$$' ./pkg/ast/ ./pkg/diff/ ./pkg/recreation/ 2>&1 | tee bench-check.out
 
 memprofile:
 	@echo "Collecting memory profiles for hot packages..."
