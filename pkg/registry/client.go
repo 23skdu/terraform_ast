@@ -66,6 +66,7 @@ type blockedAddressError struct {
 	address string
 }
 
+// Error implements error.
 func (e *blockedAddressError) Error() string {
 	return fmt.Sprintf("refusing to connect to %s: registry requests to link-local and unspecified addresses are blocked", e.address)
 }
@@ -128,6 +129,7 @@ type guardedTransport struct {
 	base http.RoundTripper
 }
 
+// RoundTrip implements http.RoundTripper with SSRF guards.
 func (t *guardedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.URL != nil {
 		if host := req.URL.Hostname(); blockedAddr(net.ParseIP(host)) {

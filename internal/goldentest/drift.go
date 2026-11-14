@@ -12,8 +12,11 @@ import (
 type CloudProvider string
 
 const (
-	ProviderGCP   CloudProvider = "GCP"
-	ProviderAWS   CloudProvider = "AWS"
+	// ProviderGCP identifies Google Cloud.
+	ProviderGCP CloudProvider = "GCP"
+	// ProviderAWS identifies Amazon Web Services.
+	ProviderAWS CloudProvider = "AWS"
+	// ProviderAzure identifies Microsoft Azure.
 	ProviderAzure CloudProvider = "Azure"
 )
 

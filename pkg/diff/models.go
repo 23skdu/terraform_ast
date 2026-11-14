@@ -11,8 +11,11 @@ import (
 type ChangeSeverity string
 
 const (
-	SeverityBreaking   ChangeSeverity = "BREAKING"
-	SeverityWarning    ChangeSeverity = "WARNING"
+	// SeverityBreaking marks a change that breaks compatibility.
+	SeverityBreaking ChangeSeverity = "BREAKING"
+	// SeverityWarning marks a non-breaking but noteworthy change.
+	SeverityWarning ChangeSeverity = "WARNING"
+	// SeverityNewFeature marks an available upstream feature.
 	SeverityNewFeature ChangeSeverity = "NEW_FEATURE"
 )
 

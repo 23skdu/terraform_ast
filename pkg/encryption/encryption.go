@@ -23,8 +23,11 @@ const (
 
 // Errors returned by Decrypt.
 var (
-	ErrBadMagic      = errors.New("encryption: bad magic header")
-	ErrTooShort      = errors.New("encryption: ciphertext too short")
+	// ErrBadMagic indicates the blob header is invalid.
+	ErrBadMagic = errors.New("encryption: bad magic header")
+	// ErrTooShort indicates the blob is too short.
+	ErrTooShort = errors.New("encryption: ciphertext too short")
+	// ErrDecryptFailed indicates decryption or authentication failed.
 	ErrDecryptFailed = errors.New("encryption: decryption failed")
 )
 

@@ -13,12 +13,18 @@ import (
 type BumpType string
 
 const (
-	BumpMajor     BumpType = "MAJOR"     // Breaking change
-	BumpMinor     BumpType = "MINOR"     // New backward-compatible feature
-	BumpPatch     BumpType = "PATCH"     // Backward-compatible bug fix
+	// BumpMajor indicates a breaking change.
+	BumpMajor BumpType = "MAJOR" // Breaking change
+	// BumpMinor indicates new backward-compatible functionality.
+	BumpMinor BumpType = "MINOR" // New backward-compatible feature
+	// BumpPatch indicates a backward-compatible bug fix.
+	BumpPatch BumpType = "PATCH" // Backward-compatible bug fix
+	// BumpDowngrade indicates the version decreased.
 	BumpDowngrade BumpType = "DOWNGRADE" // Version decreased
+	// BumpIdentical indicates the versions are the same.
 	BumpIdentical BumpType = "IDENTICAL" // Versions are the same
-	BumpInvalid   BumpType = "INVALID"   // Version string does not conform to semver
+	// BumpInvalid indicates the version string does not parse.
+	BumpInvalid BumpType = "INVALID" // Version string does not conform to semver
 	// BumpUnknown means at least one version was not supplied, so no transition could be
 	// classified. It is deliberately distinct from BumpInvalid: an absent version is missing
 	// information, whereas an invalid one is information the caller got wrong.

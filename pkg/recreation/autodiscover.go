@@ -24,10 +24,10 @@ func SanitizeProviderKey(source string) string {
 	return cleaned
 }
 
-// GetBuiltinProviderSchema returns a synthetic ProviderSchemas for well-known providers
-// to ensure ForceNew protection even without an explicit terraform providers schema export.
 var builtinSchemaCache sync.Map
 
+// GetBuiltinProviderSchema returns a synthetic ProviderSchemas for well-known providers
+// to ensure ForceNew protection even without an explicit terraform providers schema export.
 func GetBuiltinProviderSchema(providerName string) (ps *ProviderSchemas) {
 	norm := strings.ToLower(strings.TrimSpace(providerName))
 	// Strip namespace if present

@@ -144,7 +144,9 @@ type Command struct {
 
 // Command identifiers registered with the client at initialize.
 const (
+	// CommandApplyMovedBlocks applies generated moved blocks.
 	CommandApplyMovedBlocks = "tfastdiff.applyMovedBlocks"
+	// CommandAddMissingInputs injects missing required inputs.
 	CommandAddMissingInputs = "tfastdiff.addMissingInputs"
 )
 

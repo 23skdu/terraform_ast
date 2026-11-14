@@ -16,6 +16,8 @@ type UpgradePlanner struct {
 	RegistryClient *registry.Client
 }
 
+// NewUpgradePlanner constructs an UpgradePlanner, defaulting to a new registry
+// client when none is supplied.
 func NewUpgradePlanner(rc *registry.Client) *UpgradePlanner {
 	if rc == nil {
 		rc = registry.NewClient(nil)
