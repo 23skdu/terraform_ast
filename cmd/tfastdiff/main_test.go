@@ -18,9 +18,12 @@ import (
 	"time"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
+	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/eval"
 	"github.com/23skdu/terraform_ast/pkg/gitops"
+	"github.com/23skdu/terraform_ast/pkg/recreation"
 	"github.com/23skdu/terraform_ast/pkg/registry"
+	"github.com/23skdu/terraform_ast/pkg/report"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
@@ -588,6 +591,17 @@ module "my_wrapper" {
 	}, &stdout, &stderr)
 	assert.Equal(t, 1, code)
 	assert.Contains(t, stderr.String(), "Error scanning blast radius")
+
+	// Blast-radius with taint analysis (covers WithTaint branch)
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", upstreamDir,
+		"--blast-radius", environmentsDir,
+		"--taint", "ip_range_services",
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
 }
 
 func setupMockRegistryServer(t *testing.T) (*httptest.Server, func()) {
@@ -1908,6 +1922,11 @@ func TestExecute_CacheDir(t *testing.T) {
 	ast.SetPersistentCacheDir("")
 }
 
+func TestExecute_LSPDaemonStdout(t *testing.T) {
+	code := Execute([]string{"lsp"}, os.Stdout, &bytes.Buffer{})
+	assert.Equal(t, 0, code)
+}
+
 func TestExecute_LSPDaemon(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Execute([]string{"lsp"}, &stdout, &stderr)
@@ -1917,6 +1936,285 @@ func TestExecute_LSPDaemon(t *testing.T) {
 	stderr.Reset()
 	codeFlag := Execute([]string{"--lsp"}, &stdout, &stderr)
 	assert.Equal(t, 0, codeFlag)
+}
+
+func TestExecute_EncryptDecryptStdout(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "plain.txt")
+	require.NoError(t, os.WriteFile(input, []byte("secret data"), 0644))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"encrypt", "--password", "pw", input}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.NotEmpty(t, stdout.Bytes())
+
+	encPath := filepath.Join(dir, "out.enc")
+	require.NoError(t, os.WriteFile(encPath, stdout.Bytes(), 0600))
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"decrypt", "--password", "pw", encPath}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Equal(t, "secret data", stdout.String())
+}
+
+func TestExecute_SubcommandFlagErrors(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	for _, args := range [][]string{
+		{"encrypt", "--bad"},
+		{"decrypt", "--bad"},
+		{"drift", "--bad"},
+		{"list-versions", "--bad"},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		code := Execute(args, &stdout, &stderr)
+		assert.Equal(t, 2, code)
+	}
+}
+
+func TestExecute_EncryptDecryptRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "plain.txt")
+	enc := filepath.Join(dir, "out.enc")
+	dec := filepath.Join(dir, "out.txt")
+	require.NoError(t, os.WriteFile(input, []byte("secret data"), 0644))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"encrypt", "--password", "pw", input, enc}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"decrypt", "--password", "pw", enc, dec}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+
+	saved, err := os.ReadFile(dec)
+	require.NoError(t, err)
+	assert.Equal(t, "secret data", string(saved))
+}
+
+func TestExecute_DriftCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"drift"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "All Baselines Intact")
+}
+
+func TestRepoRoot(t *testing.T) {
+	assert.NotEmpty(t, repoRoot())
+
+	outside := t.TempDir()
+	orig, _ := os.Getwd()
+	t.Chdir(outside)
+	assert.Empty(t, repoRoot())
+	require.NoError(t, os.Chdir(orig))
+
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "gone")
+	require.NoError(t, os.MkdirAll(sub, 0750))
+	t.Chdir(sub)
+	require.NoError(t, os.RemoveAll(dir))
+	assert.Empty(t, repoRoot())
+	require.NoError(t, os.Chdir(orig))
+}
+
+func TestRenderDiffOutputAllFormats(t *testing.T) {
+	r := &diff.DiffReport{ModuleName: "m", OldVersion: "1.0", NewVersion: "1.1", BumpType: "minor", Verdict: "OK", Summary: "s"}
+	findings := report.Findings{RecreationHazards: []recreation.RecreationHazard{{Variable: "x"}}}
+	for _, format := range []string{"text", "markdown", "json", "sarif", "default"} {
+		out := renderDiffOutput(format, r, findings)
+		assert.NotEmpty(t, out)
+	}
+}
+
+func TestExecute_ListVersionsCommand(t *testing.T) {
+	repoDir := createTestTFRepo(t, "v1.0.0", `variable "a" { type = string }`)
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"list-versions", repoDir}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "v1.0.0")
+}
+
+func TestExecute_ListVersionsErrors(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"list-versions"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"list-versions", t.TempDir()}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+}
+
+type failingWriter struct {
+	failAfter int
+	written   int
+}
+
+func (f *failingWriter) Write(p []byte) (int, error) {
+	if f.written >= f.failAfter {
+		return 0, errors.New("write failed")
+	}
+	f.written += len(p)
+	return len(p), nil
+}
+
+func TestExecute_EncryptDecryptErrors(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "plain.txt")
+	require.NoError(t, os.WriteFile(input, []byte("data"), 0644))
+
+	var stdout, stderr bytes.Buffer
+	// missing password
+	code := Execute([]string{"encrypt", input}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	code = Execute([]string{"decrypt", input}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	// missing input
+	code = Execute([]string{"encrypt", "--password", "pw"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	code = Execute([]string{"decrypt", "--password", "pw"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	// read failure
+	code = Execute([]string{"encrypt", "--password", "pw", filepath.Join(dir, "missing")}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	code = Execute([]string{"decrypt", "--password", "pw", filepath.Join(dir, "missing")}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	// decrypt bad blob
+	bad := filepath.Join(dir, "bad.enc")
+	require.NoError(t, os.WriteFile(bad, []byte("not-encrypted"), 0644))
+	code = Execute([]string{"decrypt", "--password", "pw", bad}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	// write failure (output is a directory)
+	outDir := filepath.Join(dir, "outdir")
+	require.NoError(t, os.MkdirAll(outDir, 0750))
+	code = Execute([]string{"encrypt", "--password", "pw", input, outDir}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	enc := filepath.Join(dir, "out.enc")
+	Execute([]string{"encrypt", "--password", "pw", input, enc}, &bytes.Buffer{}, &stderr)
+	code = Execute([]string{"decrypt", "--password", "pw", enc, outDir}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+
+	// stdout write failure
+	fw := &failingWriter{failAfter: 0}
+	code = Execute([]string{"encrypt", "--password", "pw", input}, fw, &stderr)
+	assert.Equal(t, 1, code)
+	enc = filepath.Join(dir, "out.enc")
+	Execute([]string{"encrypt", "--password", "pw", input, enc}, &bytes.Buffer{}, &stderr)
+	fw2 := &failingWriter{failAfter: 0}
+	code = Execute([]string{"decrypt", "--password", "pw", enc}, fw2, &stderr)
+	assert.Equal(t, 1, code)
+}
+
+func TestExecute_DriftCommandErrors(t *testing.T) {
+	// run from temp dir without module root triggers read failure
+	outside := t.TempDir()
+	orig, _ := os.Getwd()
+	require.NoError(t, os.Chdir(outside))
+	defer func() { _ = os.Chdir(orig) }()
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"drift"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+
+	// corrupt golden file triggers detect drift failure
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/tmp\n\ngo 1.27.4\n"), 0644))
+	goldenDir := filepath.Join(root, "test", "golden")
+	require.NoError(t, os.MkdirAll(goldenDir, 0750))
+	require.NoError(t, os.WriteFile(filepath.Join(goldenDir, "gke_upstream_diff.golden.json"), []byte("{bad"), 0644))
+	require.NoError(t, os.Chdir(root))
+	defer func() { _ = os.Chdir(orig) }()
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"drift"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+}
+
+func TestExecute_HookFailure(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(`variable "a" { type = string }`), 0644))
+	other := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(other, "main.tf"), []byte(`variable "a" { type = string }`), 0644))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir, "--new", other, "--hook", "false"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+}
+
+func TestExecute_SARIFOutputWriteError(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "a" { type = string }`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`variable "a" { type = string }`), 0644))
+
+	outDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir1, "--new", dir2, "--format", "sarif", "--output", outDir}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+}
+
+func TestExecute_OutputWriteError(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "a" { type = string }`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`variable "a" { type = string }`), 0644))
+
+	outDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir1, "--new", dir2, "--output", outDir}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+}
+
+func TestExecute_ModuleGraphWriteError(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "a" { type = string }`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`variable "a" { type = string }`), 0644))
+
+	// module-graph path is a directory -> write fails
+	badDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir1, "--new", dir2, "--module-graph", badDir}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+}
+
+func TestExecute_WrapperModuleGraph(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "a" { type = string }`), 0644))
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "m" { source = "`+upstreamDir+`" }
+`), 0644))
+
+	graphPath := filepath.Join(t.TempDir(), "w.dot")
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--module-graph", graphPath}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	_, err := os.Stat(graphPath)
+	assert.NoError(t, err)
+
+	// write error
+	badDir := t.TempDir()
+	code = Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--module-graph", badDir}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+}
+
+func TestExecute_HookAndModuleGraph(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "a" { type = string }`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`variable "a" { type = string }`), 0644))
+
+	graphPath := filepath.Join(t.TempDir(), "graph.dot")
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir1, "--new", dir2, "--module-graph", graphPath, "--hook", "true"}, &stdout, &stderr)
+	// hook "true" command should succeed
+	assert.Equal(t, 0, code, stderr.String())
+	_, err := os.Stat(graphPath)
+	assert.NoError(t, err)
 }
 
 // TestExecute_InvalidFormatIsRejected covers roadmap #42. An unrecognised --format previously

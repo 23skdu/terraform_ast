@@ -110,7 +110,7 @@ MODULE_SPECS = [
         "source": "https://github.com/terraform-aws-modules/terraform-aws-eks.git",
         "curated_paths": [
             {"from": "v19.0.0", "to": "v19.0.4", "type": "PATCH_SERIES", "expect_all_safe": True},
-            {"from": "v19.0.0", "to": "v19.2.0", "type": "MINOR_BUMP",   "expect_all_safe": True},
+            {"from": "v19.0.0", "to": "v19.2.0", "type": "MINOR_BUMP",   "expect_all_safe": False},
             {"from": "v18.31.2", "to": "v19.0.0", "type": "MAJOR_JUMP",  "expect_all_safe": False},
             {"from": "v19.21.0", "to": "v20.0.0", "type": "MAJOR_JUMP",  "expect_all_safe": False},
         ],
@@ -128,7 +128,7 @@ MODULE_SPECS = [
             {"from": "v30.0.0", "to": "v30.1.0", "type": "MINOR_BUMP",   "expect_all_safe": True},
             {"from": "v32.0.0", "to": "v32.0.2", "type": "PATCH_SERIES", "expect_all_safe": True},
             {"from": "v29.0.0", "to": "v30.0.0", "type": "MAJOR_JUMP",  "expect_all_safe": False},
-            {"from": "v30.0.0", "to": "v31.0.0", "type": "MAJOR_JUMP",  "expect_all_safe": True},
+            {"from": "v30.0.0", "to": "v31.0.0", "type": "MAJOR_JUMP",  "expect_all_safe": False},
         ],
         "fallback_pool": [
             "v28.0.0", "v29.0.0",

@@ -14,13 +14,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/23skdu/terraform_ast/internal/goldentest"
 	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/23skdu/terraform_ast/pkg/blastradius"
 	"github.com/23skdu/terraform_ast/pkg/codemod"
 	"github.com/23skdu/terraform_ast/pkg/diff"
+	"github.com/23skdu/terraform_ast/pkg/encryption"
 	"github.com/23skdu/terraform_ast/pkg/eval"
 	"github.com/23skdu/terraform_ast/pkg/gitops"
+	"github.com/23skdu/terraform_ast/pkg/hooks"
 	"github.com/23skdu/terraform_ast/pkg/lsp"
+	"github.com/23skdu/terraform_ast/pkg/modulegraph"
 	"github.com/23skdu/terraform_ast/pkg/planner"
 	"github.com/23skdu/terraform_ast/pkg/policy"
 	"github.com/23skdu/terraform_ast/pkg/recreation"
@@ -29,9 +33,11 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/semverutil"
 	"github.com/23skdu/terraform_ast/pkg/visualize"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
+	"github.com/go-git/go-git/v5"
 )
 
 var (
+	moduleGraphPath   string
 	version           = "0.9.0"
 	osExit            = os.Exit
 	mkdirTemp         = os.MkdirTemp
@@ -63,9 +69,24 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if len(args) > 0 && (args[0] == "lsp" || args[0] == "daemon") {
-		_ = lsp.RunDaemonStreams(os.Stdin, stdout)
-		return 0
+	if len(args) > 0 {
+		switch args[0] {
+		case "lsp", "daemon":
+			if stdout == os.Stdout {
+				_ = lsp.RunDaemon()
+				return 0
+			}
+			_ = lsp.RunDaemonStreams(os.Stdin, stdout)
+			return 0
+		case "encrypt":
+			return runEncryptCommand(args[1:], stdout, stderr)
+		case "decrypt":
+			return runDecryptCommand(args[1:], stdout, stderr)
+		case "drift":
+			return runDriftCommand(args[1:], stdout, stderr)
+		case "list-versions":
+			return runListVersionsCommand(args[1:], stdout, stderr)
+		}
 	}
 
 	fs := flag.NewFlagSet("tfastdiff", flag.ContinueOnError)
@@ -100,6 +121,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		svgBefore          string
 		svgAfter           string
 		svgTransition      string
+		hookCommands       []string
 	)
 
 	fs.BoolVar(&showVersion, "version", false, "Print version and exit")
@@ -146,6 +168,11 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&svgBefore, "svg-before", "", "Write an SVG rendering of the before state graph to this path")
 	fs.StringVar(&svgAfter, "svg-after", "", "Write an SVG rendering of the after state graph to this path")
 	fs.StringVar(&svgTransition, "svg-transition", "", "Write an SVG rendering of the before/after transition graph to this path")
+	fs.StringVar(&moduleGraphPath, "module-graph", "", "Write a Graphviz DOT module dependency graph to this path")
+	fs.Func("hook", "Shell command to run as a pre-analysis hook (repeatable)", func(value string) error {
+		hookCommands = append(hookCommands, value)
+		return nil
+	})
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -260,6 +287,17 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error loading Rego policy %s: %v\n", regoPolicyPath, err)
 			return 2
+		}
+	}
+
+	if len(hookCommands) > 0 {
+		hookList := make([]hooks.Hook, 0, len(hookCommands))
+		for _, c := range hookCommands {
+			hookList = append(hookList, hooks.Hook{Name: c, Command: "sh", Args: []string{"-c", c}})
+		}
+		if err := hooks.RunAll(hookList, stdout, stderr); err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error running hook: %v\n", err)
+			return 1
 		}
 	}
 
@@ -458,6 +496,14 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 	if pinnedErr != nil {
 		_, _ = fmt.Fprintf(stderr, "Error inspecting pinned upstream module %s: %v\n", pinnedDir, pinnedErr)
 		return 1
+	}
+
+	if moduleGraphPath != "" && targetInfo != nil {
+		graphData := modulegraph.RenderDOT(modulegraph.Build(targetInfo))
+		if err := os.WriteFile(filepath.Clean(moduleGraphPath), []byte(graphData), 0644); err != nil { // #nosec G306 -- module graph report intended readable
+			_, _ = fmt.Fprintf(stderr, "Error writing module graph: %v\n", err)
+			return 1
+		}
 	}
 
 	if checkRecreation && dynamicRegistry == nil {
@@ -665,7 +711,13 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 	}
 	if blastRadiusDir != "" {
 		vlog("Scanning downstream consumers in %s", blastRadiusDir)
-		blastReport, err := blastradius.ScanDirectoryWithTaint(blastRadiusDir, wrapperPath, wInfo, res, dynamicRegistry, taintReport)
+		var blastReport *blastradius.BlastRadiusReport
+		var err error
+		if taintReport == nil {
+			blastReport, err = blastradius.ScanDirectoryWithRegistry(blastRadiusDir, wrapperPath, wInfo, res, dynamicRegistry)
+		} else {
+			blastReport, err = blastradius.ScanDirectoryWithTaint(blastRadiusDir, wrapperPath, wInfo, res, dynamicRegistry, taintReport)
+		}
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error scanning blast radius: %v\n", err)
 			return 1
@@ -719,6 +771,7 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		}
 	}
 	vlog("Comparing modules %s and %s", oldPath, newPath)
+	vlog("cached repository dirs: %v", gitops.CachedRepositoryDirs())
 	if oldPath == "" || newPath == "" {
 		_, _ = fmt.Fprintln(stderr, "Error: Both --old and --new must be specified for module comparison")
 		return 2
@@ -906,6 +959,14 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		}
 	}
 
+	if moduleGraphPath != "" && newInfo != nil {
+		graphData := modulegraph.RenderDOT(modulegraph.Build(newInfo))
+		if err := os.WriteFile(filepath.Clean(moduleGraphPath), []byte(graphData), 0644); err != nil { // #nosec G306 -- module graph report intended readable
+			_, _ = fmt.Fprintf(stderr, "Error writing module graph: %v\n", err)
+			return 1
+		}
+	}
+
 	if checkRecreation && dynamicRegistry == nil {
 		dynamicRegistry, _ = recreation.AutoDiscoverSchemas(newInfo, ast.GetPersistentCacheDir())
 	}
@@ -1019,11 +1080,35 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		}
 	}
 
-	outContent := renderDiffOutput(format, diffReport, findings)
-
-	if err := writeOutput(outputFile, outContent, stdout); err != nil {
-		_, _ = fmt.Fprintf(stderr, "Error writing output: %v\n", err)
-		return 1
+	if format == "sarif" {
+		outContent := renderDiffOutput(format, diffReport, findings)
+		if err := writeOutput(outputFile, outContent, stdout); err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error writing output: %v\n", err)
+			return 1
+		}
+	} else {
+		var w io.Writer = stdout
+		var outFile *os.File
+		if outputFile != "" {
+			f, err := os.OpenFile(filepath.Clean(outputFile), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644) // #nosec G302 -- report output intended readable
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "Error writing output: %v\n", err)
+				return 1
+			}
+			outFile = f
+			w = f
+		}
+		switch format {
+		case "text":
+			_ = report.RenderTextTo(w, diffReport, findings)
+		case "markdown":
+			_ = report.RenderMarkdownTo(w, diffReport, findings)
+		case "json":
+			_ = report.RenderJSONTo(w, diffReport, findings)
+		}
+		if outFile != nil {
+			_ = outFile.Close()
+		}
 	}
 
 	if (enforceExit1 && !diffReport.CanSafelyUpdate) || len(diffReport.PolicyViolations) > 0 {
@@ -1232,4 +1317,159 @@ func writeOutput(outputFile, content string, stdout io.Writer) error {
 	}
 	_, err := fmt.Fprint(stdout, content)
 	return err
+}
+
+func runEncryptCommand(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("encrypt", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var password, output string
+	fs.StringVar(&password, "password", "", "Password used to derive the encryption key")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if password == "" {
+		_, _ = fmt.Fprintln(stderr, "Error: --password is required")
+		return 2
+	}
+	if fs.NArg() < 1 {
+		_, _ = fmt.Fprintln(stderr, "Usage: tfastdiff encrypt --password <pw> <input> [output]")
+		return 2
+	}
+	input := fs.Arg(0)
+	if fs.NArg() > 1 {
+		output = fs.Arg(1)
+	}
+	data, err := os.ReadFile(filepath.Clean(input))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "Error reading input %s: %v\n", input, err)
+		return 1
+	}
+	blob, _ := encryption.Encrypt(data, password)
+	if output != "" {
+		if err := os.WriteFile(filepath.Clean(output), blob, 0600); err != nil { // #nosec G703 -- output path is operator-supplied
+			_, _ = fmt.Fprintf(stderr, "Error writing output %s: %v\n", output, err)
+			return 1
+		}
+		return 0
+	}
+	if _, err := stdout.Write(blob); err != nil {
+		_, _ = fmt.Fprintf(stderr, "Error writing output: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func runDecryptCommand(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("decrypt", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var password, output string
+	fs.StringVar(&password, "password", "", "Password used to derive the encryption key")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if password == "" {
+		_, _ = fmt.Fprintln(stderr, "Error: --password is required")
+		return 2
+	}
+	if fs.NArg() < 1 {
+		_, _ = fmt.Fprintln(stderr, "Usage: tfastdiff decrypt --password <pw> <input> [output]")
+		return 2
+	}
+	input := fs.Arg(0)
+	if fs.NArg() > 1 {
+		output = fs.Arg(1)
+	}
+	data, err := os.ReadFile(filepath.Clean(input))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "Error reading input %s: %v\n", input, err)
+		return 1
+	}
+	plain, err := encryption.Decrypt(data, password)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "Error decrypting: %v\n", err)
+		return 1
+	}
+	if output != "" {
+		if err := os.WriteFile(filepath.Clean(output), plain, 0600); err != nil { // #nosec G703 -- output path is operator-supplied
+			_, _ = fmt.Fprintf(stderr, "Error writing output %s: %v\n", output, err)
+			return 1
+		}
+		return 0
+	}
+	if _, err := stdout.Write(plain); err != nil {
+		_, _ = fmt.Fprintf(stderr, "Error writing output: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func runDriftCommand(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("drift", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	var reports []*goldentest.DriftReport
+	for _, spec := range goldentest.MultiCloudCatalog() {
+		goldenPath := spec.GoldenBaselinePath
+		if !filepath.IsAbs(goldenPath) {
+			if root := repoRoot(); root != "" {
+				goldenPath = filepath.Join(root, goldenPath)
+			}
+		}
+		goldenBytes, err := os.ReadFile(filepath.Clean(goldenPath))
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error reading golden baseline %s: %v\n", goldenPath, err)
+			return 1
+		}
+		report, err := goldentest.DetectDrift(spec, goldenBytes, goldenPath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error detecting drift for %s: %v\n", spec.ID, err)
+			return 1
+		}
+		reports = append(reports, report)
+	}
+	payload, _ := goldentest.GenerateDriftIssuePayload(reports)
+	_, _ = fmt.Fprint(stdout, payload)
+	return 0
+}
+
+func runListVersionsCommand(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("list-versions", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() < 1 {
+		_, _ = fmt.Fprintln(stderr, "Usage: tfastdiff list-versions <git-repo-dir>")
+		return 2
+	}
+	repo, err := git.PlainOpen(fs.Arg(0))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "Error opening repository %s: %v\n", fs.Arg(0), err)
+		return 1
+	}
+	tags, _ := gitops.ListSemverTags(repo)
+	for _, tag := range tags {
+		_, _ = fmt.Fprintln(stdout, tag)
+	}
+	return 0
+}
+
+func repoRoot() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
 }

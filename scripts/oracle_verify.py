@@ -690,7 +690,7 @@ class VerificationOracle:
                 "source": "https://github.com/terraform-aws-modules/terraform-aws-eks.git",
                 "curated_paths": [
                     {"from": "v19.0.0", "to": "v19.0.4", "type": "PATCH_SERIES", "expect_all_safe": True},
-                    {"from": "v19.0.0", "to": "v19.2.0", "type": "MINOR_BUMP",   "expect_all_safe": True},
+                    {"from": "v19.0.0", "to": "v19.2.0", "type": "MINOR_BUMP",   "expect_all_safe": False},
                     {"from": "v18.31.2", "to": "v19.0.0", "type": "MAJOR_JUMP",  "expect_all_safe": False},
                     {"from": "v19.21.0", "to": "v20.0.0", "type": "MAJOR_JUMP",  "expect_all_safe": False},
                 ],

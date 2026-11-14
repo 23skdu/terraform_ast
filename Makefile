@@ -190,7 +190,7 @@ staticcheck:
 
 deadcode:
 	@echo "Running deadcode reachability analysis..."
-	$(DEADCODE) ./cmd/... ./pkg/... ./internal/...
+	$(DEADCODE) -test ./cmd/... ./pkg/... ./internal/...
 
 fmt:
 	@echo "Formatting Go source files..."
