@@ -16,6 +16,23 @@ updates:
       prefix: "build(deps)"
       include: "scope"
 
+  # Maintain Python dependencies (standard library is used at runtime;
+  # this keeps any future requirements files up to date)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "build(deps)"
+      include: "scope"
+
   # Maintain GitHub Actions workflow dependencies
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -30,20 +47,4 @@ updates:
       - "github-actions"
     commit-message:
       prefix: "ci(deps)"
-      include: "scope"
-
-  # Maintain Docker base image dependencies
-  - package-ecosystem: "docker"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "04:00"
-      timezone: "Etc/UTC"
-    open-pull-requests-limit: 5
-    labels:
-      - "dependencies"
-      - "docker"
-    commit-message:
-      prefix: "build(deps)"
       include: "scope"

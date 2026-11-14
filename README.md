@@ -1,7 +1,9 @@
 # terraform_ast (tfastdiff)
 
+[![CI](https://github.com/23skdu/terraform_ast/actions/workflows/ci.yml/badge.svg)](https://github.com/23skdu/terraform_ast/actions/workflows/ci.yml)
 [![Go Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](#testing--quality-assurance)
 [![Terratest](https://img.shields.io/badge/terratest-validated-blue.svg)](test/terratest/)
+[![pkg.go.dev](https://pkg.go.dev/badge/github.com/23skdu/terraform_ast.svg)](https://pkg.go.dev/github.com/23skdu/terraform_ast)
 
 `terraform_ast` (`tfastdiff`) is a Go CLI and library for comparing the Abstract Syntax Tree (AST) and top-level configuration metadata of Terraform modules. It specifically targets enterprise wrappers (such as **Google GKE** and **AWS EKS** terraform wrappers) to determine whether a wrapper can be safely updated and pinned to a new upstream version without breaking downstream consumers.
 
@@ -48,6 +50,15 @@ cd terraform_ast
 go build -o bin/tfastdiff cmd/tfastdiff/main.go
 ```
 
+### Library
+Import individual packages from the module path:
+
+```bash
+go get github.com/23skdu/terraform_ast
+```
+
+Package documentation is available on [pkg.go.dev](https://pkg.go.dev/github.com/23skdu/terraform_ast).
+
 ### 2. Running via Docker (DevSecOps Hardened)
 
 A hardened, minimal distroless image (~5.7MB, non-root, read-only rootfs compatible) is provided:
@@ -93,34 +104,10 @@ Directly compare two versions of an upstream module:
   --format text
 ```
 
-### 5. GitHub Action and Pre-Commit
+### 5. Pre-Commit
 
-Use the Docker-based GitHub Action with explicit module inputs:
-
-```yaml
-- uses: 23skdu/terraform_ast@main
-  with:
-    wrapper_path: ./modules/gke-wrapper
-    upstream: terraform-google-modules/kubernetes-engine/google
-    new_version: v30.0.0
-    format: sarif
-    exit_code: true
-```
-
-For a reusable pull-request report workflow, call `.github/workflows/tfastdiff-audit.yml` from your repository workflow:
-
-```yaml
-jobs:
-  terraform-compatibility:
-    uses: 23skdu/terraform_ast/.github/workflows/tfastdiff-audit.yml@main
-    with:
-      wrapper_path: ./modules/gke-wrapper
-      upstream: terraform-google-modules/kubernetes-engine/google
-      new_version: v30.0.0
-      blast_radius: ./environments
-```
-
-The reusable workflow uploads SARIF and upserts one summary comment on pull requests. Its caller must allow `pull-requests: write` and `security-events: write`.
+The published container image can be used directly in CI to run audits; see the
+[Docker quickstart](#2-running-via-docker-devsecops-hardened) above.
 
 For local checks, add the repository hook to `.pre-commit-config.yaml` after installing `tfastdiff`:
 

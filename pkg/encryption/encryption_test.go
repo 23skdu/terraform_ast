@@ -65,3 +65,9 @@ func TestDecryptTampered(t *testing.T) {
 		t.Fatalf("expected ErrDecryptFailed, got %v", err)
 	}
 }
+
+func TestDecryptTooShort(t *testing.T) {
+	if _, err := Decrypt([]byte("short"), "secret"); err != ErrTooShort {
+		t.Fatalf("expected ErrTooShort, got %v", err)
+	}
+}

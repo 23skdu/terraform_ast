@@ -91,52 +91,32 @@ func TestValidateDockerfileAndContainerPolicies_Unit(t *testing.T) {
 }
 
 func TestDeveloperWorkflowManifests(t *testing.T) {
-	action, err := os.ReadFile("../../action.yml")
-	require.NoError(t, err)
-	actionContent := string(action)
-	assert.Contains(t, actionContent, "wrapper_path:")
-	assert.Contains(t, actionContent, "upstream:")
-	assert.Contains(t, actionContent, "new_version:")
-	assert.Contains(t, actionContent, "--wrapper")
-	assert.Contains(t, actionContent, "--exit-code=${{ inputs.exit_code }}")
-	assert.NotContains(t, actionContent, "inputs.target_dir")
-
 	hooks, err := os.ReadFile("../../.pre-commit-hooks.yaml")
 	require.NoError(t, err)
 	assert.Contains(t, string(hooks), "id: tfastdiff")
 	assert.Contains(t, string(hooks), "entry: tfastdiff")
 	assert.Contains(t, string(hooks), "pass_filenames: false")
 
-	workflow, err := os.ReadFile("../../.github/workflows/tfastdiff-audit.yml")
+	ciWorkflow, err := os.ReadFile("../../.github/workflows/ci.yml")
 	require.NoError(t, err)
-	workflowContent := string(workflow)
-	assert.Contains(t, workflowContent, "workflow_call:")
-	assert.Contains(t, workflowContent, "tfastdiff-compatibility-report")
-	assert.Contains(t, workflowContent, "updateComment")
-	assert.Contains(t, workflowContent, "createComment")
+	ciContent := string(ciWorkflow)
+	assert.Contains(t, ciContent, "golangci-lint-action")
+	assert.Contains(t, ciContent, "scripts/verify.sh")
+	assert.Contains(t, ciContent, "build-push-action")
+	assert.Contains(t, ciContent, "ghcr.io")
+	assert.Contains(t, ciContent, "docker/setup-buildx-action")
 
 	// Assert the actions are referenced without pinning a major version, which Dependabot bumps
 	// and which would otherwise fail this test on every dependency update.
-	assert.Regexp(t, `github/codeql-action/upload-sarif@v[0-9]+`, workflowContent)
-	assert.Regexp(t, `actions/checkout@v[0-9]+`, workflowContent)
-	assert.Regexp(t, `actions/setup-go@v[0-9]+`, workflowContent)
-	assert.Regexp(t, `actions/github-script@v[0-9]+`, workflowContent)
+	assert.Regexp(t, `actions/checkout@v[0-9]+`, ciContent)
+	assert.Regexp(t, `actions/setup-go@v[0-9]+`, ciContent)
 
-	// The workflow must upload SARIF and require the permissions to do so.
-	assert.Contains(t, workflowContent, "sarif_file:")
-	assert.Contains(t, workflowContent, "security-events: write")
-
-	// SLSA Level 3, Cosign, and Syft DevSecOps release workflow verification
-	slsaWorkflow, err := os.ReadFile("../../.github/workflows/slsa-release.yml")
+	dependabot, err := os.ReadFile("../../.github/dependabot.yml")
 	require.NoError(t, err)
-	slsaContent := string(slsaWorkflow)
-	assert.Contains(t, slsaContent, "generator_generic_slsa3.yml")
-	assert.Contains(t, slsaContent, "cosign sign-blob")
-	assert.Contains(t, slsaContent, "format: 'cyclonedx-json'")
-	assert.Contains(t, slsaContent, "format: 'spdx-json'")
-	assert.Contains(t, slsaContent, "trivy-action")
-	assert.Contains(t, slsaContent, "build-push-action")
-	assert.Contains(t, slsaContent, "ghcr.io")
+	dependabotContent := string(dependabot)
+	assert.Contains(t, dependabotContent, `package-ecosystem: "gomod"`)
+	assert.Contains(t, dependabotContent, `package-ecosystem: "pip"`)
+	assert.Contains(t, dependabotContent, `package-ecosystem: "github-actions"`)
 }
 
 // TestDockerfile_BuildAndRuntimeSecurity builds the container and validates runtime security constraints.

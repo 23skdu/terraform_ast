@@ -20,8 +20,8 @@ Maintainers will respond within 48 hours to confirm receipt and coordinate remed
 
 ## Supply Chain Security
 
-`terraform_ast` releases include:
-- Hermetic SLSA Level 3 build provenance.
-- Sigstore Cosign signatures.
-- CycloneDX and SPDX Software Bill of Materials (SBOMs).
-- Trivy vulnerability scans for container images.
+The project's CI workflow runs formatting, vetting, linting, testing, coverage,
+race, and fuzz gates, then builds the multi-stage distroless container image.
+Dependency updates for Go, Python, and GitHub Actions are managed by Dependabot.
+The container image uses a multi-stage build, verifies module checksums, and runs
+as a non-root distroless user (UID 65532).

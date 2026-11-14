@@ -25,7 +25,7 @@ VENV_PYTHON := $(VENV)/bin/python3
 PIP := $(VENV)/bin/pip
 IMAGE_TAG ?= latest
 
-.PHONY: all help ci release build build-release build-debug build-race clean \
+.PHONY: all help ci release build build-release build-debug build-race clean clean-docker \
 	deps deps-upgrade lint lint-fast lint-fix vet staticcheck deadcode fmt fmt-check \
 	security secure sec-gosec sec-vulncheck sec-audit \
 	perf bench bench-check memprofile cpuprofile test test-short test-all race test-coverage coverage-gate coverage-html test-fuzz \
@@ -148,10 +148,19 @@ deps-upgrade:
 	$(GO) get -u ./...
 	$(GO) mod tidy
 
-clean:
+clean: clean-docker
 	@echo "Cleaning build and test artifacts..."
-	rm -rf bin coverage *.out *.prof *.test cover.html $(VENV) __pycache__ *.pyc oracle_report.json coverage.html mem.out cpu.out
-	$(GO) clean -testcache
+	rm -rf bin coverage *.out *.prof *.test cover.html $(VENV) __pycache__ *.pyc oracle_report.json coverage.html mem.out cpu.out perf.out bench.out bench-check.out memprofile.out cpuprofile.out
+	$(GO) clean -testcache -cache
+	@echo "✓ Build, test, venv, and cache artifacts cleaned."
+
+clean-docker:
+	@echo "Removing tagged tfastdiff Docker images and build cache..."
+	@if command -v $(DOCKER) >/dev/null 2>&1; then \
+		$(DOCKER) images --format '{{.Repository}}:{{.Tag}}' | grep '^tfastdiff:' | xargs -r $(DOCKER) rmi -f 2>/dev/null || true; \
+		$(DOCKER) builder prune -f >/dev/null 2>&1 || true; \
+	fi
+	@echo "✓ Tagged Docker images and build cache cleaned."
 
 # ==============================================================================
 # Static Analysis & Linters

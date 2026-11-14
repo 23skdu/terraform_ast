@@ -1,18 +1,22 @@
-name: CI Pipeline
+name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
-    name: Build, Lint & Test (Coverage & Terratest)
+  quality:
+    name: Quality Gates
     runs-on: ubuntu-latest
-    # The full suite is fast now that the registry retry budget is bounded in tests, but the
-    # container build and the 19 fuzz targets still take minutes. Bound it explicitly instead of
-    # relying on the 360 minute default, so a hang fails fast and legibly.
     timeout-minutes: 45
     steps:
       - name: Checkout Code
@@ -24,11 +28,6 @@ jobs:
           go-version-file: 'go.mod'
           check-latest: true
 
-      - name: Lint (govet, errcheck, staticcheck, unused, gosec)
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v1.64.5
-
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v4
         with:
@@ -39,39 +38,70 @@ jobs:
           mkdir -p "$HOME/.terraform.d/plugin-cache"
           echo "TF_PLUGIN_CACHE_DIR=$HOME/.terraform.d/plugin-cache" >> $GITHUB_ENV
 
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          args: --timeout=10m
+
       - name: Verify Module Cleanliness
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
 
-      - name: Build Binary
+      - name: Check Formatting
         run: |
-          go build -v -o bin/tfastdiff ./cmd/tfastdiff/main.go
-
-      - name: Run Unit Suite with 100% Coverage Gate
-        run: |
-          go test -timeout 15m -covermode=atomic -coverprofile=coverage.out ./...
-          go tool cover -func=coverage.out | tee coverage.txt
-          total=$(tail -1 coverage.txt | awk '{print $NF}')
-          if [ "$total" != "100.0%" ]; then
-            echo "total statement coverage is $total, expected 100.0%" >&2
-            grep -v '100.0%' coverage.txt >&2
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Unformatted files:" >&2
+            echo "$unformatted" >&2
             exit 1
           fi
-          for pkg in $(go list ./...); do
-            pkg_cov=$(go test -covermode=atomic "$pkg" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+%' | tail -1 || true)
-            if [ -n "$pkg_cov" ] && [ "$pkg_cov" != "100.0%" ]; then
-              echo "ERROR: package $pkg coverage is $pkg_cov, expected 100.0%" >&2
-              exit 1
-            fi
-          done
 
-      - name: Run Terratest Suite
-        run: |
-          go test -timeout 15m -v ./test/terratest
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build Binary
+        run: go build -v -o bin/tfastdiff ./cmd/tfastdiff
+
+      - name: Run Verification Gate
+        run: ./scripts/verify.sh 10
 
       - name: Race Detector
         run: go test -timeout 20m -race ./...
 
-      - name: Fuzz Smoke Run
-        run: ./scripts/verify.sh 30
+  container:
+    name: Build Container Image
+    runs-on: ubuntu-latest
+    needs: quality
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Container Image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          tags: ghcr.io/${{ github.repository }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

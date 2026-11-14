@@ -84,10 +84,9 @@ flowchart LR
 - **CLI Integration**: `--svg-before`, `--svg-after`, and `--svg-transition` write the requested artifacts with least-privilege `0600` permissions.
 - **Accessibility**: Embedded `<title>` and accessible labels; finite dimensions default to 1200x800 and grow with the address count.
 
-### 10. Enterprise Supply Chain Security & SLSA Level 3 (`.github/workflows`)
-- **Hermetic SLSA Level 3 Provenance**: Automated cryptographic build attestations via GitHub Actions builders.
-- **Sigstore Cosign Keyless Signing**: Cryptographically signs release binaries and container images.
-- **Syft SBOM**: Generates both CycloneDX and SPDX Software Bill of Materials at build time.
+### 10. CI Quality Gates & Container Build (`.github`)
+- **CI Quality Gates**: Formatting, `go vet`, `golangci-lint`, 100% statement coverage, race detection, fuzz smoke runs, and Terratest all run in CI.
+- **Container Image Build**: The multi-stage distroless image is built and published by CI.
 - **Hardened Distroless Containers**: Strict non-root UID `65532:65532`, read-only rootfs (`--read-only`), and zero critical/high CVEs.
 
 ---
