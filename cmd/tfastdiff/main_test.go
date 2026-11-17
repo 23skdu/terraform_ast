@@ -2131,6 +2131,144 @@ func TestExecute_DriftStateMode(t *testing.T) {
 	assert.Contains(t, stderr.String(), "read snapshot")
 }
 
+func TestExecute_TopologicalOrderWriteError(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+
+	badDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir1, "--new", dir2, "--topological-order", badDir}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+}
+
+func TestExecute_TopologicalOrderStdout(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir1, "--new", dir2, "--topological-order", "-"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+}
+
+func TestExecute_WrapperTopologicalOrder(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "m" { source = "`+upstreamDir+`" }
+`), 0600))
+
+	orderPath := filepath.Join(t.TempDir(), "order.txt")
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--topological-order", orderPath}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	_, err := os.Stat(orderPath)
+	assert.NoError(t, err)
+
+	badDir := t.TempDir()
+	code = Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--topological-order", badDir}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+}
+
+func TestExecute_WrapperTopologicalOrderStdout(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`
+module "vpc" {
+  source = "x"
+}
+module "gke" {
+  source  = "y"
+  network = module.vpc.id
+}
+`), 0600))
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "m" { source = "`+upstreamDir+`" }
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--topological-order", "-"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "module.")
+}
+
+func TestExecute_TopologicalOrderCycle(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`
+module "a" {
+  source = "x"
+  x      = module.b.x
+}
+module "b" {
+  source = "y"
+  x      = module.a.x
+}
+`), 0600))
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "m" { source = "`+upstreamDir+`" }
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--topological-order", filepath.Join(t.TempDir(), "order.txt")}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "cycle")
+}
+func TestExecute_CompareTopologicalOrder(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`
+module "vpc" {
+  source = "x"
+}
+module "gke" {
+  source  = "y"
+  network = module.vpc.id
+}
+`), 0600))
+
+	orderPath := filepath.Join(t.TempDir(), "order.txt")
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir1, "--new", dir2, "--topological-order", orderPath}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	data, err := os.ReadFile(orderPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "module.")
+
+	// stdout path
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", dir1, "--new", dir2, "--topological-order", "-"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "module.")
+}
+
+func TestExecute_CompareTopologicalOrderCycle(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`
+module "a" {
+  source = "x"
+  x      = module.b.x
+}
+module "b" {
+  source = "y"
+  x      = module.a.x
+}
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir1, "--new", dir2, "--topological-order", filepath.Join(t.TempDir(), "order.txt")}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "cycle")
+}
+
 func TestExecute_ListVersionsCommand(t *testing.T) {
 	repoDir := createTestTFRepo(t, "v1.0.0", `variable "a" { type = string }`)
 

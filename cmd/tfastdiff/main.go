@@ -39,11 +39,12 @@ import (
 )
 
 var (
-	moduleGraphPath   string
-	version           = "0.9.0"
-	osExit            = os.Exit
-	mkdirTemp         = os.MkdirTemp
-	newRegistryClient = func() *registry.Client {
+	moduleGraphPath      string
+	topologicalOrderPath string
+	version              = "0.9.0"
+	osExit               = os.Exit
+	mkdirTemp            = os.MkdirTemp
+	newRegistryClient    = func() *registry.Client {
 		return registry.NewClient(nil)
 	}
 	analyzeVariableTaint   = eval.AnalyzeVariableTaint
@@ -173,6 +174,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&svgAfter, "svg-after", "", "Write an SVG rendering of the after state graph to this path")
 	fs.StringVar(&svgTransition, "svg-transition", "", "Write an SVG rendering of the before/after transition graph to this path")
 	fs.StringVar(&moduleGraphPath, "module-graph", "", "Write a Graphviz DOT module dependency graph to this path")
+	fs.StringVar(&topologicalOrderPath, "topological-order", "", "Write a topological ordering of module dependencies to this path")
 	fs.Func("hook", "Shell command to run as a pre-analysis hook (repeatable)", func(value string) error {
 		hookCommands = append(hookCommands, value)
 		return nil
@@ -516,6 +518,27 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		if err := os.WriteFile(filepath.Clean(moduleGraphPath), []byte(graphData), 0644); err != nil { // #nosec G306 -- module graph report intended readable
 			_, _ = fmt.Fprintf(stderr, "Error writing module graph: %v\n", err)
 			return 1
+		}
+	}
+
+	if topologicalOrderPath != "" && targetInfo != nil {
+		order, err := modulegraph.TopologicalOrder(modulegraph.Build(targetInfo))
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error computing topological order: %v\n", err)
+			return 1
+		}
+		var content strings.Builder
+		for _, node := range order {
+			content.WriteString(node)
+			content.WriteByte('\n')
+		}
+		if topologicalOrderPath == "-" {
+			_, _ = fmt.Fprint(stdout, content.String())
+		} else {
+			if err := os.WriteFile(filepath.Clean(topologicalOrderPath), []byte(content.String()), 0644); err != nil { // #nosec G306 -- report intended readable
+				_, _ = fmt.Fprintf(stderr, "Error writing topological order: %v\n", err)
+				return 1
+			}
 		}
 	}
 
@@ -975,6 +998,27 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		if err := os.WriteFile(filepath.Clean(moduleGraphPath), []byte(graphData), 0644); err != nil { // #nosec G306 -- module graph report intended readable
 			_, _ = fmt.Fprintf(stderr, "Error writing module graph: %v\n", err)
 			return 1
+		}
+	}
+
+	if topologicalOrderPath != "" && newInfo != nil {
+		order, err := modulegraph.TopologicalOrder(modulegraph.Build(newInfo))
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error computing topological order: %v\n", err)
+			return 1
+		}
+		var content strings.Builder
+		for _, node := range order {
+			content.WriteString(node)
+			content.WriteByte('\n')
+		}
+		if topologicalOrderPath == "-" {
+			_, _ = fmt.Fprint(stdout, content.String())
+		} else {
+			if err := os.WriteFile(filepath.Clean(topologicalOrderPath), []byte(content.String()), 0644); err != nil { // #nosec G306 -- report intended readable
+				_, _ = fmt.Fprintf(stderr, "Error writing topological order: %v\n", err)
+				return 1
+			}
 		}
 	}
 

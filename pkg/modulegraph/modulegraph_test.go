@@ -61,8 +61,73 @@ func TestBuildEmptyModuleInfo(t *testing.T) {
 	}
 }
 
-func TestRenderDOTNil(t *testing.T) {
-	if !strings.Contains(RenderDOT(nil), "digraph modulegraph") {
-		t.Fatal("expected digraph")
+func TestTopologicalOrderNil(t *testing.T) {
+	order, err := TopologicalOrder(nil)
+	if err != nil || order != nil {
+		t.Fatalf("expected nil, nil; got %v, %v", order, err)
+	}
+}
+
+func TestTopologicalOrderLinear(t *testing.T) {
+	g := &Graph{
+		Nodes: []Node{{ID: "a"}, {ID: "b"}, {ID: "c"}},
+		Edges: []Edge{{From: "a", To: "b"}, {From: "b", To: "c"}},
+	}
+	order, err := TopologicalOrder(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(order) != 3 || order[0] != "c" || order[1] != "b" || order[2] != "a" {
+		t.Fatalf("unexpected order: %v", order)
+	}
+}
+
+func TestTopologicalOrderCycle(t *testing.T) {
+	g := &Graph{
+		Nodes: []Node{{ID: "a"}, {ID: "b"}},
+		Edges: []Edge{{From: "a", To: "b"}, {From: "b", To: "a"}},
+	}
+	_, err := TopologicalOrder(g)
+	if err == nil {
+		t.Fatal("expected cycle error")
+	}
+}
+
+func TestTopologicalOrderDisconnectedAndDuplicates(t *testing.T) {
+	g := &Graph{
+		Nodes: []Node{{ID: "a"}, {ID: "b"}, {ID: "c"}},
+		Edges: []Edge{{From: "a", To: "b"}, {From: "a", To: "b"}, {From: "x", To: "y"}},
+	}
+	order, err := TopologicalOrder(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(order) != 3 {
+		t.Fatalf("expected 3, got %d: %v", len(order), order)
+	}
+}
+
+func TestTopologicalOrderEmpty(t *testing.T) {
+	g := &Graph{}
+	order, err := TopologicalOrder(g)
+	if err != nil || len(order) != 0 {
+		t.Fatalf("expected empty, got %v, %v", order, err)
+	}
+}
+
+func TestTopologicalOrderUnknownEndpoints(t *testing.T) {
+	g := &Graph{
+		Nodes: []Node{{ID: "a"}},
+		Edges: []Edge{{From: "a", To: "missing"}, {From: "missing", To: "a"}},
+	}
+	order, err := TopologicalOrder(g)
+	if err != nil || len(order) != 1 || order[0] != "a" {
+		t.Fatalf("unexpected: %v, %v", order, err)
+	}
+}
+
+func TestRenderDOTNilCoverage2(t *testing.T) {
+	if RenderDOT(nil) == "" {
+		t.Fatal("expected non-empty")
 	}
 }

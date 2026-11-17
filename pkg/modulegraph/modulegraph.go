@@ -30,6 +30,77 @@ type Graph struct {
 	Edges []Edge `json:"edges"`
 }
 
+// TopologicalOrder returns the node IDs of g in dependency order, with
+// dependencies emitted before the nodes that depend on them. It returns an
+// error when the graph contains a cycle.
+func TopologicalOrder(g *Graph) ([]string, error) {
+	if g == nil {
+		return nil, nil
+	}
+	nodes := make(map[string]struct{}, len(g.Nodes))
+	for _, n := range g.Nodes {
+		nodes[n.ID] = struct{}{}
+	}
+	// Edges run From -> To where From depends on To, so To must come first.
+	inDegree := make(map[string]int, len(nodes))
+	dependents := make(map[string][]string, len(nodes))
+	for node := range nodes {
+		inDegree[node] = 0
+	}
+	for _, e := range g.Edges {
+		if _, ok := nodes[e.From]; !ok {
+			continue
+		}
+		if _, ok := nodes[e.To]; !ok {
+			continue
+		}
+		// Avoid double counting duplicate edges.
+		if !contains(dependents[e.To], e.From) {
+			dependents[e.To] = append(dependents[e.To], e.From)
+			inDegree[e.From]++
+		}
+	}
+
+	// Kahn's algorithm with a sorted ready set for determinism.
+	var ready []string
+	for node := range nodes {
+		if inDegree[node] == 0 {
+			ready = append(ready, node)
+		}
+	}
+	sort.Strings(ready)
+
+	var order []string
+	for len(ready) > 0 {
+		current := ready[0]
+		ready = ready[1:]
+		order = append(order, current)
+		next := append([]string(nil), dependents[current]...)
+		sort.Strings(next)
+		for _, dep := range next {
+			inDegree[dep]--
+			if inDegree[dep] == 0 {
+				ready = append(ready, dep)
+				sort.Strings(ready)
+			}
+		}
+	}
+
+	if len(order) != len(nodes) {
+		return nil, fmt.Errorf("module graph contains a cycle")
+	}
+	return order, nil
+}
+
+func contains(items []string, target string) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
+}
+
 var moduleRefRe = regexp.MustCompile(`module\.([A-Za-z0-9_]+)`)
 
 // Build constructs a dependency graph from a ModuleInfo.
