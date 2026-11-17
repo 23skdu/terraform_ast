@@ -49,14 +49,25 @@ type RootModuleImpact struct {
 
 // BlastRadiusReport summarizes the blast radius across all scanned root modules.
 type BlastRadiusReport struct {
-	SearchDir             string             `json:"search_dir"`
-	WrapperIdentifier     string             `json:"wrapper_identifier"`
-	TotalCallSitesScanned int                `json:"total_call_sites_scanned"`
-	ImpactedRootModules   []RootModuleImpact `json:"impacted_root_modules"`
-	HighestRisk           string             `json:"highest_risk"`
-	RiskDistribution      map[string]int     `json:"risk_distribution,omitempty"`
-	CanSafelyUpdateAll    bool               `json:"can_safely_update_all"`
-	Summary               string             `json:"summary"`
+	SearchDir                string             `json:"search_dir"`
+	WrapperIdentifier        string             `json:"wrapper_identifier"`
+	TotalCallSitesDiscovered int                `json:"total_call_sites_discovered,omitempty"`
+	TotalCallSitesScanned    int                `json:"total_call_sites_scanned"`
+	Limit                    int                `json:"limit,omitempty"`
+	Truncated                bool               `json:"truncated,omitempty"`
+	ImpactedRootModules      []RootModuleImpact `json:"impacted_root_modules"`
+	HighestRisk              string             `json:"highest_risk"`
+	RiskDistribution         map[string]int     `json:"risk_distribution,omitempty"`
+	CanSafelyUpdateAll       bool               `json:"can_safely_update_all"`
+	Summary                  string             `json:"summary"`
+}
+
+// ScanOptions controls optional bounds on blast-radius evaluation so large monorepos can be
+// sampled without holding every consumer impact in memory at once.
+type ScanOptions struct {
+	// Limit caps how many matching call sites are evaluated. Zero means no limit; negative
+	// values are rejected.
+	Limit int
 }
 
 // ScanDirectory searches searchDir recursively for root modules calling wrapperIdentifier.
@@ -77,7 +88,20 @@ func ScanDirectoryWithRegistry(
 	wrapperAudit *wrapper.WrapperCompatibilityReport,
 	registry *recreation.DynamicHazardRegistry,
 ) (*BlastRadiusReport, error) {
-	return ScanDirectoryWithTaint(searchDir, wrapperIdentifier, wrapperMod, wrapperAudit, registry, nil)
+	return ScanDirectoryWithOptions(searchDir, wrapperIdentifier, wrapperMod, wrapperAudit, registry, ScanOptions{})
+}
+
+// ScanDirectoryWithOptions searches searchDir recursively with dynamic hazard registry support
+// and an optional evaluation limit.
+func ScanDirectoryWithOptions(
+	searchDir string,
+	wrapperIdentifier string,
+	wrapperMod *ast.ModuleInfo,
+	wrapperAudit *wrapper.WrapperCompatibilityReport,
+	registry *recreation.DynamicHazardRegistry,
+	opts ScanOptions,
+) (*BlastRadiusReport, error) {
+	return ScanDirectoryWithTaintAndOptions(searchDir, wrapperIdentifier, wrapperMod, wrapperAudit, registry, nil, opts)
 }
 
 // ScanDirectoryWithTaint searches searchDir recursively with dynamic hazard registry and cross-module taint reachability.
@@ -89,6 +113,25 @@ func ScanDirectoryWithTaint(
 	registry *recreation.DynamicHazardRegistry,
 	taintReport *eval.TaintReport,
 ) (*BlastRadiusReport, error) {
+	return ScanDirectoryWithTaintAndOptions(searchDir, wrapperIdentifier, wrapperMod, wrapperAudit, registry, taintReport, ScanOptions{})
+}
+
+// ScanDirectoryWithTaintAndOptions searches searchDir recursively with dynamic hazard registry,
+// cross-module taint reachability, and an optional evaluation limit. When the limit truncates the
+// matching call sites, the report is marked and CanSafelyUpdateAll stays false because the
+// unevaluated consumers are unknown rather than proven safe.
+func ScanDirectoryWithTaintAndOptions(
+	searchDir string,
+	wrapperIdentifier string,
+	wrapperMod *ast.ModuleInfo,
+	wrapperAudit *wrapper.WrapperCompatibilityReport,
+	registry *recreation.DynamicHazardRegistry,
+	taintReport *eval.TaintReport,
+	opts ScanOptions,
+) (*BlastRadiusReport, error) {
+	if opts.Limit < 0 {
+		return nil, fmt.Errorf("blast-radius limit must be non-negative, got %d", opts.Limit)
+	}
 	cleanSearchDir := filepath.Clean(searchDir)
 	fi, err := os.Stat(cleanSearchDir)
 	if err != nil {
@@ -107,14 +150,23 @@ func ScanDirectoryWithTaint(
 	if taintReport != nil {
 		callSites = FilterTaintedCallSites(callSites, taintReport)
 	}
+	totalMatched := len(callSites)
+	truncated := opts.Limit > 0 && totalMatched > opts.Limit
+	if truncated {
+		callSites = callSites[:opts.Limit]
+	}
 
 	report := &BlastRadiusReport{
-		SearchDir:             searchDir,
-		WrapperIdentifier:     wrapperIdentifier,
-		TotalCallSitesScanned: len(callSites),
-		CanSafelyUpdateAll:    true,
-		HighestRisk:           "NONE",
-		RiskDistribution:      make(map[string]int),
+		SearchDir:                searchDir,
+		WrapperIdentifier:        wrapperIdentifier,
+		TotalCallSitesDiscovered: totalDiscovered,
+		TotalCallSitesScanned:    len(callSites),
+		Limit:                    opts.Limit,
+		Truncated:                truncated,
+		// An unevaluated tail means "all safe" cannot be claimed.
+		CanSafelyUpdateAll: !truncated,
+		HighestRisk:        "NONE",
+		RiskDistribution:   make(map[string]int),
 	}
 
 	idx := buildAuditIndex(wrapperAudit)
@@ -148,6 +200,9 @@ func ScanDirectoryWithTaint(
 		} else {
 			report.Summary = fmt.Sprintf("Scanned %d downstream call sites; detected breaking impacts with highest risk %s", len(callSites), report.HighestRisk)
 		}
+	}
+	if truncated {
+		report.Summary += fmt.Sprintf("; evaluated first %d of %d matching call sites (limit %d)", len(callSites), totalMatched, opts.Limit)
 	}
 
 	return report, nil

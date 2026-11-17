@@ -67,6 +67,12 @@ jobs:
       - name: Run Verification Gate
         run: ./scripts/verify.sh 10
 
+      - name: Benchmark Regression Gate
+        run: make bench-gate
+
+      - name: Benchmark Race Smoke
+        run: make bench-race
+
       - name: Race Detector
         run: go test -timeout 20m -race ./...
 

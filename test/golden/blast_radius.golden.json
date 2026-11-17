@@ -1,6 +1,7 @@
 {
   "search_dir": "<WORKSPACE>/test/fixtures/downstream_consumer",
   "wrapper_identifier": "gke_wrapper",
+  "total_call_sites_discovered": 1,
   "total_call_sites_scanned": 1,
   "impacted_root_modules": [
     {

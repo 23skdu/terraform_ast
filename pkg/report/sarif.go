@@ -1,7 +1,9 @@
 package report
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 
 	"github.com/23skdu/terraform_ast/pkg/blastradius"
 	"github.com/23skdu/terraform_ast/pkg/diff"
@@ -187,9 +189,9 @@ func artifactOrDefault(artifact string) string {
 	return artifact
 }
 
-// renderSARIF builds the SARIF document, advertising exactly the rules that back an emitted
+// buildSARIFLog builds the SARIF document, advertising exactly the rules that back an emitted
 // result so that code-scanning consumers only see actionable rule metadata.
-func renderSARIF(results []SARIFResult) []byte {
+func buildSARIFLog(results []SARIFResult) SARIFLog {
 	emitted := make(map[string]struct{}, len(results))
 	for _, result := range results {
 		emitted[result.RuleID] = struct{}{}
@@ -201,7 +203,7 @@ func renderSARIF(results []SARIFResult) []byte {
 		}
 	}
 
-	return marshalJSON(SARIFLog{
+	return SARIFLog{
 		Schema:  sarifSchema,
 		Version: sarifVer,
 		Runs: []SARIFRun{
@@ -217,22 +219,38 @@ func renderSARIF(results []SARIFResult) []byte {
 				Results: results,
 			},
 		},
-	})
+	}
 }
 
-// emptySARIF renders a well-formed document with no runs, used when there is nothing to report.
-func emptySARIF() []byte {
-	return marshalJSON(SARIFLog{
+// emptySARIFLog renders a well-formed document with no runs, used when there is nothing to report.
+func emptySARIFLog() SARIFLog {
+	return SARIFLog{
 		Schema:  sarifSchema,
 		Version: sarifVer,
 		Runs:    []SARIFRun{},
-	})
+	}
+}
+
+// writeSARIF streams a SARIF document to w without building the encoded document in memory.
+func writeSARIF(w io.Writer, doc SARIFLog) error {
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(doc)
 }
 
 // RenderSARIF formats a DiffReport into standard OASIS SARIF v2.1.0 JSON.
 func RenderSARIF(r *diff.DiffReport, findings Findings) []byte {
+	return marshalJSON(buildSARIF(r, findings))
+}
+
+// RenderSARIFTo streams a DiffReport formatted as SARIF v2.1.0 JSON to w.
+func RenderSARIFTo(w io.Writer, r *diff.DiffReport, findings Findings) error {
+	return writeSARIF(w, buildSARIF(r, findings))
+}
+
+func buildSARIF(r *diff.DiffReport, findings Findings) SARIFLog {
 	if r == nil {
-		return emptySARIF()
+		return emptySARIFLog()
 	}
 
 	artifact := artifactOrDefault(r.ModuleName)
@@ -271,13 +289,22 @@ func RenderSARIF(r *diff.DiffReport, findings Findings) []byte {
 	results = appendPolicyResults(results, r.PolicyViolations, artifact)
 	results = appendGoldenPlanResults(results, findings.GoldenPlan)
 
-	return renderSARIF(results)
+	return buildSARIFLog(results)
 }
 
 // RenderWrapperSARIF formats a WrapperCompatibilityReport into standard SARIF v2.1.0 JSON.
 func RenderWrapperSARIF(res *wrapper.WrapperCompatibilityReport, findings Findings) []byte {
+	return marshalJSON(buildWrapperSARIF(res, findings))
+}
+
+// RenderWrapperSARIFTo streams a WrapperCompatibilityReport formatted as SARIF v2.1.0 JSON to w.
+func RenderWrapperSARIFTo(w io.Writer, res *wrapper.WrapperCompatibilityReport, findings Findings) error {
+	return writeSARIF(w, buildWrapperSARIF(res, findings))
+}
+
+func buildWrapperSARIF(res *wrapper.WrapperCompatibilityReport, findings Findings) SARIFLog {
 	if res == nil {
-		return emptySARIF()
+		return emptySARIFLog()
 	}
 
 	artifact := artifactOrDefault(res.WrapperPath)
@@ -308,7 +335,7 @@ func RenderWrapperSARIF(res *wrapper.WrapperCompatibilityReport, findings Findin
 		}
 	}
 
-	return renderSARIF(results)
+	return buildSARIFLog(results)
 }
 
 func sarifResult(ruleID, level, artifact, message string) SARIFResult {

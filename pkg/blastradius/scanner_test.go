@@ -1,6 +1,7 @@
 package blastradius
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1425,4 +1426,40 @@ resource "null_resource" "noop" {}
 	for b.Loop() {
 		_, _ = ScanDirectory(root, "gke_wrapper", nil, audit)
 	}
+}
+
+func TestScanDirectory_Limit(t *testing.T) {
+	searchDir := t.TempDir()
+	for i, name := range []string{"env-one", "env-two"} {
+		dir := filepath.Join(searchDir, name)
+		require.NoError(t, os.MkdirAll(dir, 0750))
+		content := fmt.Sprintf(`module "gke_cluster" {
+  source       = "../modules/gke_wrapper"
+  cluster_name = "cluster-%d"
+}`, i)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(content), 0600))
+	}
+
+	report, err := ScanDirectoryWithTaintAndOptions(searchDir, "gke_wrapper", nil, nil, nil, nil, ScanOptions{Limit: 1})
+	require.NoError(t, err)
+	assert.Equal(t, 2, report.TotalCallSitesDiscovered)
+	assert.Equal(t, 1, report.TotalCallSitesScanned)
+	assert.True(t, report.Truncated)
+	assert.False(t, report.CanSafelyUpdateAll)
+	assert.Equal(t, 1, report.Limit)
+	assert.Contains(t, report.Summary, "evaluated first 1 of 2")
+
+	unlimited, err := ScanDirectory(searchDir, "gke_wrapper", nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 2, unlimited.TotalCallSitesScanned)
+	assert.False(t, unlimited.Truncated)
+	assert.True(t, unlimited.CanSafelyUpdateAll)
+
+	_, err = ScanDirectoryWithTaintAndOptions(searchDir, "gke_wrapper", nil, nil, nil, nil, ScanOptions{Limit: -1})
+	assert.Error(t, err)
+
+	roomy, err := ScanDirectoryWithOptions(searchDir, "gke_wrapper", nil, nil, nil, ScanOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Equal(t, 2, roomy.TotalCallSitesScanned)
+	assert.False(t, roomy.Truncated)
 }

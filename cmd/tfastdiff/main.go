@@ -104,6 +104,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		format             string
 		outputFile         string
 		blastRadiusDir     string
+		blastRadiusLimit   int
 		goldenPlanPath     string
 		checkRecreation    bool
 		enforceExit1       bool
@@ -152,6 +153,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		blastRadiusDir = trimmed
 		return nil
 	})
+	fs.IntVar(&blastRadiusLimit, "limit", 0, "Maximum number of blast-radius call sites to evaluate (0 = unlimited)")
 	fs.BoolVar(&checkRecreation, "check-recreation", true, "Check for resource recreation & state destruction hazards")
 	fs.BoolVar(&enforceExit1, "exit-code", false, "Exit with code 1 if breaking changes are detected")
 	fs.StringVar(&policyPath, "policy", "", "Optional JSON policy file for CI enforcement")
@@ -196,6 +198,15 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 
 	if registryTimeout <= 0 {
 		_, _ = fmt.Fprintf(stderr, "Error: --registry-timeout must be positive, got %s\n", registryTimeout)
+		return 2
+	}
+
+	if blastRadiusLimit < 0 {
+		_, _ = fmt.Fprintf(stderr, "Error: --limit must be non-negative, got %d\n", blastRadiusLimit)
+		return 2
+	}
+	if supplied["limit"] && blastRadiusDir == "" {
+		_, _ = fmt.Fprintln(stderr, "Error: --limit requires --blast-radius")
 		return 2
 	}
 
@@ -307,7 +318,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stderr, "Error: --upgrade-path is only available in direct comparison mode")
 			return 2
 		}
-		return runWrapperMode(ctx, registryTimeout, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir, goldenPlanPath, checkRecreation, enforceExit1, fixPreview, fixMode, policyConfig, regoPolicy, taintVar, verbose, dynamicRegistry, stdout, stderr)
+		return runWrapperMode(ctx, registryTimeout, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir, blastRadiusLimit, goldenPlanPath, checkRecreation, enforceExit1, fixPreview, fixMode, policyConfig, regoPolicy, taintVar, verbose, dynamicRegistry, stdout, stderr)
 	}
 
 	// Mode 2: Direct Upstream Comparison Mode
@@ -356,7 +367,7 @@ func registryContext(ctx context.Context, timeout time.Duration) (context.Contex
 	return context.WithTimeout(ctx, timeout)
 }
 
-func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir, goldenPlanPath string, checkRecreation, enforceExit1, fixPreview, fixMode bool, policyConfig *policy.Policy, regoPolicy *policy.RegoPolicy, taintVar string, verbose bool, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
+func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir string, blastRadiusLimit int, goldenPlanPath string, checkRecreation, enforceExit1, fixPreview, fixMode bool, policyConfig *policy.Policy, regoPolicy *policy.RegoPolicy, taintVar string, verbose bool, dynamicRegistry *recreation.DynamicHazardRegistry, stdout, stderr io.Writer) int {
 	vlog := func(format string, a ...any) {
 		if verbose {
 			_, _ = fmt.Fprintf(stderr, "[verbose] "+format+"\n", a...)
@@ -714,9 +725,9 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		var blastReport *blastradius.BlastRadiusReport
 		var err error
 		if taintReport == nil {
-			blastReport, err = blastradius.ScanDirectoryWithRegistry(blastRadiusDir, wrapperPath, wInfo, res, dynamicRegistry)
+			blastReport, err = blastradius.ScanDirectoryWithOptions(blastRadiusDir, wrapperPath, wInfo, res, dynamicRegistry, blastradius.ScanOptions{Limit: blastRadiusLimit})
 		} else {
-			blastReport, err = blastradius.ScanDirectoryWithTaint(blastRadiusDir, wrapperPath, wInfo, res, dynamicRegistry, taintReport)
+			blastReport, err = blastradius.ScanDirectoryWithTaintAndOptions(blastRadiusDir, wrapperPath, wInfo, res, dynamicRegistry, taintReport, blastradius.ScanOptions{Limit: blastRadiusLimit})
 		}
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error scanning blast radius: %v\n", err)
@@ -751,9 +762,7 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		}
 	}
 
-	outContent := renderWrapperOutput(format, res, findings)
-
-	if err := writeOutput(outputFile, outContent, stdout); err != nil {
+	if err := writeWrapperReport(outputFile, format, res, findings, stdout); err != nil {
 		_, _ = fmt.Fprintf(stderr, "Error writing output: %v\n", err)
 		return 1
 	}
@@ -1080,41 +1089,63 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		}
 	}
 
-	if format == "sarif" {
-		outContent := renderDiffOutput(format, diffReport, findings)
-		if err := writeOutput(outputFile, outContent, stdout); err != nil {
-			_, _ = fmt.Fprintf(stderr, "Error writing output: %v\n", err)
-			return 1
-		}
-	} else {
-		var w io.Writer = stdout
-		var outFile *os.File
-		if outputFile != "" {
-			f, err := os.OpenFile(filepath.Clean(outputFile), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644) // #nosec G302 -- report output intended readable
-			if err != nil {
-				_, _ = fmt.Fprintf(stderr, "Error writing output: %v\n", err)
-				return 1
-			}
-			outFile = f
-			w = f
-		}
-		switch format {
-		case "text":
-			_ = report.RenderTextTo(w, diffReport, findings)
-		case "markdown":
-			_ = report.RenderMarkdownTo(w, diffReport, findings)
-		case "json":
-			_ = report.RenderJSONTo(w, diffReport, findings)
-		}
-		if outFile != nil {
-			_ = outFile.Close()
-		}
+	if err := writeDiffReport(outputFile, format, diffReport, findings, stdout); err != nil {
+		_, _ = fmt.Fprintf(stderr, "Error writing output: %v\n", err)
+		return 1
 	}
 
 	if (enforceExit1 && !diffReport.CanSafelyUpdate) || len(diffReport.PolicyViolations) > 0 {
 		return 1
 	}
 	return 0
+}
+
+// writeStreamedOutput writes a report through render, streaming directly to the destination and
+// surfacing render errors instead of silently emitting a truncated document.
+func writeStreamedOutput(outputFile string, stdout io.Writer, render func(io.Writer) error) error {
+	if outputFile == "" {
+		return render(stdout)
+	}
+	// #nosec G302 -- report output is intended to be readable by downstream CI tooling
+	f, err := os.OpenFile(filepath.Clean(outputFile), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	if err := render(f); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// writeWrapperReport renders a wrapper audit, streaming SARIF directly and buffering the formats
+// that concatenate multiple human-readable sections.
+func writeWrapperReport(outputFile, format string, res *wrapper.WrapperCompatibilityReport, findings report.Findings, stdout io.Writer) error {
+	if format != "sarif" {
+		return writeOutput(outputFile, renderWrapperOutput(format, res, findings), stdout)
+	}
+	return writeStreamedOutput(outputFile, stdout, func(w io.Writer) error {
+		return report.RenderWrapperSARIFTo(w, res, findings)
+	})
+}
+
+// writeDiffReport renders a direct comparison, streaming every supported format to the
+// destination rather than building the whole document in memory.
+func writeDiffReport(outputFile, format string, diffReport *diff.DiffReport, findings report.Findings, stdout io.Writer) error {
+	return writeStreamedOutput(outputFile, stdout, func(w io.Writer) error {
+		switch format {
+		case "text":
+			return report.RenderTextTo(w, diffReport, findings)
+		case "markdown":
+			return report.RenderMarkdownTo(w, diffReport, findings)
+		case "json":
+			return report.RenderJSONTo(w, diffReport, findings)
+		case "sarif":
+			return report.RenderSARIFTo(w, diffReport, findings)
+		default:
+			return fmt.Errorf("unsupported output format %q", format)
+		}
+	})
 }
 
 // renderWrapperOutput renders a wrapper audit, including the optional recreation hazards and

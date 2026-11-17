@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/recreation"
 	"github.com/23skdu/terraform_ast/pkg/registry"
 	"github.com/23skdu/terraform_ast/pkg/report"
+	"github.com/23skdu/terraform_ast/pkg/wrapper"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
@@ -2026,6 +2028,61 @@ func TestRenderDiffOutputAllFormats(t *testing.T) {
 		out := renderDiffOutput(format, r, findings)
 		assert.NotEmpty(t, out)
 	}
+}
+
+func TestWriteStreamedOutput(t *testing.T) {
+	var stdout bytes.Buffer
+	require.NoError(t, writeStreamedOutput("", &stdout, func(w io.Writer) error {
+		_, err := io.WriteString(w, "stdout")
+		return err
+	}))
+	assert.Equal(t, "stdout", stdout.String())
+
+	path := filepath.Join(t.TempDir(), "report.txt")
+	require.NoError(t, writeStreamedOutput(path, &stdout, func(w io.Writer) error {
+		_, err := io.WriteString(w, "file")
+		return err
+	}))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "file", string(data))
+
+	// A render failure must surface instead of silently leaving a truncated report behind.
+	err = writeStreamedOutput(path, &stdout, func(io.Writer) error { return errors.New("render failed") })
+	assert.ErrorContains(t, err, "render failed")
+
+	// An unopenable destination is reported to the caller.
+	err = writeStreamedOutput(filepath.Join(t.TempDir(), "missing", "report.txt"), &stdout, func(io.Writer) error { return nil })
+	assert.Error(t, err)
+}
+
+func TestWriteDiffReportUnsupportedFormat(t *testing.T) {
+	diffReport := &diff.DiffReport{ModuleName: "m"}
+	err := writeDiffReport("", "bogus", diffReport, report.Findings{}, &bytes.Buffer{})
+	assert.ErrorContains(t, err, "unsupported output format")
+}
+
+func TestRenderWrapperOutputSARIF(t *testing.T) {
+	out := renderWrapperOutput("sarif", &wrapper.WrapperCompatibilityReport{}, report.Findings{})
+	assert.Contains(t, out, "sarif-schema-2.1.0.json")
+}
+
+func TestExecute_LimitValidation(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "x" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`variable "x" { type = string }`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir1, "--new", dir2, "--limit", "-1"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--limit must be non-negative")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", dir1, "--new", dir2, "--limit", "5"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--limit requires --blast-radius")
 }
 
 func TestExecute_ListVersionsCommand(t *testing.T) {

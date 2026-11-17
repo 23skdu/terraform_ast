@@ -24,11 +24,14 @@ VENV := .venv
 VENV_PYTHON := $(VENV)/bin/python3
 PIP := $(VENV)/bin/pip
 IMAGE_TAG ?= latest
+BENCH_PKGS := ./pkg/ast/ ./pkg/diff/ ./pkg/recreation/ ./pkg/report/ ./pkg/blastradius/
+BENCH_BASELINE := test/benchmarks/baseline.json
+BENCH_THRESHOLD ?= 10
 
 .PHONY: all help ci release build build-release build-debug build-race clean clean-docker \
 	deps deps-upgrade lint lint-fast lint-fix vet staticcheck deadcode fmt fmt-check \
 	security secure sec-gosec sec-vulncheck sec-audit \
-	perf bench bench-check memprofile cpuprofile test test-short test-all race test-coverage coverage-gate coverage-html test-fuzz \
+	perf bench bench-check bench-gate bench-baseline bench-race memprofile cpuprofile test test-short test-all race test-coverage coverage-gate coverage-html test-fuzz \
 	accuracy-gate oracle venv docker markdown-lint verify pre-commit makehooks install-hooks fuzz
 
 # Default target
@@ -72,6 +75,9 @@ help:
 	@echo ""
 	@echo "Performance:"
 	@echo "  perf                 Run benchmarks on ast/diff/report/blastradius packages"
+	@echo "  bench-gate           Fail when a tracked benchmark regresses beyond BENCH_THRESHOLD"
+	@echo "  bench-baseline       Regenerate test/benchmarks/baseline.json and docs/perf-baseline.md"
+	@echo "  bench-race           Run benchmarks with the race detector"
 	@echo ""
 	@echo "Testing & Quality Gates:"
 	@echo "  test                 Run unit tests with coverage"
@@ -150,7 +156,7 @@ deps-upgrade:
 
 clean: clean-docker
 	@echo "Cleaning build and test artifacts..."
-	rm -rf bin coverage *.out *.prof *.test cover.html $(VENV) __pycache__ *.pyc oracle_report.json coverage.html mem.out cpu.out perf.out bench.out bench-check.out memprofile.out cpuprofile.out
+	rm -rf bin coverage *.out *.prof *.test cover.html $(VENV) __pycache__ *.pyc oracle_report.json coverage.html mem.out cpu.out perf.out bench.out bench-check.out bench-current.out memprofile.out cpuprofile.out
 	$(GO) clean -testcache -cache
 	@echo "✓ Build, test, venv, and cache artifacts cleaned."
 
@@ -245,6 +251,20 @@ bench:
 bench-check:
 	@echo "Running benchmarks with regression threshold (informational)..."
 	$(GO) test -bench . -benchmem -count=3 -run '^$$' ./pkg/ast/ ./pkg/diff/ ./pkg/recreation/ 2>&1 | tee bench-check.out
+
+bench-gate:
+	@echo "Running benchmark regression gate (threshold $(BENCH_THRESHOLD)%)..."
+	$(GO) test -run '^$$' -bench . -benchmem -count=3 $(BENCH_PKGS) 2>&1 | tee bench-current.out
+	$(GO) run ./cmd/benchgate --current bench-current.out --baseline $(BENCH_BASELINE) --threshold $(BENCH_THRESHOLD)
+
+bench-baseline:
+	@echo "Regenerating benchmark baseline and docs/perf-baseline.md..."
+	$(GO) test -run '^$$' -bench . -benchmem -count=3 $(BENCH_PKGS) 2>&1 | tee bench-current.out
+	$(GO) run ./cmd/benchgate --current bench-current.out --write-baseline $(BENCH_BASELINE) --write-markdown docs/perf-baseline.md --threshold $(BENCH_THRESHOLD)
+
+bench-race:
+	@echo "Running benchmarks with the race detector..."
+	$(GO) test -run '^$$' -bench . -benchmem -count=1 -race $(BENCH_PKGS)
 
 memprofile:
 	@echo "Collecting memory profiles for hot packages..."

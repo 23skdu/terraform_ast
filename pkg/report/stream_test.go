@@ -37,6 +37,39 @@ func TestRenderToWriters(t *testing.T) {
 	}
 }
 
+func TestRenderSARIFToWriters(t *testing.T) {
+	report := sampleDiffReport()
+	wrapperReport := sampleWrapperReport()
+
+	var b bytes.Buffer
+	if err := RenderSARIFTo(&b, report, Findings{}); err != nil || b.Len() == 0 {
+		t.Fatalf("sarif: %v", err)
+	}
+	if !bytes.Contains(b.Bytes(), []byte("sarif-schema-2.1.0.json")) {
+		t.Fatalf("sarif output = %s", b.String())
+	}
+	b.Reset()
+	if err := RenderWrapperSARIFTo(&b, wrapperReport, Findings{}); err != nil || b.Len() == 0 {
+		t.Fatalf("wrapper sarif: %v", err)
+	}
+
+	b.Reset()
+	if err := RenderSARIFTo(&b, nil, Findings{}); err != nil || b.Len() == 0 {
+		t.Fatalf("nil sarif: %v", err)
+	}
+	b.Reset()
+	if err := RenderWrapperSARIFTo(&b, nil, Findings{}); err != nil || b.Len() == 0 {
+		t.Fatalf("nil wrapper sarif: %v", err)
+	}
+
+	if err := RenderSARIFTo(&failingWriter{failAfter: 0}, report, Findings{}); err == nil {
+		t.Fatal("expected sarif writer error")
+	}
+	if err := RenderWrapperSARIFTo(&failingWriter{failAfter: 0}, wrapperReport, Findings{}); err == nil {
+		t.Fatal("expected wrapper sarif writer error")
+	}
+}
+
 type failingWriter struct {
 	failAfter int
 	written   int
