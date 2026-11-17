@@ -1,0 +1,2 @@
+go test fuzz v1
+string("variable \"cluster_name\" { type = string }\nmodule \"vpc\" { source = \"./modules/vpc\" network_name = var.cluster_name }\noutput \"id\" { value = module.vpc.network_id }\n")
