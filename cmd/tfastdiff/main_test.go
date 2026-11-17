@@ -2085,6 +2085,52 @@ func TestExecute_LimitValidation(t *testing.T) {
 	assert.Contains(t, stderr.String(), "--limit requires --blast-radius")
 }
 
+func TestExecute_DriftStateMode(t *testing.T) {
+	dir := t.TempDir()
+	baselinePath := filepath.Join(dir, "state.json")
+	livePath := filepath.Join(dir, "live.json")
+	inSyncLive := filepath.Join(dir, "live_sync.json")
+
+	baseline := `{"resources":[{"address":"r1","attributes":{"v":1}}]}`
+	drifted := `{"resources":[{"address":"r1","attributes":{"v":2}},{"address":"r2","attributes":{"v":3}}]}`
+	synced := `{"resources":[{"address":"r1","attributes":{"v":1}}]}`
+
+	require.NoError(t, os.WriteFile(baselinePath, []byte(baseline), 0600))
+	require.NoError(t, os.WriteFile(livePath, []byte(drifted), 0600))
+	require.NoError(t, os.WriteFile(inSyncLive, []byte(synced), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"drift", "--state", baselinePath, "--live", livePath}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stdout.String(), "DRIFT DETECTED")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"drift", "--state", baselinePath, "--live", inSyncLive}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "IN SYNC")
+
+	// Only one of the pair is an error.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"drift", "--state", baselinePath}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--state and --live must both be provided")
+
+	// Load errors.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"drift", "--state", filepath.Join(dir, "missing.json"), "--live", livePath}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "read snapshot")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"drift", "--state", baselinePath, "--live", filepath.Join(dir, "missing.json")}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "read snapshot")
+}
+
 func TestExecute_ListVersionsCommand(t *testing.T) {
 	repoDir := createTestTFRepo(t, "v1.0.0", `variable "a" { type = string }`)
 

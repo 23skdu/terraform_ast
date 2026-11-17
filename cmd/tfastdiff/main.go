@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/blastradius"
 	"github.com/23skdu/terraform_ast/pkg/codemod"
 	"github.com/23skdu/terraform_ast/pkg/diff"
+	"github.com/23skdu/terraform_ast/pkg/drift"
 	"github.com/23skdu/terraform_ast/pkg/encryption"
 	"github.com/23skdu/terraform_ast/pkg/eval"
 	"github.com/23skdu/terraform_ast/pkg/gitops"
@@ -1437,9 +1439,36 @@ func runDecryptCommand(args []string, stdout, stderr io.Writer) int {
 func runDriftCommand(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("drift", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	statePath := fs.String("state", "", "Path to a recorded baseline state snapshot JSON")
+	livePath := fs.String("live", "", "Path to a recorded live state snapshot JSON")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+
+	if *statePath != "" || *livePath != "" {
+		if *statePath == "" || *livePath == "" {
+			_, _ = fmt.Fprintln(stderr, "Error: --state and --live must both be provided")
+			return 2
+		}
+		baseline, err := drift.LoadSnapshot(*statePath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error: %v\\n", err)
+			return 1
+		}
+		live, err := drift.LoadSnapshot(*livePath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error: %v\\n", err)
+			return 1
+		}
+		report := drift.CompareSnapshots(baseline, live)
+		enc, _ := json.MarshalIndent(report, "", "  ")
+		_, _ = fmt.Fprintln(stdout, string(enc))
+		if report.HasDrift {
+			return 1
+		}
+		return 0
+	}
+
 	var reports []*goldentest.DriftReport
 	for _, spec := range goldentest.MultiCloudCatalog() {
 		goldenPath := spec.GoldenBaselinePath
