@@ -15,6 +15,15 @@ type Hook struct {
 	Name    string   `json:"name"`
 	Command string   `json:"command"`
 	Args    []string `json:"args,omitempty"`
+	Phase   string   `json:"phase,omitempty"`
+}
+
+// phaseOf normalizes an unset phase to the default pre-analysis phase.
+func phaseOf(h Hook) string {
+	if h.Phase == "" {
+		return "pre-analysis"
+	}
+	return h.Phase
 }
 
 // Run executes a hook command, streaming output to stdout/stderr.
@@ -40,4 +49,16 @@ func RunAll(hooks []Hook, stdout, stderr io.Writer) error {
 		}
 	}
 	return nil
+}
+
+// RunPhase runs only the hooks whose Phase matches phase. An empty phase on a
+// hook defaults to "pre-analysis", so existing callers keep their behaviour.
+func RunPhase(hooks []Hook, phase string, stdout, stderr io.Writer) error {
+	var selected []Hook
+	for _, h := range hooks {
+		if phaseOf(h) == phase {
+			selected = append(selected, h)
+		}
+	}
+	return RunAll(selected, stdout, stderr)
 }

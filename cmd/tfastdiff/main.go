@@ -126,6 +126,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		svgAfter           string
 		svgTransition      string
 		hookCommands       []string
+		postHookCommands   []string
 	)
 
 	fs.BoolVar(&showVersion, "version", false, "Print version and exit")
@@ -177,6 +178,10 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&topologicalOrderPath, "topological-order", "", "Write a topological ordering of module dependencies to this path")
 	fs.Func("hook", "Shell command to run as a pre-analysis hook (repeatable)", func(value string) error {
 		hookCommands = append(hookCommands, value)
+		return nil
+	})
+	fs.Func("post-hook", "Shell command to run as a post-analysis hook (repeatable)", func(value string) error {
+		postHookCommands = append(postHookCommands, value)
 		return nil
 	})
 
@@ -322,7 +327,8 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stderr, "Error: --upgrade-path is only available in direct comparison mode")
 			return 2
 		}
-		return runWrapperMode(ctx, registryTimeout, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir, blastRadiusLimit, goldenPlanPath, checkRecreation, enforceExit1, fixPreview, fixMode, policyConfig, regoPolicy, taintVar, verbose, dynamicRegistry, stdout, stderr)
+		code := runWrapperMode(ctx, registryTimeout, wrapperPath, upstreamPath, oldVersion, newVersion, format, outputFile, blastRadiusDir, blastRadiusLimit, goldenPlanPath, checkRecreation, enforceExit1, fixPreview, fixMode, policyConfig, regoPolicy, taintVar, verbose, dynamicRegistry, stdout, stderr)
+		return runPostHooks(code, postHookCommands, stdout, stderr)
 	}
 
 	// Mode 2: Direct Upstream Comparison Mode
@@ -349,7 +355,8 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stderr, "Error: --blast-radius is only available in wrapper audit mode")
 			return 2
 		}
-		return runCompareMode(ctx, registryTimeout, oldPath, newPath, oldVersion, newVersion, format, outputFile, checkRecreation, enforceExit1, upgradePath, policyConfig, regoPolicy, verbose, dynamicRegistry, svgBefore, svgAfter, svgTransition, stdout, stderr)
+		code := runCompareMode(ctx, registryTimeout, oldPath, newPath, oldVersion, newVersion, format, outputFile, checkRecreation, enforceExit1, upgradePath, policyConfig, regoPolicy, verbose, dynamicRegistry, svgBefore, svgAfter, svgTransition, stdout, stderr)
+		return runPostHooks(code, postHookCommands, stdout, stderr)
 	}
 
 	_, _ = fmt.Fprintln(stderr, "Error: Must specify either --wrapper <dir> OR --old <path> and --new <path>")
@@ -1576,4 +1583,19 @@ func repoRoot() string {
 		dir = parent
 	}
 	return ""
+}
+
+func runPostHooks(code int, commands []string, stdout, stderr io.Writer) int {
+	if len(commands) == 0 {
+		return code
+	}
+	hooksList := make([]hooks.Hook, 0, len(commands))
+	for _, c := range commands {
+		hooksList = append(hooksList, hooks.Hook{Name: c, Command: "sh", Args: []string{"-c", c}, Phase: "post-analysis"})
+	}
+	if err := hooks.RunAll(hooksList, stdout, stderr); err != nil {
+		_, _ = fmt.Fprintf(stderr, "Error running post-hook: %v\n", err)
+		return 1
+	}
+	return code
 }

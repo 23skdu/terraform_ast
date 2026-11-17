@@ -2269,6 +2269,22 @@ module "b" {
 	assert.Contains(t, stderr.String(), "cycle")
 }
 
+func TestExecute_PostHook(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir1, "--new", dir2, "--post-hook", "true"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", dir1, "--new", dir2, "--post-hook", "false"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+}
+
 func TestExecute_ListVersionsCommand(t *testing.T) {
 	repoDir := createTestTFRepo(t, "v1.0.0", `variable "a" { type = string }`)
 
