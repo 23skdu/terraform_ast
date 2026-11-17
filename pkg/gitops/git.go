@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -20,6 +21,7 @@ type CloneConfig struct {
 	Depth        int
 	SingleBranch bool
 	RefName      string
+	SparsePaths  []string
 }
 
 // CloneOrOpen opens a local git repository in-place if targetDir is empty or matches path,
@@ -186,6 +188,10 @@ func CloneOrOpenWithOptions(repoURLOrPath, targetDir string, cfg CloneConfig) (*
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to clone repository %s: %w", repoURLOrPath, err)
+	}
+
+	if len(cfg.SparsePaths) > 0 {
+		_ = EnableSparseCheckout(targetDir, cfg.SparsePaths)
 	}
 
 	return repo, nil
@@ -583,4 +589,32 @@ func CachedRepositoryDirs() []string {
 	}
 	sort.Strings(dirs)
 	return dirs
+}
+
+// EnableSparseCheckout configures a cloned repository to check out only the given paths.
+func EnableSparseCheckout(repoDir string, paths []string) error {
+	if strings.TrimSpace(repoDir) == "" {
+		return fmt.Errorf("repository directory is required")
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	cleanDir := filepath.Clean(repoDir)
+	if err := runGit(cleanDir, "sparse-checkout", "init", "--cone"); err != nil {
+		return err
+	}
+	args := append([]string{"sparse-checkout", "set"}, paths...)
+	if err := runGit(cleanDir, args...); err != nil {
+		return err
+	}
+	return nil
+}
+
+func runGit(dir string, args ...string) error {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...) // #nosec G204 -- args are constructed internally
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }

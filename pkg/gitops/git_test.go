@@ -748,3 +748,36 @@ func TestCachedRepositoryDirs(t *testing.T) {
 	GlobalCache.Clear()
 	assert.Empty(t, CachedRepositoryDirs())
 }
+
+func TestEnableSparseCheckout(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
+	err := EnableSparseCheckout(repoDir, []string{"."})
+	assert.NoError(t, err)
+
+	err = EnableSparseCheckout("", []string{"."})
+	assert.Error(t, err)
+
+	err = EnableSparseCheckout(repoDir, nil)
+	assert.NoError(t, err)
+
+	err = EnableSparseCheckout("/non/existent/dir", []string{"."})
+	assert.Error(t, err)
+}
+
+func TestEnableSparseCheckoutSetError(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
+	require := require.New(t)
+	require.NoError(EnableSparseCheckout(repoDir, []string{"."}))
+	err := EnableSparseCheckout(repoDir, []string{"../foo"})
+	assert.Error(t, err)
+}
+
+func TestCloneOrOpenWithOptions_Sparse(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
+	cloneDir := t.TempDir()
+	repo, err := CloneOrOpenWithOptions("file://"+repoDir, cloneDir, CloneConfig{
+		SparsePaths: []string{"."},
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, repo)
+}
