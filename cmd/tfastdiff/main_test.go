@@ -2285,6 +2285,96 @@ func TestExecute_PostHook(t *testing.T) {
 	assert.Equal(t, 1, code)
 }
 
+func TestExecute_FixPreviewImportBlocks(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`
+import {
+  to = aws_s3_bucket.example
+  id = "bucket-id"
+}
+
+variable "kept" {
+  type    = string
+  default = "x"
+}
+`), 0600))
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`module "upstream" {
+  source = "`+upstreamDir+`"
+}
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--fix-preview"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "imports.tf")
+	assert.Contains(t, stdout.String(), "bucket-id")
+
+	// --fix writes imports.tf
+	code = Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--fix"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	_, err := os.Stat(filepath.Join(wrapperDir, "imports.tf"))
+	assert.NoError(t, err)
+}
+
+func TestExecute_FixPreviewImportBlocksAppend(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`
+import {
+  to = aws_s3_bucket.example
+  id = "bucket-id"
+}
+
+variable "kept" {
+  type    = string
+  default = "x"
+}
+`), 0600))
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`module "upstream" {
+  source = "`+upstreamDir+`"
+  obsolete = "x"
+}
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--fix-preview"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "imports.tf")
+}
+
+func TestExecute_FixImportBlocksWriteError(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`
+import {
+  to = aws_s3_bucket.example
+  id = "bucket-id"
+}
+
+variable "kept" {
+  type    = string
+  default = "x"
+}
+`), 0600))
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`module "upstream" {
+  source = "`+upstreamDir+`"
+}
+`), 0600))
+	// Pre-create a read-only imports.tf to force a write error.
+	roPath := filepath.Join(wrapperDir, "imports.tf")
+	require.NoError(t, os.WriteFile(roPath, []byte("import {\n  to = aws_s3_bucket.other\n  id = \"other\"\n}\n"), 0o444))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--fix"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error writing import blocks")
+	_ = os.Chmod(roPath, 0o600)
+}
+
 func TestExecute_ListVersionsCommand(t *testing.T) {
 	repoDir := createTestTFRepo(t, "v1.0.0", `variable "a" { type = string }`)
 

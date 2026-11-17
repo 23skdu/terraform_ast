@@ -308,3 +308,81 @@ func TestSynthesizeMovedBlocks(t *testing.T) {
 	assert.Contains(t, string(content), `from = aws_subnet.this`)
 	assert.Contains(t, string(content), `to   = aws_subnet.renamed`)
 }
+
+func TestFormatImportBlocks(t *testing.T) {
+	assert.Equal(t, "", FormatImportBlocks(nil))
+	assert.Equal(t, "", FormatImportBlocks([]ImportBlock{{To: "", ID: "id"}, {To: "r", ID: ""}}))
+	out := FormatImportBlocks([]ImportBlock{{To: "aws_s3_bucket.b", ID: "bucket-id", Provider: "aws.west"}})
+	assert.Contains(t, out, "import {")
+	assert.Contains(t, out, "aws_s3_bucket.b")
+	assert.Contains(t, out, "bucket-id")
+	assert.Contains(t, out, "aws.west")
+}
+
+func TestWriteImportBlocks(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o600))
+	path := filepath.Join(dir, "imports.tf")
+	blocks := []ImportBlock{{To: "aws_s3_bucket.b", ID: "bucket-id"}}
+
+	require.NoError(t, WriteImportBlocks(path, blocks))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "import {")
+	assert.Contains(t, string(data), "bucket-id")
+
+	// Idempotent: second write does not duplicate.
+	require.NoError(t, WriteImportBlocks(path, blocks))
+	data2, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, string(data), string(data2))
+
+	// Empty blocks is a no-op.
+	emptyPath := filepath.Join(dir, "empty.tf")
+	require.NoError(t, WriteImportBlocks(emptyPath, nil))
+	_, err = os.Stat(emptyPath)
+	assert.True(t, os.IsNotExist(err))
+
+	// Skip invalid blocks.
+	invalidPath := filepath.Join(dir, "invalid.tf")
+	require.NoError(t, WriteImportBlocks(invalidPath, []ImportBlock{{To: "", ID: "x"}, {To: "r", ID: ""}}))
+	_, err = os.Stat(invalidPath)
+	assert.True(t, os.IsNotExist(err))
+
+	// Append path: existing file with different import block.
+	appendPath := filepath.Join(dir, "append.tf")
+	require.NoError(t, os.WriteFile(appendPath, []byte("import { to = aws_s3_bucket.a id = \"a-id\" }\n"), 0o600))
+	require.NoError(t, WriteImportBlocks(appendPath, []ImportBlock{{To: "aws_s3_bucket.b", ID: "b-id"}}))
+	data3, err := os.ReadFile(appendPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data3), "b-id")
+
+	// MkdirAll error.
+	err = WriteImportBlocks(filepath.Join(blocker, "imports.tf"), blocks)
+	assert.Error(t, err)
+	// WriteFile error (target is a directory).
+	err = WriteImportBlocks(dir, blocks)
+	assert.Error(t, err)
+
+	// Create parent dir.
+	nested := filepath.Join(dir, "nested", "imports.tf")
+	require.NoError(t, WriteImportBlocks(nested, blocks))
+	_, err = os.Stat(nested)
+	assert.NoError(t, err)
+
+	// Read error (existing unreadable path is a directory).
+	badDir := t.TempDir()
+	err = WriteImportBlocks(badDir, blocks)
+	assert.Error(t, err)
+}
+
+func TestWriteImportBlocksWriteError(t *testing.T) {
+	dir := t.TempDir()
+	blocks := []ImportBlock{{To: "aws_s3_bucket.b", ID: "b-id"}}
+	roPath := filepath.Join(dir, "readonly.tf")
+	require.NoError(t, os.WriteFile(roPath, []byte("import { to = aws_s3_bucket.a id = \"a-id\" }\n"), 0o444))
+	err := WriteImportBlocks(roPath, blocks)
+	assert.Error(t, err)
+	_ = os.Chmod(roPath, 0o600)
+}

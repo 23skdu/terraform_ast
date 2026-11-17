@@ -621,11 +621,29 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 				}
 			}
 		}
+		var importBlocksPreview string
+		if targetInfo != nil && len(targetInfo.ImportBlocks) > 0 {
+			importBlocks := make([]codemod.ImportBlock, 0, len(targetInfo.ImportBlocks))
+			for _, ib := range targetInfo.ImportBlocks {
+				importBlocks = append(importBlocks, codemod.ImportBlock{To: ib.To, ID: ib.ID, Provider: ib.Provider})
+			}
+			importsTf := filepath.Join(wrapperPath, "imports.tf")
+			importBlocksPreview = fmt.Sprintf("--- %s\n+++ %s\n%s",
+				importsTf, importsTf, codemod.FormatImportBlocks(importBlocks))
+		}
 		if preview != "" && movedBlocksPreview != "" {
 			preview = preview + "\n" + movedBlocksPreview
 		} else if preview == "" && movedBlocksPreview != "" {
 			preview = movedBlocksPreview
+		}
+		if importBlocksPreview != "" {
+			if preview != "" {
+				preview = preview + "\n" + importBlocksPreview
+			} else {
+				preview = importBlocksPreview
+			}
 		} else if preview == "" {
+
 			preview = "No automatic patch can be generated for the detected findings.\n" +
 				"Only removed arguments in the wrapper's Terraform module block are currently patchable; no files were changed.\n"
 		}
@@ -712,6 +730,18 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 				}
 				modified = append(modified, movedFile)
 			}
+		}
+		if targetInfo != nil && len(targetInfo.ImportBlocks) > 0 {
+			importBlocks := make([]codemod.ImportBlock, 0, len(targetInfo.ImportBlocks))
+			for _, ib := range targetInfo.ImportBlocks {
+				importBlocks = append(importBlocks, codemod.ImportBlock{To: ib.To, ID: ib.ID, Provider: ib.Provider})
+			}
+			importsFile := filepath.Join(wrapperPath, "imports.tf")
+			if err := codemod.WriteImportBlocks(importsFile, importBlocks); err != nil {
+				_, _ = fmt.Fprintf(stderr, "Error writing import blocks: %v\n", err)
+				return 1
+			}
+			modified = append(modified, importsFile)
 		}
 		var msg string
 		if len(modified) == 0 {

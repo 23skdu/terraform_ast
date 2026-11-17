@@ -311,3 +311,84 @@ func SynthesizeAndWriteMovedBlocks(targetPath string, shifts []ast.ResourceAddre
 	blocks := SynthesizeMovedBlocksForShifts(shifts, covered...)
 	return WriteMovedBlocks(targetPath, blocks)
 }
+
+// ImportBlock describes a Terraform 1.5+ import {} block for codemod output.
+type ImportBlock struct {
+	To       string `json:"to"`
+	ID       string `json:"id"`
+	Provider string `json:"provider,omitempty"`
+}
+
+// FormatImportBlocks synthesizes Terraform 1.5+ import blocks.
+func FormatImportBlocks(blocks []ImportBlock) string {
+	if len(blocks) == 0 {
+		return ""
+	}
+	file := hclwrite.NewEmptyFile()
+	body := file.Body()
+
+	for _, ib := range blocks {
+		if strings.TrimSpace(ib.To) == "" || strings.TrimSpace(ib.ID) == "" {
+			continue
+		}
+		block := body.AppendNewBlock("import", nil)
+		blockBody := block.Body()
+		blockBody.SetAttributeTraversal("to", parseAddressTraversal(ib.To))
+		blockBody.SetAttributeValue("id", cty.StringVal(ib.ID))
+		if strings.TrimSpace(ib.Provider) != "" {
+			blockBody.SetAttributeTraversal("provider", parseAddressTraversal(ib.Provider))
+		}
+		body.AppendNewline()
+	}
+	return string(file.Bytes())
+}
+
+// WriteImportBlocks writes or appends formatted import blocks to targetPath idempotently.
+func WriteImportBlocks(targetPath string, blocks []ImportBlock) error {
+	if len(blocks) == 0 {
+		return nil
+	}
+	cleanPath := filepath.Clean(targetPath)
+	dir := filepath.Dir(cleanPath)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("create directory for import blocks %s: %w", dir, err)
+	}
+
+	// #nosec G304 -- operator specified target file
+	existing, err := os.ReadFile(cleanPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read existing import blocks file %s: %w", cleanPath, err)
+	}
+
+	existingStr := string(existing)
+	var newBlocks []ImportBlock
+	for _, ib := range blocks {
+		if strings.TrimSpace(ib.To) == "" || strings.TrimSpace(ib.ID) == "" {
+			continue
+		}
+		toPattern := ib.To
+		idPattern := ib.ID
+		if strings.Contains(existingStr, toPattern) && strings.Contains(existingStr, idPattern) {
+			continue
+		}
+		newBlocks = append(newBlocks, ib)
+	}
+	if len(newBlocks) == 0 {
+		return nil
+	}
+
+	formatted := FormatImportBlocks(newBlocks)
+
+	var content []byte
+	if len(existing) > 0 {
+		content = append(existing, []byte("\n"+formatted)...)
+	} else {
+		content = []byte(formatted)
+	}
+
+	// #nosec G703 -- operator specified target file
+	if err := os.WriteFile(cleanPath, content, 0o600); err != nil {
+		return fmt.Errorf("write import blocks file %s: %w", cleanPath, err)
+	}
+	return nil
+}
