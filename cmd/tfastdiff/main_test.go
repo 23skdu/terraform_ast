@@ -2375,6 +2375,98 @@ variable "kept" {
 	_ = os.Chmod(roPath, 0o600)
 }
 
+func TestExecute_WebhookCompare(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "x" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`variable "x" { type = number }`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir1, "--new", dir2, "--webhook", server.URL}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+}
+
+func TestExecute_WebhookFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "x" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`variable "x" { type = number }`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir1, "--new", dir2, "--webhook", server.URL}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stderr.String(), "Webhook notification failed")
+}
+
+func TestExecute_WebhookWrapper(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	target := createTestTFRepoWithTags(t, []struct{ tag, content string }{
+		{"v1.0.0", `variable "cluster_name" { type = string }`},
+		{"v2.0.0", `variable "cluster_name" { type = list(string) }`},
+	})
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "gke" {
+  source = "`+target+`"
+}
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", target,
+		"--old-version", "v1.0.0",
+		"--new-version", "v2.0.0",
+		"--webhook", server.URL,
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+}
+
+func TestExecute_WebhookWrapperFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	target := createTestTFRepoWithTags(t, []struct{ tag, content string }{
+		{"v1.0.0", `variable "cluster_name" { type = string }`},
+		{"v2.0.0", `variable "cluster_name" { type = list(string) }`},
+	})
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "gke" {
+  source = "`+target+`"
+}
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--wrapper", wrapperDir,
+		"--upstream", target,
+		"--old-version", "v1.0.0",
+		"--new-version", "v2.0.0",
+		"--webhook", server.URL,
+	}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stderr.String(), "Webhook notification failed")
+}
+
 func TestExecute_ListVersionsCommand(t *testing.T) {
 	repoDir := createTestTFRepo(t, "v1.0.0", `variable "a" { type = string }`)
 

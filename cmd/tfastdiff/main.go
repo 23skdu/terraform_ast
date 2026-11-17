@@ -34,6 +34,7 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/report"
 	"github.com/23skdu/terraform_ast/pkg/semverutil"
 	"github.com/23skdu/terraform_ast/pkg/visualize"
+	"github.com/23skdu/terraform_ast/pkg/webhook"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
 	"github.com/go-git/go-git/v5"
 )
@@ -41,6 +42,7 @@ import (
 var (
 	moduleGraphPath      string
 	topologicalOrderPath string
+	activeWebhookURLs    []string
 	version              = "0.9.0"
 	osExit               = os.Exit
 	mkdirTemp            = os.MkdirTemp
@@ -127,6 +129,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		svgTransition      string
 		hookCommands       []string
 		postHookCommands   []string
+		webhookURLs        []string
 	)
 
 	fs.BoolVar(&showVersion, "version", false, "Print version and exit")
@@ -182,6 +185,10 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	})
 	fs.Func("post-hook", "Shell command to run as a post-analysis hook (repeatable)", func(value string) error {
 		postHookCommands = append(postHookCommands, value)
+		return nil
+	})
+	fs.Func("webhook", "Webhook URL to notify on hazardous diffs (repeatable)", func(value string) error {
+		webhookURLs = append(webhookURLs, value)
 		return nil
 	})
 
@@ -320,6 +327,8 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
+
+	activeWebhookURLs = webhookURLs
 
 	// Mode 1: Wrapper Audit Mode
 	if wrapperPath != "" {
@@ -829,6 +838,21 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		return 1
 	}
 
+	if len(activeWebhookURLs) > 0 {
+		breaking := 0
+		if res.UpstreamDiff != nil {
+			breaking = res.UpstreamDiff.TotalBreaking
+		}
+		if breaking > 0 || !canSafelyUpdate {
+			payload := webhook.Payload{ModuleName: res.TargetModuleName, TotalBreaking: breaking, Summary: res.Summary}
+			for _, url := range activeWebhookURLs {
+				if err := webhook.Notify(url, payload); err != nil {
+					_, _ = fmt.Fprintf(stderr, "Webhook notification failed: %v\n", err)
+				}
+			}
+		}
+	}
+
 	if (enforceExit1 && !canSafelyUpdate) || len(res.PolicyViolations) > 0 {
 		return 1
 	}
@@ -1175,6 +1199,15 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 	if err := writeDiffReport(outputFile, format, diffReport, findings, stdout); err != nil {
 		_, _ = fmt.Fprintf(stderr, "Error writing output: %v\n", err)
 		return 1
+	}
+
+	if len(activeWebhookURLs) > 0 && (diffReport.TotalBreaking > 0 || !diffReport.CanSafelyUpdate) {
+		payload := webhook.Payload{ModuleName: diffReport.ModuleName, TotalBreaking: diffReport.TotalBreaking, Summary: diffReport.Summary}
+		for _, url := range activeWebhookURLs {
+			if err := webhook.Notify(url, payload); err != nil {
+				_, _ = fmt.Fprintf(stderr, "Webhook notification failed: %v\n", err)
+			}
+		}
 	}
 
 	if (enforceExit1 && !diffReport.CanSafelyUpdate) || len(diffReport.PolicyViolations) > 0 {
