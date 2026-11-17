@@ -29,7 +29,6 @@ This roadmap does not re-track it.
 | :--- | :---: | :--- | :--- |
 | **R1** | P3 | Add Crossplane composition and claim analysis | No composite-module analysis or claim-level diffing exists. Done when compositions and claims can be inspected and compared. |
 | **R2** | P3 | Add resource transforms for renaming and splitting | Codemod supports input removal and moved-block synthesis only. Done when resource rename/split transforms are previewable and applicable. |
-| **R3** | P3 | Add advisory locks for shared analysis runs | No locking exists for shared or remote analysis. Done when concurrent runs can coordinate through advisory locks. |
 
 ## 2. Summary of remaining work
 
@@ -37,15 +36,14 @@ Completed and removed from this roadmap: the CI benchmark regression gate and co
 baseline, the streaming diff iterator/channel API, blast-radius `--limit` pagination, the
 streaming SARIF writers, recorded state-vs-live drift detection, topological module
 execution plans, hook phase support, import-block codemod synthesis, sparse checkout for
-module subdirectories, bounded TTL LRU schema caching, benchmark/fuzz matrices, and
-webhook notifications.
+module subdirectories, bounded TTL LRU schema caching, benchmark/fuzz matrices, webhook
+notifications, and advisory file locking.
 
 The remaining effort falls into one group:
 
-1. **Strategic gaps (P3):** Crossplane (R1), resource transforms (R2), and advisory
-   locking (R3).
+1. **Strategic gaps (P3):** Crossplane (R1) and resource transforms (R2).
 
-**Recommended next pass:** R1 as the highest-impact remaining product work. Defer R2–R3
+**Recommended next pass:** R1 as the highest-impact remaining product work. Defer R2
 until it lands.
 
 

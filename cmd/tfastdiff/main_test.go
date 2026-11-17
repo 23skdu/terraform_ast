@@ -22,6 +22,7 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/eval"
 	"github.com/23skdu/terraform_ast/pkg/gitops"
+	"github.com/23skdu/terraform_ast/pkg/lock"
 	"github.com/23skdu/terraform_ast/pkg/recreation"
 	"github.com/23skdu/terraform_ast/pkg/registry"
 	"github.com/23skdu/terraform_ast/pkg/report"
@@ -2465,6 +2466,26 @@ module "gke" {
 	}, &stdout, &stderr)
 	assert.Equal(t, 0, code, stderr.String())
 	assert.Contains(t, stderr.String(), "Webhook notification failed")
+}
+
+func TestExecute_LockFile(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+
+	lockPath := filepath.Join(t.TempDir(), "run.lock")
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir1, "--new", dir2, "--lock-file", lockPath}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+
+	// Contention: pre-acquire the lock.
+	l, err := lock.Acquire(lockPath + ".2")
+	require.NoError(t, err)
+	defer func() { _ = l.Release() }()
+	code = Execute([]string{"--old", dir1, "--new", dir2, "--lock-file", lockPath + ".2"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "Error acquiring lock")
 }
 
 func TestExecute_ListVersionsCommand(t *testing.T) {

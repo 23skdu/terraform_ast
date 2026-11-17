@@ -25,6 +25,7 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/eval"
 	"github.com/23skdu/terraform_ast/pkg/gitops"
 	"github.com/23skdu/terraform_ast/pkg/hooks"
+	"github.com/23skdu/terraform_ast/pkg/lock"
 	"github.com/23skdu/terraform_ast/pkg/lsp"
 	"github.com/23skdu/terraform_ast/pkg/modulegraph"
 	"github.com/23skdu/terraform_ast/pkg/planner"
@@ -130,6 +131,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		hookCommands       []string
 		postHookCommands   []string
 		webhookURLs        []string
+		lockFile           string
 	)
 
 	fs.BoolVar(&showVersion, "version", false, "Print version and exit")
@@ -191,6 +193,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		webhookURLs = append(webhookURLs, value)
 		return nil
 	})
+	fs.StringVar(&lockFile, "lock-file", "", "Path to an advisory lock file held for the duration of the run")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -329,6 +332,15 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	}
 
 	activeWebhookURLs = webhookURLs
+
+	if lockFile != "" {
+		l, err := lock.Acquire(lockFile)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error acquiring lock: %v\n", err)
+			return 2
+		}
+		defer func() { _ = l.Release() }()
+	}
 
 	// Mode 1: Wrapper Audit Mode
 	if wrapperPath != "" {
