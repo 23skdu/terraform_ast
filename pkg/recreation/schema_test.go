@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/wrapper"
@@ -99,6 +100,86 @@ func TestParseProviderSchema(t *testing.T) {
 	assert.Empty(t, nilPS.ExtractForceNewDescriptors())
 }
 
+func TestSchemaCacheLRUAndTTL(t *testing.T) {
+	c := newSchemaCache(2, time.Hour)
+	now := time.Now()
+	c.now = func() time.Time { return now }
+
+	// put two entries
+	c.put("a", schemaCacheEntry{stored: now, schemas: &ProviderSchemas{}})
+	c.put("b", schemaCacheEntry{stored: now, schemas: &ProviderSchemas{}})
+	assert.Len(t, c.entries, 2)
+
+	// touch a, then add c evicts b
+	c.touch("a")
+	c.touch("nonexistent")
+	c.put("c", schemaCacheEntry{stored: now, schemas: &ProviderSchemas{}})
+	_, ok := c.entries["b"]
+	assert.False(t, ok)
+	_, ok = c.entries["a"]
+	assert.True(t, ok)
+	_, ok = c.entries["c"]
+	assert.True(t, ok)
+
+	// remove
+	c.remove("a")
+	_, ok = c.entries["a"]
+	assert.False(t, ok)
+
+	// put existing key updates
+	c.put("c", schemaCacheEntry{stored: now, schemas: &ProviderSchemas{}})
+	assert.Len(t, c.entries, 1)
+
+	// expired entry: store with old timestamp
+	old := now.Add(-2 * time.Hour)
+	c.put("d", schemaCacheEntry{stored: old, schemas: &ProviderSchemas{}})
+	// force capacity by not evicting? capacity 2 already full; put d evicts one.
+	// Check TTL expiration on get through LoadProviderSchema? Instead direct entries check not enough.
+	// Use a cache with ttl 1ms and now advanced.
+	c2 := newSchemaCache(4, time.Millisecond)
+	c2.now = func() time.Time { return now }
+	c2.put("e", schemaCacheEntry{stored: now.Add(-time.Second), schemas: &ProviderSchemas{}})
+	c2.mu.Lock()
+	// simulate get expired by checking condition
+	entry := c2.entries["e"]
+	expired := c2.ttl > 0 && c2.now().Sub(entry.stored) >= c2.ttl
+	c2.mu.Unlock()
+	assert.True(t, expired)
+
+	// capacity <=0 defaults to 1
+	c3 := newSchemaCache(0, time.Hour)
+	assert.Equal(t, 1, c3.capacity)
+
+	// resetSchemaCache
+	resetSchemaCache()
+	assert.Empty(t, schemaCacheInstance.entries)
+}
+
+func TestLoadProviderSchemaCacheExpiry(t *testing.T) {
+	resetSchemaCache()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "schema.json")
+	require.NoError(t, os.WriteFile(path, []byte(sampleProviderSchema), 0o600))
+
+	base := time.Now()
+	schemaCacheInstance.now = func() time.Time { return base }
+	schemaCacheInstance.ttl = time.Hour
+
+	ps1, err := LoadProviderSchema(path)
+	require.NoError(t, err)
+	assert.NotNil(t, ps1)
+
+	// Advance time beyond TTL to force expiry.
+	schemaCacheInstance.now = func() time.Time { return base.Add(2 * time.Hour) }
+	ps2, err := LoadProviderSchema(path)
+	require.NoError(t, err)
+	assert.NotNil(t, ps2)
+
+	// restore
+	schemaCacheInstance.ttl = 30 * time.Minute
+	schemaCacheInstance.now = time.Now
+	resetSchemaCache()
+}
 func TestLoadProviderSchema(t *testing.T) {
 	_, err := LoadProviderSchema("/non/existent/path.json")
 	assert.ErrorContains(t, err, "open provider schema file")

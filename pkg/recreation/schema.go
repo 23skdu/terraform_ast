@@ -22,13 +22,77 @@ type ProviderSchemas struct {
 type schemaCacheEntry struct {
 	mtime   time.Time
 	size    int64
+	stored  time.Time
 	schemas *ProviderSchemas
 }
 
-var (
-	schemaCacheMu sync.Mutex
-	schemaCache   = make(map[string]schemaCacheEntry)
-)
+type schemaCache struct {
+	mu       sync.Mutex
+	entries  map[string]schemaCacheEntry
+	order    []string
+	capacity int
+	ttl      time.Duration
+	now      func() time.Time
+}
+
+func newSchemaCache(capacity int, ttl time.Duration) *schemaCache {
+	if capacity <= 0 {
+		capacity = 1
+	}
+	return &schemaCache{
+		entries:  make(map[string]schemaCacheEntry),
+		capacity: capacity,
+		ttl:      ttl,
+		now:      time.Now,
+	}
+}
+
+var schemaCacheInstance = newSchemaCache(64, 30*time.Minute)
+
+func (c *schemaCache) touch(key string) {
+	for i, k := range c.order {
+		if k == key {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			c.order = append(c.order, key)
+			return
+		}
+	}
+	c.order = append(c.order, key)
+}
+
+func (c *schemaCache) remove(key string) {
+	delete(c.entries, key)
+	for i, k := range c.order {
+		if k == key {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			return
+		}
+	}
+}
+
+func (c *schemaCache) put(key string, entry schemaCacheEntry) {
+	if _, ok := c.entries[key]; ok {
+		c.entries[key] = entry
+		c.touch(key)
+	} else {
+		// Evict LRU if at capacity.
+		for len(c.entries) >= c.capacity && len(c.order) > 0 {
+			oldest := c.order[0]
+			c.order = c.order[1:]
+			delete(c.entries, oldest)
+		}
+		c.entries[key] = entry
+		c.order = append(c.order, key)
+	}
+}
+
+// resetSchemaCache clears the in-memory schema cache; used by tests for isolation.
+func resetSchemaCache() {
+	schemaCacheInstance.mu.Lock()
+	defer schemaCacheInstance.mu.Unlock()
+	schemaCacheInstance.entries = make(map[string]schemaCacheEntry)
+	schemaCacheInstance.order = nil
+}
 
 // ProviderSchema contains the resource and data source schemas for a provider.
 type ProviderSchema struct {
@@ -86,14 +150,22 @@ func LoadProviderSchema(path string) (*ProviderSchemas, error) {
 	defer func() { _ = file.Close() }()
 
 	fi, _ := file.Stat()
-	schemaCacheMu.Lock()
+
+	// Check bounded TTL LRU cache.
 	if fi != nil {
-		if entry, ok := schemaCache[cleanPath]; ok && entry.mtime.Equal(fi.ModTime()) && entry.size == fi.Size() {
-			schemaCacheMu.Unlock()
-			return entry.schemas, nil
+		schemaCacheInstance.mu.Lock()
+		if entry, ok := schemaCacheInstance.entries[cleanPath]; ok && entry.mtime.Equal(fi.ModTime()) && entry.size == fi.Size() {
+			if schemaCacheInstance.ttl <= 0 || schemaCacheInstance.now().Sub(entry.stored) < schemaCacheInstance.ttl {
+				// Touch LRU order.
+				schemaCacheInstance.touch(cleanPath)
+				schemaCacheInstance.mu.Unlock()
+				return entry.schemas, nil
+			}
+			// Expired: drop.
+			schemaCacheInstance.remove(cleanPath)
 		}
+		schemaCacheInstance.mu.Unlock()
 	}
-	schemaCacheMu.Unlock()
 
 	ps, err := ParseProviderSchema(file)
 	if err != nil {
@@ -101,13 +173,14 @@ func LoadProviderSchema(path string) (*ProviderSchemas, error) {
 	}
 
 	if fi != nil {
-		schemaCacheMu.Lock()
-		schemaCache[cleanPath] = schemaCacheEntry{
+		schemaCacheInstance.mu.Lock()
+		schemaCacheInstance.put(cleanPath, schemaCacheEntry{
 			mtime:   fi.ModTime(),
 			size:    fi.Size(),
+			stored:  schemaCacheInstance.now(),
 			schemas: ps,
-		}
-		schemaCacheMu.Unlock()
+		})
+		schemaCacheInstance.mu.Unlock()
 	}
 
 	return ps, nil
