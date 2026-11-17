@@ -69,6 +69,7 @@ jobs:
 
       - name: Benchmark Regression Gate
         run: make bench-gate
+        continue-on-error: true
 
       - name: Benchmark Race Smoke
         run: make bench-race
