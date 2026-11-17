@@ -19,6 +19,7 @@ import (
 	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/23skdu/terraform_ast/pkg/blastradius"
 	"github.com/23skdu/terraform_ast/pkg/codemod"
+	"github.com/23skdu/terraform_ast/pkg/crossplane"
 	"github.com/23skdu/terraform_ast/pkg/diff"
 	"github.com/23skdu/terraform_ast/pkg/drift"
 	"github.com/23skdu/terraform_ast/pkg/encryption"
@@ -91,6 +92,8 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 			return runDecryptCommand(args[1:], stdout, stderr)
 		case "drift":
 			return runDriftCommand(args[1:], stdout, stderr)
+		case "crossplane":
+			return runCrossplaneCommand(args[1:], stdout, stderr)
 		case "list-versions":
 			return runListVersionsCommand(args[1:], stdout, stderr)
 		}
@@ -1656,6 +1659,30 @@ func runDriftCommand(args []string, stdout, stderr io.Writer) int {
 	}
 	payload, _ := goldentest.GenerateDriftIssuePayload(reports)
 	_, _ = fmt.Fprint(stdout, payload)
+	return 0
+}
+
+func runCrossplaneCommand(args []string, stdout, stderr io.Writer) int {
+	if len(args) < 2 {
+		_, _ = fmt.Fprintln(stderr, "Usage: tfastdiff crossplane <old-composition.yaml> <new-composition.yaml>")
+		return 2
+	}
+	oldComp, err := crossplane.Load(args[0])
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "Error loading old composition: %v\n", err)
+		return 1
+	}
+	newComp, err := crossplane.Load(args[1])
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "Error loading new composition: %v\n", err)
+		return 1
+	}
+	result := crossplane.Compare(oldComp, newComp)
+	enc, _ := json.MarshalIndent(result, "", "  ")
+	_, _ = fmt.Fprintln(stdout, string(enc))
+	if result.HasDrift {
+		return 1
+	}
 	return 0
 }
 

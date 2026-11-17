@@ -27,22 +27,12 @@ This roadmap does not re-track it.
 
 | ID | Pri | Remaining item | Why it remains / acceptance criteria |
 | :--- | :---: | :--- | :--- |
-| **R1** | P3 | Add Crossplane composition and claim analysis | No composite-module analysis or claim-level diffing exists. Done when compositions and claims can be inspected and compared. |
 
 ## 2. Summary of remaining work
 
-Completed and removed from this roadmap: the CI benchmark regression gate and committed
-baseline, the streaming diff iterator/channel API, blast-radius `--limit` pagination, the
-streaming SARIF writers, recorded state-vs-live drift detection, topological module
-execution plans, hook phase support, import-block codemod synthesis, sparse checkout for
-module subdirectories, bounded TTL LRU schema caching, benchmark/fuzz matrices, webhook
-notifications, advisory file locking, and resource transform synthesis.
-
-The remaining effort falls into one group:
-
-1. **Strategic gaps (P3):** Crossplane composition and claim analysis (R1).
-
-**Recommended next pass:** R1 as the highest-impact remaining product work.
+All Pass 11 roadmap items have now been implemented and removed from this document.
+The remaining work tracked here is complete; future work should be captured in a
+new pass.
 
 
 *Revised after removing completed, fully wired Pass 10 items and re-prioritizing what

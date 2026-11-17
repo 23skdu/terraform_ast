@@ -2610,6 +2610,79 @@ func TestExecute_TransformFixSuccess(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestExecute_CrossplaneCommand(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "old.yaml")
+	newPath := filepath.Join(dir, "new.yaml")
+	require.NoError(t, os.WriteFile(oldPath, []byte(`apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+spec:
+  compositeTypeRef:
+    apiVersion: example.org/v1alpha1
+    kind: XExample
+  resources:
+    - name: bucket
+      base:
+        apiVersion: s3.aws.upbound.io/v1beta1
+        kind: Bucket
+`), 0600))
+	require.NoError(t, os.WriteFile(newPath, []byte(`apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+spec:
+  compositeTypeRef:
+    apiVersion: example.org/v1alpha1
+    kind: XExample
+  resources:
+    - name: bucket
+      base:
+        apiVersion: s3.aws.upbound.io/v1beta1
+        kind: Bucket
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"crossplane", oldPath, newPath}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "IN SYNC")
+
+	// Usage
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"crossplane"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+
+	// Load errors
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"crossplane", filepath.Join(dir, "missing.yaml"), newPath}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error loading old composition")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"crossplane", oldPath, filepath.Join(dir, "missing.yaml")}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error loading new composition")
+
+	// Drift returns 1
+	require.NoError(t, os.WriteFile(newPath, []byte(`apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+spec:
+  compositeTypeRef:
+    apiVersion: example.org/v1alpha1
+    kind: XExample
+  resources:
+    - name: other
+      base:
+        apiVersion: s3.aws.upbound.io/v1beta1
+        kind: Bucket
+`), 0600))
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"crossplane", oldPath, newPath}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stdout.String(), "DRIFT DETECTED")
+}
+
 func TestExecute_ListVersionsCommand(t *testing.T) {
 	repoDir := createTestTFRepo(t, "v1.0.0", `variable "a" { type = string }`)
 
