@@ -1,6 +1,7 @@
 package codemod
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -257,8 +258,54 @@ func WriteMovedBlocks(targetPath string, blocks []MovedBlock) error {
 	return nil
 }
 
-// CoveredMovedAddresses builds the set of "from->to" keys for upstream moved blocks so that
-// SynthesizeMovedBlocksForShifts can skip addresses already covered.
+// ResourceTransform describes a resource rename or split operation.
+type ResourceTransform struct {
+	From string   `json:"from"`
+	To   []string `json:"to"`
+}
+
+// MovedBlocks expands a transform into one moved block per target address.
+func (t ResourceTransform) MovedBlocks() []MovedBlock {
+	blocks := make([]MovedBlock, 0, len(t.To))
+	for _, to := range t.To {
+		if strings.TrimSpace(t.From) == "" || strings.TrimSpace(to) == "" {
+			continue
+		}
+		blocks = append(blocks, MovedBlock{From: t.From, To: to})
+	}
+	return blocks
+}
+
+// SynthesizeTransformMovedBlocks converts resource transforms into moved blocks.
+func SynthesizeTransformMovedBlocks(transforms []ResourceTransform) []MovedBlock {
+	var blocks []MovedBlock
+	for _, t := range transforms {
+		blocks = append(blocks, t.MovedBlocks()...)
+	}
+	sort.Slice(blocks, func(i, j int) bool {
+		if blocks[i].From != blocks[j].From {
+			return blocks[i].From < blocks[j].From
+		}
+		return blocks[i].To < blocks[j].To
+	})
+	return blocks
+}
+
+// LoadResourceTransforms reads a JSON transform specification from disk.
+func LoadResourceTransforms(path string) ([]ResourceTransform, error) {
+	// #nosec G304 -- operator specified transform file
+	data, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		return nil, fmt.Errorf("read transform file %s: %w", path, err)
+	}
+	var spec struct {
+		Transforms []ResourceTransform `json:"transforms"`
+	}
+	if err := json.Unmarshal(data, &spec); err != nil {
+		return nil, fmt.Errorf("decode transform file %s: %w", path, err)
+	}
+	return spec.Transforms, nil
+}
 func CoveredMovedAddresses(blocks []ast.MovedBlockDef) map[string]struct{} {
 	covered := make(map[string]struct{})
 	for _, mb := range blocks {

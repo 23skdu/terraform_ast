@@ -28,7 +28,6 @@ This roadmap does not re-track it.
 | ID | Pri | Remaining item | Why it remains / acceptance criteria |
 | :--- | :---: | :--- | :--- |
 | **R1** | P3 | Add Crossplane composition and claim analysis | No composite-module analysis or claim-level diffing exists. Done when compositions and claims can be inspected and compared. |
-| **R2** | P3 | Add resource transforms for renaming and splitting | Codemod supports input removal and moved-block synthesis only. Done when resource rename/split transforms are previewable and applicable. |
 
 ## 2. Summary of remaining work
 
@@ -37,14 +36,13 @@ baseline, the streaming diff iterator/channel API, blast-radius `--limit` pagina
 streaming SARIF writers, recorded state-vs-live drift detection, topological module
 execution plans, hook phase support, import-block codemod synthesis, sparse checkout for
 module subdirectories, bounded TTL LRU schema caching, benchmark/fuzz matrices, webhook
-notifications, and advisory file locking.
+notifications, advisory file locking, and resource transform synthesis.
 
 The remaining effort falls into one group:
 
-1. **Strategic gaps (P3):** Crossplane (R1) and resource transforms (R2).
+1. **Strategic gaps (P3):** Crossplane composition and claim analysis (R1).
 
-**Recommended next pass:** R1 as the highest-impact remaining product work. Defer R2
-until it lands.
+**Recommended next pass:** R1 as the highest-impact remaining product work.
 
 
 *Revised after removing completed, fully wired Pass 10 items and re-prioritizing what

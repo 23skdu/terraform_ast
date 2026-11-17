@@ -44,6 +44,7 @@ var (
 	moduleGraphPath      string
 	topologicalOrderPath string
 	activeWebhookURLs    []string
+	activeTransformFile  string
 	version              = "0.9.0"
 	osExit               = os.Exit
 	mkdirTemp            = os.MkdirTemp
@@ -194,6 +195,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		return nil
 	})
 	fs.StringVar(&lockFile, "lock-file", "", "Path to an advisory lock file held for the duration of the run")
+	fs.StringVar(&activeTransformFile, "transform", "", "Path to a JSON resource transform specification")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -657,11 +659,32 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		} else if preview == "" && movedBlocksPreview != "" {
 			preview = movedBlocksPreview
 		}
+		var transformBlocksPreview string
+		if activeTransformFile != "" {
+			transforms, err := codemod.LoadResourceTransforms(activeTransformFile)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "Error loading transforms: %v\n", err)
+				return 1
+			}
+			tb := codemod.SynthesizeTransformMovedBlocks(transforms)
+			if len(tb) > 0 {
+				movedTf := filepath.Join(wrapperPath, "moved.tf")
+				transformBlocksPreview = fmt.Sprintf("--- %s\n+++ %s\n%s",
+					movedTf, movedTf, codemod.FormatMovedBlocks(tb))
+			}
+		}
 		if importBlocksPreview != "" {
 			if preview != "" {
 				preview = preview + "\n" + importBlocksPreview
 			} else {
 				preview = importBlocksPreview
+			}
+		}
+		if transformBlocksPreview != "" {
+			if preview != "" {
+				preview = preview + "\n" + transformBlocksPreview
+			} else {
+				preview = transformBlocksPreview
 			}
 		} else if preview == "" {
 
@@ -763,6 +786,22 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 				return 1
 			}
 			modified = append(modified, importsFile)
+		}
+		if activeTransformFile != "" {
+			transforms, err := codemod.LoadResourceTransforms(activeTransformFile)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "Error loading transforms: %v\n", err)
+				return 1
+			}
+			tb := codemod.SynthesizeTransformMovedBlocks(transforms)
+			if len(tb) > 0 {
+				movedFile := filepath.Join(wrapperPath, "moved.tf")
+				if err := codemod.WriteMovedBlocks(movedFile, tb); err != nil {
+					_, _ = fmt.Fprintf(stderr, "Error writing moved blocks: %v\n", err)
+					return 1
+				}
+				modified = append(modified, movedFile)
+			}
 		}
 		var msg string
 		if len(modified) == 0 {

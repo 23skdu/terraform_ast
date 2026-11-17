@@ -2488,6 +2488,128 @@ func TestExecute_LockFile(t *testing.T) {
 	assert.Contains(t, stderr.String(), "Error acquiring lock")
 }
 
+func TestExecute_TransformPreview(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "kept" {
+  type    = string
+  default = "x"
+}`), 0600))
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`module "upstream" {
+  source = "`+upstreamDir+`"
+}
+`), 0600))
+
+	transformPath := filepath.Join(t.TempDir(), "transforms.json")
+	require.NoError(t, os.WriteFile(transformPath, []byte(`{"transforms":[{"from":"aws_instance.old","to":["aws_instance.new"]}]}`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--transform", transformPath, "--fix-preview"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "moved.tf")
+	assert.Contains(t, stdout.String(), "aws_instance.new")
+}
+
+func TestExecute_TransformFixWriteError(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "kept" {
+  type    = string
+  default = "x"
+}`), 0600))
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`module "upstream" {
+  source = "`+upstreamDir+`"
+}
+`), 0600))
+
+	transformPath := filepath.Join(t.TempDir(), "transforms.json")
+	require.NoError(t, os.WriteFile(transformPath, []byte(`{"transforms":[{"from":"aws_instance.old","to":["aws_instance.new"]}]}`), 0600))
+
+	// Pre-create read-only moved.tf to force write error.
+	roPath := filepath.Join(wrapperDir, "moved.tf")
+	require.NoError(t, os.WriteFile(roPath, []byte("moved {\n  from = x\n  to   = y\n}\n"), 0o444))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--transform", transformPath, "--fix"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error writing moved blocks")
+	_ = os.Chmod(roPath, 0o600)
+}
+
+func TestExecute_TransformLoadError(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "kept" {
+  type    = string
+  default = "x"
+}`), 0600))
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`module "upstream" {
+  source = "`+upstreamDir+`"
+}
+`), 0600))
+
+	badTransform := filepath.Join(t.TempDir(), "bad.json")
+	require.NoError(t, os.WriteFile(badTransform, []byte("{"), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--transform", badTransform, "--fix-preview"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error loading transforms")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--transform", badTransform, "--fix"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error loading transforms")
+}
+
+func TestExecute_TransformPreviewAppend(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "kept" {
+  type    = string
+  default = "x"
+}`), 0600))
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`module "upstream" {
+  source = "`+upstreamDir+`"
+  obsolete = "x"
+}
+`), 0600))
+
+	transformPath := filepath.Join(t.TempDir(), "transforms.json")
+	require.NoError(t, os.WriteFile(transformPath, []byte(`{"transforms":[{"from":"aws_instance.old","to":["aws_instance.new"]}]}`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--transform", transformPath, "--fix-preview"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "moved.tf")
+}
+
+func TestExecute_TransformFixSuccess(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "kept" {
+  type    = string
+  default = "x"
+}`), 0600))
+
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`module "upstream" {
+  source = "`+upstreamDir+`"
+}
+`), 0600))
+
+	transformPath := filepath.Join(t.TempDir(), "transforms.json")
+	require.NoError(t, os.WriteFile(transformPath, []byte(`{"transforms":[{"from":"aws_instance.old","to":["aws_instance.new"]}]}`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--transform", transformPath, "--fix"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+	_, err := os.Stat(filepath.Join(wrapperDir, "moved.tf"))
+	assert.NoError(t, err)
+}
+
 func TestExecute_ListVersionsCommand(t *testing.T) {
 	repoDir := createTestTFRepo(t, "v1.0.0", `variable "a" { type = string }`)
 

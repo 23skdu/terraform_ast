@@ -386,3 +386,37 @@ func TestWriteImportBlocksWriteError(t *testing.T) {
 	assert.Error(t, err)
 	_ = os.Chmod(roPath, 0o600)
 }
+
+func TestResourceTransforms(t *testing.T) {
+	transforms := []ResourceTransform{
+		{From: "aws_instance.old", To: []string{"aws_instance.new"}},
+		{From: "aws_instance.mono", To: []string{"aws_instance.a", "aws_instance.b"}},
+		{From: "", To: []string{"x"}},
+		{From: "y", To: []string{""}},
+	}
+	blocks := SynthesizeTransformMovedBlocks(transforms)
+	assert.Len(t, blocks, 3)
+
+	// MovedBlocks method.
+	assert.Len(t, ResourceTransform{From: "a", To: []string{"b", "c"}}.MovedBlocks(), 2)
+	assert.Empty(t, ResourceTransform{From: "", To: []string{"b"}}.MovedBlocks())
+
+	// Load from disk.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "transforms.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"transforms":[{"from":"a","to":["b"]}]}`), 0o600))
+	loaded, err := LoadResourceTransforms(path)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Equal(t, "a", loaded[0].From)
+
+	// Missing file.
+	_, err = LoadResourceTransforms(filepath.Join(dir, "missing.json"))
+	assert.Error(t, err)
+
+	// Bad JSON.
+	bad := filepath.Join(dir, "bad.json")
+	require.NoError(t, os.WriteFile(bad, []byte("{"), 0o600))
+	_, err = LoadResourceTransforms(bad)
+	assert.Error(t, err)
+}
