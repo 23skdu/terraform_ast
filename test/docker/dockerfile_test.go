@@ -115,7 +115,7 @@ func TestDeveloperWorkflowManifests(t *testing.T) {
 	require.NoError(t, err)
 	dependabotContent := string(dependabot)
 	assert.Contains(t, dependabotContent, `package-ecosystem: "gomod"`)
-	assert.Contains(t, dependabotContent, `package-ecosystem: "pip"`)
+	assert.Contains(t, dependabotContent, `package-ecosystem: "docker"`)
 	assert.Contains(t, dependabotContent, `package-ecosystem: "github-actions"`)
 }
 
