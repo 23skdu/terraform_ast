@@ -3,10 +3,10 @@
 **Scope:** Remaining memory/performance hardening and feature-gap closure for
 `terraform_ast` (`tfastdiff`).
 
-**Status:** Active. A gap analysis found that the earlier "all items implemented" claim was
-inaccurate. Bounded fixes and both large Pass 11 gaps (R1 incremental streaming and R6 remote
-schema retrieval) are now implemented and verified. The remaining items are the CI wiring and
-proof-surface extensions for the formal Lean model, tracked in sections 1 and 3.
+**Status:** Complete for Pass 11. Bounded fixes, both large Pass 11 gaps (R1 incremental streaming
+and R6 remote schema retrieval), and the formal Lean proof work are implemented and verified.
+Section 1 records that no tracked items remain open; sections 2 and 3 keep the implementation
+notes for auditability.
 
 ---
 
@@ -25,17 +25,15 @@ This roadmap does not re-track it.
 
 ---
 
-## 1. Remaining work (re-opened after gap analysis)
+## 1. Remaining work status (gaps re-opened after analysis; now closed)
 
-| ID | Pri | Remaining item | Why it remains / acceptance criteria |
+| ID | Pri | Remaining item | Status |
 | :--- | :---: | :--- | :--- |
-| **L3** | P2 | Run the Lean gate in CI | `make lean-verify` type-checks the proof locally and the toolchain is pinned in `lean/lean-toolchain`, but CI does not yet install Lean. Done when the CI workflow runs `make lean-verify` as a required check. |
-| **L4** | P3 | Extend the formal proof surface | The decision procedure is proved; pin fallback for empty version strings, address-shift suppression, and wrapper-mode count equivalence are still covered only by Go tests. Done when those invariants have Lean theorems and `docs/formalproof.md` records them. |
+| — | — | No tracked items remain open | L3 and L4 were closed in the final pass; see section 3. |
 
-The two large Pass 11 gaps (R1 and R6) are now closed; their implementation notes are
-in section 2. The public registry still does not publish provider schemas, so R6 is
-closed against an operator-supplied endpoint rather than a registry API that does not
-exist.
+The two large Pass 11 gaps (R1 and R6) are closed; their implementation notes are in
+section 2. The public registry still does not publish provider schemas, so R6 is closed
+against an operator-supplied endpoint rather than a registry API that does not exist.
 
 ---
 
@@ -96,16 +94,19 @@ tracked here so the proof cannot silently drift from the Go implementation.
 1. **L1 — Model the decision procedure (done).** All Lean files live under `lean/`.
    `lean/DiffVerdict.lean` mirrors `computeVerdict`, `CanSafelyUpdate`, and the pin source
    in `recommendSafePin`; the toolchain is pinned in `lean/lean-toolchain` (Lean 4.36.0).
-2. **L2 — Prove the invariants (done).** Six theorems are checked with core Lean only:
+2. **L2 — Prove the invariants (done).** Thirteen theorems are checked with core Lean only:
    the exact safety condition, the four-way verdict partition, agreement between
-   verdict and exit-code safety, downgrade pin selection, and monotonicity of breaking
-   findings. See `docs/formalproof.md` for statements and scope.
-3. **L3 — Verify (done locally, CI open).** `make lean-verify` type-checks the proof and
-   fails on any unsolved goal. It is intentionally opt-in so `make verify` stays usable
-   without Lean; the remaining work is to install Lean in CI and require the target.
-4. **L4 — Extend the surface (open).** Add theorems for empty-version pin fallbacks,
-   address-shift suppression, and wrapper-mode count equivalence, then update
-   `docs/formalproof.md` in the same commit.
+   verdict and exit-code safety, pin selection and empty-version fallbacks, monotonicity
+   of breaking findings, address-shift suppression, and wrapper count equivalence.
+   See `docs/formalproof.md` for statements and scope.
+3. **L3 — Verify (done).** `make lean-verify` type-checks the proof and fails on any
+   unsolved goal. It stays separate from `make verify` so Go contributors without Lean
+   are not blocked, but CI now installs the pinned toolchain and runs it as a required
+   `Lean Formal Proof` check; the container job waits on that check.
+4. **L4 — Extend the surface (done).** Lean now proves the empty-version pin fallbacks,
+   that true removals do not suppress themselves, that duplicate shifts are idempotent,
+   that suppressed resources are not emitted, and the INV-3 wrapper equivalence when the
+   upstream diff is not a downgrade. `docs/formalproof.md` records each theorem.
 
 The authoritative flag reference is `docs/cli_usage.md`; stale feature claims in `README.md` were
 corrected to match the implemented CLI.
