@@ -791,3 +791,37 @@ func TestCloneOrOpenWithOptions_Sparse(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, repo)
 }
+
+func TestResolveSubDirValidation(t *testing.T) {
+	dir := t.TempDir()
+	_, err := resolveSubDir(dir, "../escape")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "escapes the repository checkout")
+
+	_, err = resolveSubDir(dir, "missing")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+
+	path := filepath.Join(dir, "file.tf")
+	require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
+	_, err = resolveSubDir(dir, "file.tf")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a directory")
+
+	root, err := resolveSubDir(dir, ".")
+	require.NoError(t, err)
+	assert.Equal(t, dir, root)
+}
+
+func TestGetOrExtract_RemoteSubdirUsesSparseClone(t *testing.T) {
+	repoDir := createRepoWithSubdir(t)
+	cache := NewRepositoryCache()
+	source := "git::file://" + repoDir + "//modules/gke?ref=v1.0.0"
+	dir, err := cache.GetOrExtract(source, "", tempDir(t))
+	require.NoError(t, err)
+	assert.Equal(t, "gke", filepath.Base(dir))
+
+	// Cone-mode sparse checkout includes root files and the selected directory.
+	assert.FileExists(t, filepath.Join(filepath.Dir(filepath.Dir(dir)), "main.tf"))
+	assert.FileExists(t, filepath.Join(dir, "main.tf"))
+}

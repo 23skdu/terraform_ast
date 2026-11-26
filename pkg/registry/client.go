@@ -420,7 +420,7 @@ func (c *Client) DownloadModule(ctx context.Context, source, version, destDir st
 	}
 
 	// Extract tar.gz into destDir
-	if err := extractTarGz(bodyReader, destDir); err != nil {
+	if err := extractTarGzWithPrefix(bodyReader, destDir, submodule); err != nil {
 		return err
 	}
 	if submodule != "" {
@@ -461,6 +461,35 @@ func validateArchiveURL(downloadURL string) error {
 const maxArchiveEntryBytes = 10 * 1024 * 1024
 
 func extractTarGz(r io.Reader, destDir string) error {
+	return extractTarGzWithPrefix(r, destDir, "")
+}
+
+func pathWithin(dir, name string) bool {
+	target := filepath.Join(dir, name)
+	return target == dir || strings.HasPrefix(target, dir+string(filepath.Separator))
+}
+
+// selectSubmodulePath accepts archive entries inside the requested submodule. Registry
+// archives usually wrap the module in a single top-level directory, so a path is also
+// considered after dropping that first component. Files outside the submodule are skipped
+// so a `//subdir` download does not materialise the rest of the module.
+func selectSubmodulePath(name, submodule, prefix string) (string, bool) {
+	candidates := []string{name}
+	if idx := strings.IndexByte(name, '/'); idx >= 0 && idx+1 < len(name) {
+		candidates = append(candidates, name[idx+1:])
+	}
+	for _, candidate := range candidates {
+		candidate = filepath.Clean(candidate)
+		if candidate == submodule || strings.HasPrefix(candidate, prefix) {
+			// Keep the submodule path in the destination: callers resolve the
+			// downloaded module at <dest>/<submodule>.
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func extractTarGzWithPrefix(r io.Reader, destDir, submodule string) error {
 	gzReader, err := gzip.NewReader(r)
 	if err != nil {
 		return fmt.Errorf("failed to initialize gzip reader: %w", err)
@@ -469,6 +498,11 @@ func extractTarGz(r io.Reader, destDir string) error {
 
 	tarReader := tar.NewReader(gzReader)
 	cleanDest := filepath.Clean(destDir)
+	cleanSubmodule := filepath.Clean(submodule)
+	prefix := ""
+	if submodule != "" {
+		prefix = cleanSubmodule + string(filepath.Separator)
+	}
 
 	for {
 		header, err := tarReader.Next()
@@ -479,10 +513,18 @@ func extractTarGz(r io.Reader, destDir string) error {
 			return fmt.Errorf("failed to read tar entry: %w", err)
 		}
 
-		target := filepath.Join(cleanDest, filepath.Clean(header.Name))
-		if !strings.HasPrefix(target, cleanDest+string(filepath.Separator)) && target != cleanDest {
+		cleanName := filepath.Clean(header.Name)
+		if !pathWithin(cleanDest, cleanName) {
 			return fmt.Errorf("illegal file path in tar archive: %s", header.Name)
 		}
+		if prefix != "" {
+			selected, ok := selectSubmodulePath(cleanName, cleanSubmodule, prefix)
+			if !ok {
+				continue
+			}
+			cleanName = selected
+		}
+		target := filepath.Join(cleanDest, cleanName)
 
 		switch header.Typeflag {
 		case tar.TypeDir:

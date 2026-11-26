@@ -77,7 +77,7 @@ flowchart TD
 - **Capabilities**:
   - Clones remote repositories with shallow clone optimization (`--depth 1`) or inspects local Git checkouts in-place.
   - Normalises Terraform VCS module sources before cloning: strips the `git::` prefix and expands the `github.com/` and `bitbucket.org/` shorthands into `https://<host>/<path>.git`, so every source the classifier routes here reaches go-git as a cloneable URL.
-  - Parses the module's position inside a repository: `//subdir` selects the directory handed back for inspection and `?ref=` pins the revision when the CLI's version flags are absent (an explicit flag wins), so a module inside a repository is analysed at the revision and location its source names. A missing or escaping subdirectory is an error, never a silent inspection of the repository root.
+  - Parses the module's position inside a repository: `//subdir` selects the directory handed back for inspection and `?ref=` pins the revision when the CLI's version flags are absent (an explicit flag wins), so a module inside a repository is analysed at the revision and location its source names. A missing or escaping subdirectory is an error, never a silent inspection of the repository root. Remote `//subdir` sources use a cone-mode sparse clone, so unrelated repository directories are not materialised; plain local paths keep `//` as an ordinary path character.
   - `IsGitURL` is the single predicate for "this source must be cloned", shared by the CLI and the upgrade planner.
   - A thread-safe in-memory `RepositoryCache` (`gitops.GlobalCache`) keeps one shared clone per repository, so repeated tag evaluations and multi-version upgrade paths re-clone from the local copy instead of re-downloading. Extracted versions are memoised per source and ref, and everything is released by `Clear()` when the run ends.
   - Extracts all semantic version tags from Git references.
@@ -88,7 +88,7 @@ flowchart TD
   - `IsRegistrySource` and `ParseRegistrySource` agree on exactly one grammar (`namespace/name/provider`, optionally hostname-prefixed) and reject empty or URL-metacharacter components.
   - VCS and local sources are never registry addresses: `git::`, `git@`, any URL scheme (`git://`, `ssh://`, `file://`, `http(s)://`), the `github.com/` and `bitbucket.org/` shorthands Terraform expands into git URLs, and the `.git` repository suffix are all rejected by both functions.
   - Refuses link-local and unspecified addresses (`169.254.0.0/16`, `fe80::/10`, and `0.0.0.0/8`) on every connection, redirect, and `X-Terraform-Get` follow-up.
-  - `X-Terraform-Get` archive extraction rejects entries that escape the destination directory.
+  - `X-Terraform-Get` archive extraction rejects entries that escape the destination directory. For `//subdir` sources only entries inside the requested submodule are extracted, including when the archive wraps the module in a top-level directory.
   - Resolves available module versions and downloads release tarballs, retrying transient failures with exponential backoff.
 
 ### 5. `pkg/diff` (Upstream Diff Comparator & Safe-Pin Recommender)

@@ -65,6 +65,87 @@ func main() {
 	osExit(exitCode)
 }
 
+// subcommandControls holds cross-cutting lifecycle flags extracted from early-dispatched
+// subcommand arguments. Those subcommands own their own flag sets, so the shared flags are
+// stripped before delegation to keep hook/lock behaviour consistent across the CLI.
+type subcommandControls struct {
+	args        []string
+	preHooks    []string
+	postHooks   []string
+	lockFile    string
+	lockTimeout time.Duration
+}
+
+func parseSubcommandControls(args []string, stderr io.Writer) (subcommandControls, bool) {
+	controls := subcommandControls{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			controls.args = append(controls.args, args[i:]...)
+			break
+		}
+		name, value, hasValue := strings.Cut(arg, "=")
+		switch name {
+		case "--hook", "--post-hook", "--lock-file", "--lock-timeout":
+			if !hasValue {
+				if i+1 >= len(args) {
+					_, _ = fmt.Fprintf(stderr, "Error: %s requires a value\n", name)
+					return controls, false
+				}
+				i++
+				value = args[i]
+			}
+			switch name {
+			case "--hook":
+				controls.preHooks = append(controls.preHooks, value)
+			case "--post-hook":
+				controls.postHooks = append(controls.postHooks, value)
+			case "--lock-file":
+				controls.lockFile = value
+			case "--lock-timeout":
+				parsed, err := time.ParseDuration(value)
+				if err != nil {
+					_, _ = fmt.Fprintf(stderr, "Error: invalid --lock-timeout %q: %v\n", value, err)
+					return controls, false
+				}
+				controls.lockTimeout = parsed
+			}
+		default:
+			controls.args = append(controls.args, arg)
+		}
+	}
+	return controls, true
+}
+
+// runSubcommandWithControls applies lifecycle hooks and locking around an early-dispatched
+// subcommand, preserving its exit code even when a post-hook fails.
+func runSubcommandWithControls(args []string, stdout, stderr io.Writer, run func([]string) int) int {
+	controls, ok := parseSubcommandControls(args, stderr)
+	if !ok {
+		return 2
+	}
+	if len(controls.preHooks) > 0 {
+		hookList := make([]hooks.Hook, 0, len(controls.preHooks))
+		for _, command := range controls.preHooks {
+			hookList = append(hookList, hooks.Hook{Name: command, Command: "sh", Args: []string{"-c", command}, Phase: "pre-analysis"})
+		}
+		if err := hooks.RunPhase(hookList, "pre-analysis", stdout, stderr); err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error running hook: %v\n", err)
+			return 1
+		}
+	}
+	if controls.lockFile != "" {
+		held, err := lock.AcquireWithTimeout(controls.lockFile, controls.lockTimeout)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error acquiring lock: %v\n", err)
+			return 2
+		}
+		defer func() { _ = held.Release() }()
+	}
+	code := run(controls.args)
+	return runPostHooks(code, controls.postHooks, stdout, stderr)
+}
+
 // Execute runs the CLI application with given arguments and streams.
 func Execute(args []string, stdout, stderr io.Writer) int {
 	// Repositories and extracted versions are owned by the shared gitops cache; release them
@@ -87,15 +168,29 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 			_ = lsp.RunDaemonStreams(os.Stdin, stdout)
 			return 0
 		case "encrypt":
-			return runEncryptCommand(args[1:], stdout, stderr)
+			return runSubcommandWithControls(args[1:], stdout, stderr, func(subArgs []string) int {
+				return runEncryptCommand(subArgs, stdout, stderr)
+			})
 		case "decrypt":
-			return runDecryptCommand(args[1:], stdout, stderr)
+			return runSubcommandWithControls(args[1:], stdout, stderr, func(subArgs []string) int {
+				return runDecryptCommand(subArgs, stdout, stderr)
+			})
 		case "drift":
-			return runDriftCommand(args[1:], stdout, stderr)
+			return runSubcommandWithControls(args[1:], stdout, stderr, func(subArgs []string) int {
+				return runDriftCommand(subArgs, stdout, stderr)
+			})
 		case "crossplane":
-			return runCrossplaneCommand(args[1:], stdout, stderr)
+			return runSubcommandWithControls(args[1:], stdout, stderr, func(subArgs []string) int {
+				return runCrossplaneCommand(subArgs, stdout, stderr)
+			})
 		case "list-versions":
-			return runListVersionsCommand(args[1:], stdout, stderr)
+			return runSubcommandWithControls(args[1:], stdout, stderr, func(subArgs []string) int {
+				return runListVersionsCommand(subArgs, stdout, stderr)
+			})
+		case "claim":
+			return runSubcommandWithControls(args[1:], stdout, stderr, func(subArgs []string) int {
+				return runClaimCommand(subArgs, stdout, stderr)
+			})
 		}
 	}
 
@@ -137,6 +232,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		webhookURLs        []string
 		webhookTimeout     time.Duration
 		lockFile           string
+		lockTimeout        time.Duration
 	)
 
 	fs.BoolVar(&showVersion, "version", false, "Print version and exit")
@@ -200,6 +296,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	})
 	fs.DurationVar(&webhookTimeout, "webhook-timeout", 10*time.Second, "HTTP timeout for each webhook notification")
 	fs.StringVar(&lockFile, "lock-file", "", "Path to an advisory lock file held for the duration of the run")
+	fs.DurationVar(&lockTimeout, "lock-timeout", 0, "How long to wait for --lock-file before failing (0 = fail immediately)")
 	fs.StringVar(&activeTransformFile, "transform", "", "Path to a JSON resource transform specification")
 
 	if err := fs.Parse(args); err != nil {
@@ -347,7 +444,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	webhook.SetDefaultTimeout(webhookTimeout)
 
 	if lockFile != "" {
-		l, err := lock.Acquire(lockFile)
+		l, err := lock.AcquireWithTimeout(lockFile, lockTimeout)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error acquiring lock: %v\n", err)
 			return 2
@@ -670,7 +767,7 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		} else if preview == "" && movedBlocksPreview != "" {
 			preview = movedBlocksPreview
 		}
-		var transformBlocksPreview string
+		var transformBlocksPreview, transformSplitPreview string
 		if activeTransformFile != "" {
 			transforms, err := codemod.LoadResourceTransforms(activeTransformFile)
 			if err != nil {
@@ -683,6 +780,12 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 				transformBlocksPreview = fmt.Sprintf("--- %s\n+++ %s\n%s",
 					movedTf, movedTf, codemod.FormatMovedBlocks(tb))
 			}
+			splitBlocks := codemod.SynthesizeTransformSplitBlocks(transforms)
+			if len(splitBlocks) > 0 {
+				splitTf := filepath.Join(wrapperPath, "split.tf")
+				transformSplitPreview = fmt.Sprintf("--- %s\n+++ %s\n%s",
+					splitTf, splitTf, codemod.FormatSplitBlocks(splitBlocks))
+			}
 		}
 		if importBlocksPreview != "" {
 			if preview != "" {
@@ -691,14 +794,17 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 				preview = importBlocksPreview
 			}
 		}
-		if transformBlocksPreview != "" {
-			if preview != "" {
-				preview = preview + "\n" + transformBlocksPreview
-			} else {
-				preview = transformBlocksPreview
+		for _, candidate := range []string{transformBlocksPreview, transformSplitPreview} {
+			if candidate == "" {
+				continue
 			}
-		} else if preview == "" {
-
+			if preview != "" {
+				preview = preview + "\n" + candidate
+			} else {
+				preview = candidate
+			}
+		}
+		if preview == "" {
 			preview = "No automatic patch can be generated for the detected findings.\n" +
 				"Only removed arguments in the wrapper's Terraform module block are currently patchable; no files were changed.\n"
 		}
@@ -816,6 +922,15 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 					return 1
 				}
 				modified = append(modified, movedFile)
+			}
+			splitBlocks := codemod.SynthesizeTransformSplitBlocks(transforms)
+			if len(splitBlocks) > 0 {
+				splitFile := filepath.Join(wrapperPath, "split.tf")
+				if err := codemod.WriteSplitBlocks(splitFile, splitBlocks); err != nil {
+					_, _ = fmt.Fprintf(stderr, "Error writing split blocks: %v\n", err)
+					return 1
+				}
+				modified = append(modified, splitFile)
 			}
 		}
 		var msg string
@@ -1476,7 +1591,9 @@ func resolveModuleVersionDir(ctx context.Context, registryTimeout time.Duration,
 			_ = os.RemoveAll(directory)
 			return "", false, fmt.Errorf("download registry module %s@%s: %w", source, version, err)
 		}
-		return directory, true, nil
+		// Registry sources may address a module inside the archive with `//subdir`;
+		// intermediate versions must honour it just like wrapper and compare modes.
+		return filepath.Join(directory, registry.SubmodulePath(source)), true, nil
 	}
 	if isGitURL(source) || isGitRepo(source) {
 		directory, err := gitops.GlobalCache.GetOrExtract(source, version, newCachedDir("tfastdiff_upgrade_step_*"))
@@ -1683,6 +1800,30 @@ func runCrossplaneCommand(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	result := crossplane.Compare(oldComp, newComp)
+	enc, _ := json.MarshalIndent(result, "", "  ")
+	_, _ = fmt.Fprintln(stdout, string(enc))
+	if result.HasDrift {
+		return 1
+	}
+	return 0
+}
+
+func runClaimCommand(args []string, stdout, stderr io.Writer) int {
+	if len(args) < 2 {
+		_, _ = fmt.Fprintln(stderr, "Usage: tfastdiff claim <old-claim.yaml> <new-claim.yaml>")
+		return 2
+	}
+	oldClaim, err := crossplane.LoadClaim(args[0])
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "Error loading old claim: %v\n", err)
+		return 1
+	}
+	newClaim, err := crossplane.LoadClaim(args[1])
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "Error loading new claim: %v\n", err)
+		return 1
+	}
+	result := crossplane.CompareClaims(oldClaim, newClaim)
 	enc, _ := json.MarshalIndent(result, "", "  ")
 	_, _ = fmt.Fprintln(stdout, string(enc))
 	if result.HasDrift {

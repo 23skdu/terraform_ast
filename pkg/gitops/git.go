@@ -335,16 +335,16 @@ func CheckoutRef(repo *git.Repository, refName string) error {
 // Subdirectory and reference syntax is stripped from the source first: the ref is selected by the
 // caller (see GetOrExtract) and the subdirectory belongs to the returned checkout, not the clone.
 func ExtractVersionToDirShallow(repoURLOrPath, refName, destDir string) error {
-	repoURLOrPath = ParseGitSource(repoURLOrPath).URL
+	source := ParseGitSource(repoURLOrPath)
+	repoURLOrPath = source.URL
 	if fi, err := os.Stat(repoURLOrPath); err == nil && fi.IsDir() && !isGitRepo(repoURLOrPath) {
 		return copyDir(repoURLOrPath, destDir)
 	}
-	repo, err := CloneOrOpenWithOptions(repoURLOrPath, destDir, CloneConfig{
-		Shallow:      true,
-		Depth:        1,
-		SingleBranch: true,
-		RefName:      refName,
-	})
+	config := CloneConfig{Shallow: true, Depth: 1, SingleBranch: true, RefName: refName}
+	if source.SubDir != "" {
+		config.SparsePaths = []string{source.SubDir}
+	}
+	repo, err := CloneOrOpenWithOptions(repoURLOrPath, destDir, config)
 	if err != nil {
 		return err
 	}
@@ -471,9 +471,23 @@ func (c *RepositoryCache) GetOrExtract(repoURLOrPath, refName string, newDir Dir
 		if err != nil {
 			return "", err
 		}
-		if err := c.extractCached(parts.URL, effectiveRef, dir); err != nil {
+		// A `//subdir` source gets a sparse clone so unrelated repository paths are never
+		// materialised. Local directory sources never carry subdir syntax (ParseGitSource
+		// intentionally treats `//` in a plain path as an ordinary character).
+		if parts.SubDir != "" {
+			if err := validateSubDirPath(parts.SubDir); err != nil {
+				return "", fmt.Errorf("module source %s: %w", repoURLOrPath, err)
+			}
+		}
+		var extractErr error
+		if parts.SubDir != "" {
+			extractErr = ExtractVersionToDirShallow(repoURLOrPath, effectiveRef, dir)
+		} else {
+			extractErr = c.extractCached(parts.URL, effectiveRef, dir)
+		}
+		if extractErr != nil {
 			_ = os.RemoveAll(dir)
-			return "", err
+			return "", extractErr
 		}
 		return dir, nil
 	})
@@ -489,6 +503,20 @@ func (c *RepositoryCache) GetOrExtract(repoURLOrPath, refName string, newDir Dir
 		return "", fmt.Errorf("module source %s: %w", repoURLOrPath, err)
 	}
 	return sub, nil
+}
+
+// validateSubDirPath rejects subdirectory syntax that could escape the checkout before a
+// sparse checkout is attempted, so the operator gets an actionable error rather than a git CLI
+// failure.
+func validateSubDirPath(subDir string) error {
+	clean := filepath.Clean(subDir)
+	if clean == "." || clean == "" {
+		return nil
+	}
+	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("subdirectory %q escapes the repository checkout", subDir)
+	}
+	return nil
 }
 
 // resolveSubDir returns the directory of subDir inside the checkout rooted at dir, rejecting a

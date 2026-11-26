@@ -258,10 +258,101 @@ func WriteMovedBlocks(targetPath string, blocks []MovedBlock) error {
 	return nil
 }
 
-// ResourceTransform describes a resource rename or split operation.
+// ResourceTransform describes a resource rename or split operation. For a split,
+// IDs must provide one concrete import ID per target address.
 type ResourceTransform struct {
 	From string   `json:"from"`
 	To   []string `json:"to"`
+	IDs  []string `json:"ids,omitempty"`
+}
+
+// SplitBlock describes one target of a split migration. Terraform cannot move one
+// state object to several addresses, so the source is removed from state without
+// destruction and each target is imported with its own explicit ID.
+type SplitBlock struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	ID   string `json:"id"`
+}
+
+// SynthesizeTransformSplitBlocks expands split transforms into removable source
+// addresses and import targets. Rename transforms (single target) use moved blocks.
+func SynthesizeTransformSplitBlocks(transforms []ResourceTransform) []SplitBlock {
+	var blocks []SplitBlock
+	for _, transform := range transforms {
+		if len(transform.To) <= 1 || len(transform.IDs) != len(transform.To) {
+			continue
+		}
+		for i, to := range transform.To {
+			blocks = append(blocks, SplitBlock{From: transform.From, To: to, ID: transform.IDs[i]})
+		}
+	}
+	sort.Slice(blocks, func(i, j int) bool {
+		if blocks[i].From != blocks[j].From {
+			return blocks[i].From < blocks[j].From
+		}
+		return blocks[i].To < blocks[j].To
+	})
+	return blocks
+}
+
+// FormatSplitBlocks renders removed + import blocks that apply a split migration.
+func FormatSplitBlocks(blocks []SplitBlock) string {
+	if len(blocks) == 0 {
+		return ""
+	}
+	file := hclwrite.NewEmptyFile()
+	body := file.Body()
+	removedSources := make(map[string]struct{}, len(blocks))
+	for _, block := range blocks {
+		from := cleanAddressForMoved(block.From)
+		to := cleanAddressForMoved(block.To)
+		if from == "" || to == "" || strings.TrimSpace(block.ID) == "" {
+			continue
+		}
+		if _, seen := removedSources[from]; !seen {
+			removedSources[from] = struct{}{}
+			removed := body.AppendNewBlock("removed", nil)
+			removed.Body().SetAttributeTraversal("from", parseAddressTraversal(from))
+			lifecycle := removed.Body().AppendNewBlock("lifecycle", nil)
+			lifecycle.Body().SetAttributeValue("destroy", cty.False)
+			body.AppendNewline()
+		}
+		imported := body.AppendNewBlock("import", nil)
+		imported.Body().SetAttributeTraversal("to", parseAddressTraversal(to))
+		imported.Body().SetAttributeValue("id", cty.StringVal(block.ID))
+		body.AppendNewline()
+	}
+	return string(file.Bytes())
+}
+
+// WriteSplitBlocks writes or appends split migration blocks to targetPath idempotently.
+func WriteSplitBlocks(targetPath string, blocks []SplitBlock) error {
+	formatted := FormatSplitBlocks(blocks)
+	if formatted == "" {
+		return nil
+	}
+	cleanPath := filepath.Clean(targetPath)
+	if err := os.MkdirAll(filepath.Dir(cleanPath), 0o750); err != nil {
+		return fmt.Errorf("create directory for split blocks %s: %w", cleanPath, err)
+	}
+	// #nosec G304 -- operator specified target file
+	existing, err := os.ReadFile(cleanPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read existing split blocks file %s: %w", cleanPath, err)
+	}
+	if strings.Contains(string(existing), strings.TrimSpace(formatted)) {
+		return nil
+	}
+	content := []byte(formatted)
+	if len(existing) > 0 {
+		content = append(append(existing, '\n'), []byte(formatted)...)
+	}
+	// #nosec G703 -- operator specified target file
+	if err := os.WriteFile(cleanPath, content, 0o600); err != nil {
+		return fmt.Errorf("write split blocks file %s: %w", cleanPath, err)
+	}
+	return nil
 }
 
 // MovedBlocks expands a transform into one moved block per target address.
@@ -320,9 +411,16 @@ func LoadResourceTransforms(path string) ([]ResourceTransform, error) {
 			}
 		}
 		if len(transform.To) > 1 {
-			// A one-to-many moved{} block is not valid Terraform. Reject the spec instead of
-			// emitting a patch that can never apply; see the roadmap for split support.
-			return nil, fmt.Errorf("transform file %s entry %d is a split transform, which is not supported", path, i)
+			// A one-to-many moved{} block is invalid Terraform. Splits must carry an
+			// explicit import ID for every target so we can emit removed + import blocks.
+			if len(transform.IDs) != len(transform.To) {
+				return nil, fmt.Errorf("transform file %s entry %d is a split transform and requires one id per to address", path, i)
+			}
+			for _, id := range transform.IDs {
+				if strings.TrimSpace(id) == "" {
+					return nil, fmt.Errorf("transform file %s entry %d has an empty split id", path, i)
+				}
+			}
 		}
 	}
 	return spec.Transforms, nil

@@ -2641,6 +2641,86 @@ func TestExecute_LockFile(t *testing.T) {
 	assert.Contains(t, stderr.String(), "Error acquiring lock")
 }
 
+func TestExecute_LockTimeoutWaitsForHolder(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+
+	lockPath := filepath.Join(t.TempDir(), "run.lock")
+	held, err := lock.Acquire(lockPath)
+	require.NoError(t, err)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_ = held.Release()
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir, "--new", dir, "--lock-file", lockPath, "--lock-timeout", "2s"}, &stdout, &stderr)
+	assert.Equal(t, 0, code, stderr.String())
+}
+
+func TestExecute_SubcommandLifecycleControls(t *testing.T) {
+	dir := t.TempDir()
+	preMarker := filepath.Join(dir, "pre")
+	postMarker := filepath.Join(dir, "post")
+	lockPath := filepath.Join(dir, "run.lock")
+
+	var stdout, stderr bytes.Buffer
+	// list-versions without a repository exits 2; hooks must still run and the
+	// post-hook must not replace that verdict.
+	code := Execute([]string{
+		"list-versions",
+		"--hook", "touch " + preMarker,
+		"--post-hook=touch " + postMarker,
+		"--lock-file=" + lockPath,
+		"--lock-timeout", "1s",
+	}, &stdout, &stderr)
+	assert.Equal(t, 2, code, stderr.String())
+	assert.FileExists(t, preMarker)
+	assert.FileExists(t, postMarker)
+	// The lock file intentionally remains so all contenders lock the same inode, but
+	// the advisory lock must be released when the subcommand finishes.
+	released, err := lock.Acquire(lockPath)
+	require.NoError(t, err)
+	require.NoError(t, released.Release())
+}
+
+func TestExecute_SubcommandHookFailure(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"list-versions", "--hook", "false"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error running hook")
+}
+
+func TestExecute_SubcommandLockContention(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "run.lock")
+	held, err := lock.Acquire(lockPath)
+	require.NoError(t, err)
+	defer func() { _ = held.Release() }()
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"list-versions", "--lock-file", lockPath, "--lock-timeout", "10ms"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "Error acquiring lock")
+}
+
+func TestExecute_SubcommandControlValidation(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"list-versions", "--hook"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--hook requires a value")
+
+	stderr.Reset()
+	code = Execute([]string{"list-versions", "--lock-timeout", "not-a-duration"}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "invalid --lock-timeout")
+
+	// Explicit terminator is forwarded to the subcommand flag parser.
+	stderr.Reset()
+	code = Execute([]string{"list-versions", "--", filepath.Join(t.TempDir(), "missing-repo")}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error opening repository")
+}
+
 func TestExecute_TransformRequiresFixMode(t *testing.T) {
 	dir := t.TempDir()
 	transformPath := filepath.Join(t.TempDir(), "transforms.json")
@@ -2772,6 +2852,117 @@ func TestExecute_TransformFixSuccess(t *testing.T) {
 	assert.Equal(t, 0, code, stderr.String())
 	_, err := os.Stat(filepath.Join(wrapperDir, "moved.tf"))
 	assert.NoError(t, err)
+}
+
+func TestResolveModuleVersionDir_Submodule(t *testing.T) {
+	_, cleanup := setupMockRegistryServer(t)
+	defer cleanup()
+
+	dir, temporary, err := resolveModuleVersionDir(context.Background(), time.Second, "hashicorp/consul/aws//modules/sub", "1.0.0")
+	require.NoError(t, err)
+	require.True(t, temporary)
+	defer func() { _ = os.RemoveAll(filepath.Dir(filepath.Dir(dir))) }()
+	assert.Equal(t, "sub", filepath.Base(dir))
+	content, err := os.ReadFile(filepath.Join(dir, "main.tf"))
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "sub_var")
+}
+
+func TestExecute_ClaimCommand(t *testing.T) {
+	dir := t.TempDir()
+	oldClaim := filepath.Join(dir, "old.yaml")
+	newClaim := filepath.Join(dir, "new.yaml")
+	require.NoError(t, os.WriteFile(oldClaim, []byte(`apiVersion: example.org/v1
+kind: Claim
+spec:
+  compositeTypeRef:
+    apiVersion: example.org/v1
+    kind: XExample
+  parameters:
+    size: small
+`), 0600))
+	require.NoError(t, os.WriteFile(newClaim, []byte(`apiVersion: example.org/v1
+kind: Claim
+spec:
+  compositeTypeRef:
+    apiVersion: example.org/v1
+    kind: XExample
+  parameters:
+    size: large
+`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"claim", oldClaim, newClaim}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stdout.String(), `"changed_parameters"`)
+	assert.Contains(t, stdout.String(), "size")
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"claim", newClaim, newClaim}, &stdout, &stderr)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "IN SYNC")
+
+	stderr.Reset()
+	code = Execute([]string{"claim", oldClaim}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "Usage: tfastdiff claim")
+
+	bad := filepath.Join(dir, "bad.yaml")
+	require.NoError(t, os.WriteFile(bad, []byte("{"), 0600))
+	stderr.Reset()
+	code = Execute([]string{"claim", bad, newClaim}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error loading old claim")
+
+	stderr.Reset()
+	code = Execute([]string{"claim", oldClaim, bad}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error loading new claim")
+}
+
+func TestExecute_SplitTransformPreviewAndFix(t *testing.T) {
+	upstreamDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(upstreamDir, "main.tf"), []byte(`variable "kept" { type = string }`), 0600))
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`module "upstream" {
+  source = "`+upstreamDir+`"
+}
+`), 0600))
+	transformPath := filepath.Join(t.TempDir(), "split.json")
+	require.NoError(t, os.WriteFile(transformPath, []byte(`{"transforms":[{"from":"aws_instance.mono","to":["aws_instance.a","aws_instance.b"],"ids":["id-a","id-b"]}]}`), 0600))
+
+	baseArgs := []string{"--wrapper", wrapperDir, "--upstream", upstreamDir, "--transform", transformPath}
+	var stdout, stderr bytes.Buffer
+	code := Execute(append(append([]string{}, baseArgs...), "--fix-preview"), &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "split.tf")
+	assert.Contains(t, stdout.String(), "removed")
+	assert.Contains(t, stdout.String(), "aws_instance.b")
+	assert.Contains(t, stdout.String(), `"id-a"`)
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute(append(append([]string{}, baseArgs...), "--fix"), &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+	written, err := os.ReadFile(filepath.Join(wrapperDir, "split.tf"))
+	require.NoError(t, err)
+	assert.Contains(t, string(written), "import")
+
+	// A read-only split.tf must surface an actionable error.
+	blockedWrapper := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(blockedWrapper, "main.tf"), []byte(`module "upstream" {
+  source = "`+upstreamDir+`"
+}
+`), 0600))
+	blockedSplit := filepath.Join(blockedWrapper, "split.tf")
+	require.NoError(t, os.WriteFile(blockedSplit, []byte("locals {}\n"), 0o400))
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--wrapper", blockedWrapper, "--upstream", upstreamDir, "--transform", transformPath, "--fix"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error writing split blocks")
+	_ = os.Chmod(blockedSplit, 0o600)
 }
 
 func TestExecute_CrossplaneCommand(t *testing.T) {

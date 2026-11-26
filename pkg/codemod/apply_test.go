@@ -431,6 +431,9 @@ func TestResourceTransforms(t *testing.T) {
 	blocks := SynthesizeTransformMovedBlocks(transforms)
 	assert.Len(t, blocks, 3)
 
+	// Splits without IDs are ignored by the synthesizer; validation rejects them earlier.
+	assert.Empty(t, SynthesizeTransformSplitBlocks(transforms))
+
 	// MovedBlocks method.
 	assert.Len(t, ResourceTransform{From: "a", To: []string{"b", "c"}}.MovedBlocks(), 2)
 	assert.Empty(t, ResourceTransform{From: "", To: []string{"b"}}.MovedBlocks())
@@ -455,14 +458,79 @@ func TestResourceTransforms(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestSplitTransforms(t *testing.T) {
+	dir := t.TempDir()
+	spec := filepath.Join(dir, "split.json")
+	require.NoError(t, os.WriteFile(spec, []byte(`{"transforms":[{"from":"aws_instance.mono","to":["aws_instance.a","aws_instance.b"],"ids":["id-a","id-b"]}]}`), 0o600))
+	transforms, err := LoadResourceTransforms(spec)
+	require.NoError(t, err)
+
+	blocks := SynthesizeTransformSplitBlocks(transforms)
+	require.Len(t, blocks, 2)
+	assert.Equal(t, "id-a", blocks[0].ID)
+
+	sorted := SynthesizeTransformSplitBlocks([]ResourceTransform{
+		{From: "z", To: []string{"z1", "z2"}, IDs: []string{"1", "2"}},
+		{From: "a", To: []string{"a1", "a2"}, IDs: []string{"3", "4"}},
+	})
+	require.Len(t, sorted, 4)
+	assert.Equal(t, "a", sorted[0].From)
+
+	formatted := FormatSplitBlocks(blocks)
+	assert.Contains(t, formatted, "removed")
+	assert.Contains(t, formatted, "destroy = false")
+	assert.Contains(t, formatted, "aws_instance.a")
+	assert.Contains(t, formatted, `"id-b"`)
+	assert.Empty(t, FormatSplitBlocks(nil))
+	assert.Empty(t, FormatSplitBlocks([]SplitBlock{
+		{From: "", To: "a", ID: "id"},
+		{From: "x", To: "", ID: "id"},
+		{From: "x", To: "a", ID: ""},
+	}))
+
+	target := filepath.Join(dir, "nested", "split.tf")
+	require.NoError(t, WriteSplitBlocks(target, blocks))
+	first, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.NoError(t, WriteSplitBlocks(target, blocks))
+	again, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, first, again, "writing the same split twice must be idempotent")
+
+	require.NoError(t, WriteSplitBlocks(target, []SplitBlock{{From: "aws_instance.other", To: "aws_instance.c", ID: "id-c"}}))
+	appended, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Contains(t, string(appended), "aws_instance.other")
+
+	require.NoError(t, WriteSplitBlocks(target, nil))
+
+	blocked := filepath.Join(dir, "not-a-directory")
+	require.NoError(t, os.WriteFile(blocked, []byte("x"), 0o600))
+	err = WriteSplitBlocks(filepath.Join(blocked, "split.tf"), blocks)
+	assert.ErrorContains(t, err, "create directory for split blocks")
+
+	targetDir := filepath.Join(dir, "split-dir")
+	require.NoError(t, os.Mkdir(targetDir, 0o750))
+	err = WriteSplitBlocks(targetDir, blocks)
+	assert.ErrorContains(t, err, "read existing split blocks file")
+
+	roDir := filepath.Join(dir, "readonly")
+	require.NoError(t, os.Mkdir(roDir, 0o750))
+	require.NoError(t, os.Chmod(roDir, 0o500))
+	defer func() { _ = os.Chmod(roDir, 0o700) }()
+	err = WriteSplitBlocks(filepath.Join(roDir, "split.tf"), blocks)
+	assert.ErrorContains(t, err, "write split blocks file")
+}
+
 func TestLoadResourceTransformsValidation(t *testing.T) {
 	dir := t.TempDir()
 	cases := map[string]string{
-		"empty.json":    `{}`,
-		"no-from.json":  `{"transforms":[{"from":"","to":["b"]}]}`,
-		"no-to.json":    `{"transforms":[{"from":"a","to":[]}]}`,
-		"empty-to.json": `{"transforms":[{"from":"a","to":[""]}]}`,
-		"split.json":    `{"transforms":[{"from":"a","to":["b","c"]}]}`,
+		"empty.json":          `{}`,
+		"no-from.json":        `{"transforms":[{"from":"","to":["b"]}]}`,
+		"no-to.json":          `{"transforms":[{"from":"a","to":[]}]}`,
+		"empty-to.json":       `{"transforms":[{"from":"a","to":[""]}]}`,
+		"split.json":          `{"transforms":[{"from":"a","to":["b","c"]}]}`,
+		"split-empty-id.json": `{"transforms":[{"from":"a","to":["b","c"],"ids":["id-b",""]}]}`,
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {

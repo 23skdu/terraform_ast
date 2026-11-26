@@ -223,20 +223,38 @@ tfastdiff crossplane ./old-composition.yaml ./new-composition.yaml
 ```
 
 The command reports added, removed, and changed composed resources and exits `1` when a change is
-found. **Claim-level analysis is not implemented yet**; see `docs/roadmap.md` (R9).
+found.
+
+### Crossplane Claims (`claim`)
+
+```bash
+tfastdiff claim ./old-claim.yaml ./new-claim.yaml
+```
+
+The command emits a JSON `ClaimDiff` covering composite type changes, composition
+selection/secret wiring changes, and added, removed, or changed `spec.parameters` keys. It exits
+`1` when drift is detected. Both `crossplane` and `claim` accept the shared `--hook`,
+`--post-hook`, `--lock-file`, and `--lock-timeout` controls described below.
 
 ### Hooks, Webhooks, and Run Coordination
 
 - `--hook <shell>` (repeatable): Runs a `pre-analysis` shell command via `sh -c` before analysis.
+  Works on audit/compare modes and on the `drift`, `crossplane`, `encrypt`, `decrypt`, and
+  `list-versions` subcommands.
 - `--post-hook <shell>` (repeatable): Runs a `post-analysis` shell command after analysis. A failing
   post-hook prints an error but never overwrites a non-zero analysis verdict.
 - `--webhook <url>` (repeatable): POSTs a JSON payload (`module_name`, `total_breaking`, `summary`)
   when an audit, fix, fix-preview, or upgrade-path run detects hazardous changes. Safe runs send
   nothing.
 - `--webhook-timeout <duration>`: HTTP timeout per notification (default `10s`).
-- `--lock-file <path>`: Creates an exclusive lockfile for the duration of a run so concurrent CI
-  jobs can serialize. The current implementation is an `O_EXCL` lockfile; real advisory OS locks
-  and stale-lock recovery are tracked in `docs/roadmap.md` (R12).
+- `--lock-file <path>`: Acquires an advisory OS file lock (`flock`) for the duration of a run so
+  concurrent CI jobs serialize. The kernel releases the lock if the process crashes, so stale
+  locks cannot block later runs; the file itself is intentionally kept after release so contenders
+  always lock the same inode. Owner metadata (PID, host, acquisition time) is written to the file
+  for diagnostics and can be read with `lock.ReadInfo`. The lock is also applied to the
+  `drift`, `crossplane`, `encrypt`, `decrypt`, and `list-versions` subcommands.
+- `--lock-timeout <duration>`: How long to retry a contended `--lock-file` before failing
+  (default `0` = fail immediately).
 
 ### Codemods, Graphs, and Streaming
 
@@ -247,8 +265,20 @@ found. **Claim-level analysis is not implemented yet**; see `docs/roadmap.md` (R
   {"transforms": [{"from": "aws_instance.old", "to": ["aws_instance.new"]}]}
   ```
 
-  Empty specs, missing addresses, and one-to-many splits are rejected; split support is tracked in
-  `docs/roadmap.md` (R10).
+  Single-target transforms produce `moved.tf`. A one-to-many split requires one concrete import
+  ID per target; it produces `split.tf` containing a `removed` block (`destroy = false`) for the
+  source plus an `import` block per target:
+
+  ```json
+  {"transforms": [{
+    "from": "aws_instance.mono",
+    "to": ["aws_instance.a", "aws_instance.b"],
+    "ids": ["i-0aaa", "i-0bbb"]
+  }]}
+  ```
+
+  Empty specs, missing addresses, and split specs without a matching `ids` list are rejected.
+  IDs must identify the real cloud resources; they cannot be inferred from Terraform source.
 - `--module-graph <path>`: Writes a Graphviz DOT dependency graph.
 - `--topological-order <path>`: Writes one module address per line in dependency order
   (dependencies first). The order is deterministic and cycle detection is reported as an error.

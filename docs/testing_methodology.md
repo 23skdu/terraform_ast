@@ -155,7 +155,7 @@ Benchmark suites across `pkg/ast` (`BenchmarkInspectModule{Small,Medium,Large}`,
 make perf
 ```
 
-The committed baseline in `test/benchmarks/baseline.json` is compared by `make bench-gate`; in CI the comparison is currently advisory (`continue-on-error: true`) and does not block a merge.
+The committed baseline in `test/benchmarks/baseline.json` is compared by `make bench-gate`, which is a blocking CI check. `BenchmarkGateCalibration` is a fixed CPU loop included in every run; the gate divides measured timings by the observed calibration ratio before comparison, so a faster or slower CI runner does not produce false regressions. Regenerate the baseline with `make bench-baseline` only when a deliberate performance change is accepted.
 
 ---
 

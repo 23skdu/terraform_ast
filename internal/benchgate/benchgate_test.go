@@ -109,6 +109,56 @@ func TestNewBaselineAndCompare(t *testing.T) {
 	}
 }
 
+func TestCompareCalibrationNormalizesRunnerSpeed(t *testing.T) {
+	baseline := NewBaseline([]Benchmark{
+		{Name: CalibrationBenchmark, NSPerOp: 100},
+		{Name: "BenchmarkWork", NSPerOp: 100},
+	}, 10, "now")
+
+	// A runner twice as slow reports 220 ns/op for a 100 ns/op baseline workload.
+	result, err := Compare(baseline, []Benchmark{
+		{Name: CalibrationBenchmark, NSPerOp: 200},
+		{Name: "BenchmarkWork", NSPerOp: 220},
+	}, 10)
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if !result.OK() || result.Scale != 2 {
+		t.Fatalf("normalised result = %+v", result)
+	}
+
+	result, err = Compare(baseline, []Benchmark{
+		{Name: CalibrationBenchmark, NSPerOp: 200},
+		{Name: "BenchmarkWork", NSPerOp: 250},
+	}, 10)
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if len(result.Regressions) != 1 || result.Regressions[0].ChangePct != 25 {
+		t.Fatalf("regressions = %+v", result.Regressions)
+	}
+
+	// An old baseline without calibration keeps absolute comparison.
+	legacy := NewBaseline([]Benchmark{{Name: "BenchmarkWork", NSPerOp: 100}}, 10, "then")
+	result, err = Compare(legacy, []Benchmark{{Name: "BenchmarkWork", NSPerOp: 100}}, 10)
+	if err != nil || result.Scale != 1 || !result.OK() {
+		t.Fatalf("legacy result = %+v, err = %v", result, err)
+	}
+	// A run missing the calibration benchmark likewise falls back.
+	result, err = Compare(baseline, []Benchmark{{Name: "BenchmarkWork", NSPerOp: 100}}, 10)
+	if err != nil || result.Scale != 1 {
+		t.Fatalf("missing calibration result = %+v, err = %v", result, err)
+	}
+}
+
+func TestCompareCalibrationErrors(t *testing.T) {
+	baseline := &Baseline{Benchmarks: map[string]float64{CalibrationBenchmark: 0, "BenchmarkWork": 100}}
+	_, err := Compare(baseline, []Benchmark{{Name: CalibrationBenchmark, NSPerOp: 100}}, 10)
+	if err == nil || !strings.Contains(err.Error(), "must be positive") {
+		t.Fatalf("expected calibration error, got %v", err)
+	}
+}
+
 func TestCompareErrors(t *testing.T) {
 	valid := &Baseline{Benchmarks: map[string]float64{"BenchmarkA": 1}}
 	if _, err := Compare(nil, nil, 10); err == nil {
@@ -225,11 +275,12 @@ func TestWriteReport(t *testing.T) {
 	result := Result{
 		Regressions: []Regression{{Name: "BenchmarkSlow", Baseline: 100, Current: 130, ChangePct: 30}},
 		Missing:     []string{"BenchmarkGone"},
+		Scale:       1.25,
 	}
 	if err := WriteReport(&b, result, 10); err != nil {
 		t.Fatalf("WriteReport: %v", err)
 	}
-	if !strings.Contains(b.String(), "BenchmarkSlow") || !strings.Contains(b.String(), "BenchmarkGone") {
+	if !strings.Contains(b.String(), "BenchmarkSlow") || !strings.Contains(b.String(), "BenchmarkGone") || !strings.Contains(b.String(), "1.250x") {
 		t.Fatalf("report = %s", b.String())
 	}
 	if err := WriteReport(failingWriter{}, result, 10); err == nil {

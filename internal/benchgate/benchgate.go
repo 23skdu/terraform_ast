@@ -19,6 +19,11 @@ import (
 // regression.
 const DefaultThresholdPct = 10.0
 
+// CalibrationBenchmark is a deterministic CPU loop included in every benchmark run. Dividing
+// current timings by the calibration ratio makes the committed baseline portable across CI
+// runners whose CPU is faster or slower than the machine that recorded it.
+const CalibrationBenchmark = "BenchmarkGateCalibration"
+
 // Baseline is the committed performance reference for a set of benchmarks.
 type Baseline struct {
 	GeneratedAt  string             `json:"generated_at"`
@@ -45,6 +50,7 @@ type Result struct {
 	Regressions []Regression
 	Missing     []string
 	Added       []string
+	Scale       float64 // current runner speed relative to the baseline runner (1 = identical)
 }
 
 // OK reports whether the comparison passed: no regressions and no baseline benchmarks vanished.
@@ -129,7 +135,11 @@ func Compare(baseline *Baseline, current []Benchmark, thresholdPct float64) (Res
 		return Result{}, fmt.Errorf("baseline contains no benchmarks")
 	}
 
-	result := Result{}
+	scale, err := calibrationScale(baseline, current)
+	if err != nil {
+		return Result{}, err
+	}
+	result := Result{Scale: scale}
 	seen := make(map[string]struct{}, len(current))
 	for _, benchmark := range current {
 		seen[benchmark.Name] = struct{}{}
@@ -141,12 +151,13 @@ func Compare(baseline *Baseline, current []Benchmark, thresholdPct float64) (Res
 		if base <= 0 {
 			return Result{}, fmt.Errorf("baseline for %s must be positive, got %g", benchmark.Name, base)
 		}
-		change := (benchmark.NSPerOp - base) / base * 100
+		normalized := benchmark.NSPerOp / scale
+		change := (normalized - base) / base * 100
 		if change > thresholdPct {
 			result.Regressions = append(result.Regressions, Regression{
 				Name:      benchmark.Name,
 				Baseline:  base,
-				Current:   benchmark.NSPerOp,
+				Current:   normalized,
 				ChangePct: change,
 			})
 		}
@@ -162,6 +173,31 @@ func Compare(baseline *Baseline, current []Benchmark, thresholdPct float64) (Res
 	sort.Strings(result.Missing)
 	sort.Strings(result.Added)
 	return result, nil
+}
+
+// calibrationScale returns how many times slower the current runner is than the baseline runner.
+// A missing calibration benchmark disables normalization for legacy baselines.
+func calibrationScale(baseline *Baseline, current []Benchmark) (float64, error) {
+	baseCal, baseOK := baseline.Benchmarks[CalibrationBenchmark]
+	if !baseOK {
+		return 1, nil
+	}
+	var currentCal float64
+	currentOK := false
+	for _, benchmark := range current {
+		if benchmark.Name == CalibrationBenchmark {
+			currentCal = benchmark.NSPerOp
+			currentOK = true
+			break
+		}
+	}
+	if !currentOK {
+		return 1, nil
+	}
+	if baseCal <= 0 || currentCal <= 0 {
+		return 0, fmt.Errorf("%s must be positive (baseline %g, current %g)", CalibrationBenchmark, baseCal, currentCal)
+	}
+	return currentCal / baseCal, nil
 }
 
 // Load reads a committed baseline from disk.
@@ -236,6 +272,9 @@ func WriteMarkdown(w io.Writer, baseline *Baseline) error {
 // WriteReport prints the comparison outcome in a CI-friendly form.
 func WriteReport(w io.Writer, result Result, thresholdPct float64) error {
 	var b strings.Builder
+	if result.Scale > 0 {
+		fmt.Fprintf(&b, "Runner scale vs baseline: %.3fx (timings normalized)\n", result.Scale)
+	}
 	if len(result.Regressions) == 0 {
 		fmt.Fprintf(&b, "No benchmark regressions beyond %.1f%%.\n", thresholdPct)
 	} else {

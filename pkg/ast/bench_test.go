@@ -7,6 +7,21 @@ import (
 	"testing"
 )
 
+// BenchmarkGateCalibration is a deterministic CPU loop used by the benchmark gate to
+// normalize absolute ns/op values across runners with different CPU speeds. Do not change
+// the inner work without regenerating the committed baseline.
+func BenchmarkGateCalibration(b *testing.B) {
+	var sink uint64
+	for b.Loop() {
+		x := uint64(1469598103934665603)
+		for j := 0; j < 1000; j++ {
+			x = (x ^ uint64(j)) * 1099511628211
+		}
+		sink = x
+	}
+	_ = sink
+}
+
 func BenchmarkInspectModule(b *testing.B) {
 	benchmarkInspectModule(b, 30)
 }

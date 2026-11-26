@@ -3,20 +3,30 @@
 Committed reference for the `make bench-gate` CI check. Regenerate with
 `make bench-baseline`; do not hand-edit the values.
 
-- **Generated**: 2026-11-17T18:02:28Z
+- **Generated**: 2026-11-26T18:49:34Z
 - **Threshold**: 10.0%
 
 | Benchmark | Median ns/op |
 | :--- | ---: |
-| `BenchmarkAnalyzeHazards` | 498 |
-| `BenchmarkCompare` | 1829 |
-| `BenchmarkCompareLarge` | 105327 |
-| `BenchmarkInspectModule` | 46540 |
-| `BenchmarkInspectModuleLarge` | 305201 |
-| `BenchmarkInspectModuleMedium` | 77802 |
-| `BenchmarkInspectModuleSmall` | 10339 |
-| `BenchmarkInspectSource` | 471838 |
-| `BenchmarkLookupHazard` | 546 |
-| `BenchmarkRenderJSON` | 4350 |
-| `BenchmarkRenderText` | 1777 |
-| `BenchmarkScanDirectory` | 713370 |
+| `BenchmarkAnalyzeHazards` | 3831 |
+| `BenchmarkCompare` | 11372 |
+| `BenchmarkCompareLarge` | 399032 |
+| `BenchmarkCompareMedium` | 45124 |
+| `BenchmarkCompareSmall` | 11853 |
+| `BenchmarkCompareStream` | 51669 |
+| `BenchmarkGateCalibration` | 2188 |
+| `BenchmarkInspectModule` | 223032 |
+| `BenchmarkInspectModuleLarge` | 1412944 |
+| `BenchmarkInspectModuleMedium` | 372643 |
+| `BenchmarkInspectModuleSmall` | 52139 |
+| `BenchmarkInspectSource` | 2326512 |
+| `BenchmarkLookupHazard` | 3297 |
+| `BenchmarkRenderJSON` | 21486 |
+| `BenchmarkRenderJSONLarge` | 9041209 |
+| `BenchmarkRenderJSONMedium` | 1041450 |
+| `BenchmarkRenderJSONSmall` | 75395 |
+| `BenchmarkRenderText` | 14395 |
+| `BenchmarkRenderTextLarge` | 3743040 |
+| `BenchmarkRenderTextMedium` | 445436 |
+| `BenchmarkRenderTextSmall` | 27719 |
+| `BenchmarkScanDirectory` | 4848626 |

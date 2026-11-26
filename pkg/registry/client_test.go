@@ -700,6 +700,55 @@ func TestParseRegistrySourceWithSubmodule(t *testing.T) {
 	}
 }
 
+func TestSelectSubmodulePath(t *testing.T) {
+	path, ok := selectSubmodulePath("modules/karpenter", "modules/karpenter", "modules/karpenter/")
+	assert.True(t, ok)
+	assert.Equal(t, "modules/karpenter", path)
+
+	path, ok = selectSubmodulePath("root/modules/karpenter/main.tf", "modules/karpenter", "modules/karpenter/")
+	assert.True(t, ok)
+	assert.Equal(t, "modules/karpenter/main.tf", path)
+
+	_, ok = selectSubmodulePath("root/main.tf", "modules/karpenter", "modules/karpenter/")
+	assert.False(t, ok)
+}
+
+func TestDownloadModule_SubmoduleSparseExtraction(t *testing.T) {
+	// Real registry archives wrap the module in a top-level directory. Only the
+	// requested submodule should be materialised under the destination.
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	entries := map[string]string{
+		"vault-aws-1.0.0/main.tf":                   "# root\n",
+		"vault-aws-1.0.0/docs/guide.md":             "# docs\n",
+		"vault-aws-1.0.0/modules/karpenter/main.tf": "# submodule\n",
+		"vault-aws-1.0.0/modules/other/main.tf":     "# other\n",
+	}
+	for name, content := range entries {
+		require.NoError(t, tw.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(content)), Typeflag: tar.TypeReg}))
+		_, err := tw.Write([]byte(content))
+		require.NoError(t, err)
+	}
+	require.NoError(t, tw.Close())
+	require.NoError(t, gw.Close())
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/gzip")
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer server.Close()
+	client := NewClient(nil)
+	client.BaseURL = server.URL
+
+	destDir := t.TempDir()
+	require.NoError(t, client.DownloadModule(context.Background(), "hashicorp/vault/aws//modules/karpenter", "1.0.0", destDir))
+	assert.FileExists(t, filepath.Join(destDir, "modules/karpenter/main.tf"))
+	assert.NoFileExists(t, filepath.Join(destDir, "main.tf"))
+	assert.NoFileExists(t, filepath.Join(destDir, "docs/guide.md"))
+	assert.NoFileExists(t, filepath.Join(destDir, "modules/other/main.tf"))
+}
+
 func TestDownloadModule_SubmoduleExtraction(t *testing.T) {
 	tarGzBytes := createTestTarGz(t, map[string]string{
 		"main.tf":                   "# root module\n",

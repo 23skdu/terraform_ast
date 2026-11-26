@@ -41,6 +41,109 @@ type Composition struct {
 	Spec       CompositionSpec `json:"spec" yaml:"spec"`
 }
 
+// Claim is a Crossplane claim document. Claims request a composite resource and
+// expose operator-supplied parameters that can drift independently of the Composition.
+type Claim struct {
+	APIVersion string         `json:"apiVersion" yaml:"apiVersion"`
+	Kind       string         `json:"kind" yaml:"kind"`
+	Metadata   map[string]any `json:"metadata,omitempty" yaml:"metadata"`
+	Spec       ClaimSpec      `json:"spec" yaml:"spec"`
+}
+
+// ClaimSpec is the spec of a Crossplane claim.
+type ClaimSpec struct {
+	CompositeTypeRef           TypeRef          `json:"compositeTypeRef" yaml:"compositeTypeRef"`
+	Parameters                 map[string]any   `json:"parameters,omitempty" yaml:"parameters"`
+	CompositionRef             map[string]any   `json:"compositionRef,omitempty" yaml:"compositionRef"`
+	CompositionSelector        map[string]any   `json:"compositionSelector,omitempty" yaml:"compositionSelector"`
+	ResourceRefs               []map[string]any `json:"resourceRefs,omitempty" yaml:"resourceRefs"`
+	WriteConnectionSecretToRef map[string]any   `json:"writeConnectionSecretToRef,omitempty" yaml:"writeConnectionSecretToRef"`
+}
+
+// ClaimDiff summarizes deterministic drift between two claims.
+type ClaimDiff struct {
+	TypeChanged        bool     `json:"type_changed"`
+	CompositionChanged bool     `json:"composition_changed"`
+	AddedParameters    []string `json:"added_parameters,omitempty"`
+	RemovedParameters  []string `json:"removed_parameters,omitempty"`
+	ChangedParameters  []string `json:"changed_parameters,omitempty"`
+	HasDrift           bool     `json:"has_drift"`
+	Summary            string   `json:"summary"`
+}
+
+// LoadClaim reads and parses a Crossplane claim from a YAML file.
+func LoadClaim(path string) (*Claim, error) {
+	// #nosec G304 -- operator specified claim file
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read claim %s: %w", path, err)
+	}
+	var claim Claim
+	if err := yaml.Unmarshal(data, &claim); err != nil {
+		return nil, fmt.Errorf("decode claim %s: %w", path, err)
+	}
+	if claim.Kind != "" && claim.Kind != "Claim" {
+		return nil, fmt.Errorf("expected kind Claim, got %s", claim.Kind)
+	}
+	return &claim, nil
+}
+
+// CompareClaims compares two claims, including parameters, composition selection,
+// resource references, and connection secret wiring.
+func CompareClaims(a, b *Claim) ClaimDiff {
+	diff := ClaimDiff{
+		AddedParameters:   []string{},
+		RemovedParameters: []string{},
+		ChangedParameters: []string{},
+	}
+	if a == nil || b == nil {
+		diff.HasDrift = true
+		diff.Summary = "nil claim"
+		return diff
+	}
+	diff.TypeChanged = a.Spec.CompositeTypeRef != b.Spec.CompositeTypeRef
+	diff.CompositionChanged = !equalAny(a.Spec.CompositionRef, b.Spec.CompositionRef) ||
+		!equalAny(a.Spec.CompositionSelector, b.Spec.CompositionSelector) ||
+		!equalAny(a.Spec.WriteConnectionSecretToRef, b.Spec.WriteConnectionSecretToRef) ||
+		!equalAny(a.Spec.ResourceRefs, b.Spec.ResourceRefs)
+
+	for key, value := range b.Spec.Parameters {
+		oldValue, ok := a.Spec.Parameters[key]
+		if !ok {
+			diff.AddedParameters = append(diff.AddedParameters, key)
+			continue
+		}
+		if !equalAny(oldValue, value) {
+			diff.ChangedParameters = append(diff.ChangedParameters, key)
+		}
+	}
+	for key := range a.Spec.Parameters {
+		if _, ok := b.Spec.Parameters[key]; !ok {
+			diff.RemovedParameters = append(diff.RemovedParameters, key)
+		}
+	}
+	sort.Strings(diff.AddedParameters)
+	sort.Strings(diff.RemovedParameters)
+	sort.Strings(diff.ChangedParameters)
+	diff.HasDrift = diff.TypeChanged || diff.CompositionChanged ||
+		len(diff.AddedParameters) > 0 || len(diff.RemovedParameters) > 0 || len(diff.ChangedParameters) > 0
+	diff.Summary = fmt.Sprintf("type_changed=%t composition_changed=%t added=%d removed=%d changed=%d",
+		diff.TypeChanged, diff.CompositionChanged,
+		len(diff.AddedParameters), len(diff.RemovedParameters), len(diff.ChangedParameters))
+	if diff.HasDrift {
+		diff.Summary += " (DRIFT DETECTED)"
+	} else {
+		diff.Summary += " (IN SYNC)"
+	}
+	return diff
+}
+
+func equalAny(a, b any) bool {
+	ab, _ := json.Marshal(a)
+	bb, _ := json.Marshal(b)
+	return string(ab) == string(bb)
+}
+
 // Diff summarizes the differences between two compositions.
 type Diff struct {
 	CompositeTypeChanged bool     `json:"composite_type_changed"`
