@@ -53,7 +53,8 @@ Audits a local wrapper module (such as a Google GKE or AWS EKS wrapper) against 
 - `--output <file>`: Write report to destination file (written with permissions `0644`).
 - `--svg-before <path>`: Write an SVG rendering of the before state address graph to this path (written with permissions `0600`).
 - `--svg-after <path>`: Write an SVG rendering of the after state address graph to this path (written with permissions `0600`).
-- `--svg-transition <path>`: Write an SVG rendering of the before/after state address transition graph to this path (written with permissions `0600`).- `--exit-code`: Returns non-zero exit code (1) if breaking changes or policy violations are detected.
+- `--svg-transition <path>`: Write an SVG rendering of the before/after state address transition graph to this path (written with permissions `0600`).
+- `--exit-code`: Returns non-zero exit code (1) if breaking changes or policy violations are detected.
 - `--fix-preview`: Emit a preview-only unified patch for removed arguments, note missing required inputs that `--fix` would inject, and preview synthesized `moved.tf` blocks without modifying files on disk.
 - `--fix`: Apply fixes in-place to remove obsolete wrapper arguments, inject missing required upstream inputs with safe primitive placeholders (`string` `""`, `bool` `false`, `number` `0`; exits with code 2 if a complex required input has no safe placeholder), and synthesize `moved.tf` for unmigrated address shifts. Mutually exclusive with `--fix-preview`.
 - `--golden-plan <file>`: Optional path to a Terraform plan JSON file (`terraform show -json <planfile>`). Correlates planned resource changes against detected `ForceNew` recreation hazards, address shifts, and replacement actions (`["delete", "create"]`). If omitted, automatically discovers candidate plans (`golden-plan.json`, `golden_plan.json`, `tfplan.json`, `plan.json`, `.terraform/tfplan.json`) in the wrapper directory.
@@ -185,6 +186,76 @@ Compares two versions of an upstream module directly:
   - Prefetches intermediate versions concurrently using a bounded worker pool (`min(8, GOMAXPROCS)`) under the shared `--registry-timeout` budget.
   - Caches inspected version snapshots in `--cache-dir` keyed by `source@version` (`<sha256>.json`), so repeated CI runs execute with zero network fetches.
   - Inspects intermediate modules in parallel (`InspectModulesParallel`), evaluates prepared OPA/JSON policies across every step, and computes `recommended_version` (the highest contiguous safe-harbor version pin reachable before the first breaking step).
+
+---
+
+## Additional Analysis Controls
+
+### State Drift (`drift`)
+
+`drift` compares a recorded state snapshot against a live/provider snapshot. Both documents must
+contain a `resources` array; blank or duplicate addresses are rejected so a malformed file cannot
+be reported as `IN SYNC`.
+
+```bash
+tfastdiff drift \
+  --state ./state-snapshot.json \
+  --live ./live-snapshot.json
+```
+
+Snapshots use the shape written by `drift.SaveSnapshot`:
+
+```json
+{
+  "resources": [
+    {"address": "aws_s3_bucket.example", "attributes": {"acl": "private"}}
+  ]
+}
+```
+
+Without `--state`/`--live`, the command runs a legacy health check that compares each stored
+golden baseline with itself; the CLI prints a note to stderr to make that limitation explicit.
+
+### Crossplane Compositions (`crossplane`)
+
+```bash
+tfastdiff crossplane ./old-composition.yaml ./new-composition.yaml
+```
+
+The command reports added, removed, and changed composed resources and exits `1` when a change is
+found. **Claim-level analysis is not implemented yet**; see `docs/roadmap.md` (R9).
+
+### Hooks, Webhooks, and Run Coordination
+
+- `--hook <shell>` (repeatable): Runs a `pre-analysis` shell command via `sh -c` before analysis.
+- `--post-hook <shell>` (repeatable): Runs a `post-analysis` shell command after analysis. A failing
+  post-hook prints an error but never overwrites a non-zero analysis verdict.
+- `--webhook <url>` (repeatable): POSTs a JSON payload (`module_name`, `total_breaking`, `summary`)
+  when an audit, fix, fix-preview, or upgrade-path run detects hazardous changes. Safe runs send
+  nothing.
+- `--webhook-timeout <duration>`: HTTP timeout per notification (default `10s`).
+- `--lock-file <path>`: Creates an exclusive lockfile for the duration of a run so concurrent CI
+  jobs can serialize. The current implementation is an `O_EXCL` lockfile; real advisory OS locks
+  and stale-lock recovery are tracked in `docs/roadmap.md` (R12).
+
+### Codemods, Graphs, and Streaming
+
+- `--transform <file>`: Applies a JSON resource-rename specification during `--fix` or
+  `--fix-preview`. It is rejected in audit-only modes rather than silently ignored:
+
+  ```json
+  {"transforms": [{"from": "aws_instance.old", "to": ["aws_instance.new"]}]}
+  ```
+
+  Empty specs, missing addresses, and one-to-many splits are rejected; split support is tracked in
+  `docs/roadmap.md` (R10).
+- `--module-graph <path>`: Writes a Graphviz DOT dependency graph.
+- `--topological-order <path>`: Writes one module address per line in dependency order
+  (dependencies first). The order is deterministic and cycle detection is reported as an error.
+
+For library callers, `diff.CompareStream` exposes difference items on a channel and
+`diff.CompareStreamContext` adds cancellation. The report is still assembled before items are
+emitted; a genuinely incremental, bounded-memory diff path is tracked in `docs/roadmap.md` (R1).
 
 ---
 

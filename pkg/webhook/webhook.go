@@ -22,9 +22,19 @@ type Client struct {
 	Timeout    time.Duration
 }
 
-// NewClient creates a webhook client.
+const defaultTimeout = 10 * time.Second
+
+// NewClient creates a webhook client with the default timeout.
 func NewClient() *Client {
-	return &Client{HTTPClient: &http.Client{Timeout: 10 * time.Second}, Timeout: 10 * time.Second}
+	return NewClientWithTimeout(defaultTimeout)
+}
+
+// NewClientWithTimeout creates a webhook client with a caller supplied timeout.
+func NewClientWithTimeout(timeout time.Duration) *Client {
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	return &Client{HTTPClient: &http.Client{Timeout: timeout}, Timeout: timeout}
 }
 
 // Notify sends payload as JSON to url. It returns an error on non-2xx responses.
@@ -33,7 +43,11 @@ func (c *Client) Notify(url string, payload Payload) error {
 		c = NewClient()
 	}
 	if c.HTTPClient == nil {
-		c.HTTPClient = &http.Client{Timeout: 10 * time.Second}
+		timeout := c.Timeout
+		if timeout <= 0 {
+			timeout = defaultTimeout
+		}
+		c.HTTPClient = &http.Client{Timeout: timeout}
 	}
 	data, _ := json.Marshal(payload)
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
@@ -52,7 +66,15 @@ func (c *Client) Notify(url string, payload Payload) error {
 	return nil
 }
 
+var defaultClient = NewClient()
+
+// SetDefaultTimeout reconfigures the package-level client used by Notify. It is
+// called by the CLI so --webhook-timeout actually controls request deadlines.
+func SetDefaultTimeout(timeout time.Duration) {
+	defaultClient = NewClientWithTimeout(timeout)
+}
+
 // Notify is a package-level convenience using a default client.
 func Notify(url string, payload Payload) error {
-	return NewClient().Notify(url, payload)
+	return defaultClient.Notify(url, payload)
 }

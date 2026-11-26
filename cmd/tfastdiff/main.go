@@ -135,6 +135,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		hookCommands       []string
 		postHookCommands   []string
 		webhookURLs        []string
+		webhookTimeout     time.Duration
 		lockFile           string
 	)
 
@@ -197,6 +198,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		webhookURLs = append(webhookURLs, value)
 		return nil
 	})
+	fs.DurationVar(&webhookTimeout, "webhook-timeout", 10*time.Second, "HTTP timeout for each webhook notification")
 	fs.StringVar(&lockFile, "lock-file", "", "Path to an advisory lock file held for the duration of the run")
 	fs.StringVar(&activeTransformFile, "transform", "", "Path to a JSON resource transform specification")
 
@@ -269,6 +271,11 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	if activeTransformFile != "" && !fixMode && !fixPreview {
+		_, _ = fmt.Fprintln(stderr, "Error: --transform requires --fix or --fix-preview")
+		return 2
+	}
+
 	if cacheDir != "" {
 		ast.SetPersistentCacheDir(cacheDir)
 	}
@@ -328,15 +335,16 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	if len(hookCommands) > 0 {
 		hookList := make([]hooks.Hook, 0, len(hookCommands))
 		for _, c := range hookCommands {
-			hookList = append(hookList, hooks.Hook{Name: c, Command: "sh", Args: []string{"-c", c}})
+			hookList = append(hookList, hooks.Hook{Name: c, Command: "sh", Args: []string{"-c", c}, Phase: "pre-analysis"})
 		}
-		if err := hooks.RunAll(hookList, stdout, stderr); err != nil {
+		if err := hooks.RunPhase(hookList, "pre-analysis", stdout, stderr); err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error running hook: %v\n", err)
 			return 1
 		}
 	}
 
 	activeWebhookURLs = webhookURLs
+	webhook.SetDefaultTimeout(webhookTimeout)
 
 	if lockFile != "" {
 		l, err := lock.Acquire(lockFile)
@@ -698,6 +706,7 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 			_, _ = fmt.Fprintf(stderr, "Error writing fix preview: %v\n", err)
 			return 1
 		}
+		notifyHazardWebhooks(res.TargetModuleName, res.Summary, res.UpstreamDiff, !res.CanSafelyUpdate, stderr)
 		if enforceExit1 && !res.CanSafelyUpdate {
 			return 1
 		}
@@ -784,11 +793,14 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 				importBlocks = append(importBlocks, codemod.ImportBlock{To: ib.To, ID: ib.ID, Provider: ib.Provider})
 			}
 			importsFile := filepath.Join(wrapperPath, "imports.tf")
-			if err := codemod.WriteImportBlocks(importsFile, importBlocks); err != nil {
+			changed, err := codemod.WriteImportBlocksIfChanged(importsFile, importBlocks)
+			if err != nil {
 				_, _ = fmt.Fprintf(stderr, "Error writing import blocks: %v\n", err)
 				return 1
 			}
-			modified = append(modified, importsFile)
+			if changed {
+				modified = append(modified, importsFile)
+			}
 		}
 		if activeTransformFile != "" {
 			transforms, err := codemod.LoadResourceTransforms(activeTransformFile)
@@ -816,6 +828,7 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 			_, _ = fmt.Fprintf(stderr, "Error writing fix output: %v\n", err)
 			return 1
 		}
+		notifyHazardWebhooks(res.TargetModuleName, res.Summary, res.UpstreamDiff, !res.CanSafelyUpdate, stderr)
 		if enforceExit1 && !res.CanSafelyUpdate {
 			return 1
 		}
@@ -892,20 +905,7 @@ func runWrapperMode(ctx context.Context, registryTimeout time.Duration, wrapperP
 		return 1
 	}
 
-	if len(activeWebhookURLs) > 0 {
-		breaking := 0
-		if res.UpstreamDiff != nil {
-			breaking = res.UpstreamDiff.TotalBreaking
-		}
-		if breaking > 0 || !canSafelyUpdate {
-			payload := webhook.Payload{ModuleName: res.TargetModuleName, TotalBreaking: breaking, Summary: res.Summary}
-			for _, url := range activeWebhookURLs {
-				if err := webhook.Notify(url, payload); err != nil {
-					_, _ = fmt.Fprintf(stderr, "Webhook notification failed: %v\n", err)
-				}
-			}
-		}
-	}
+	notifyHazardWebhooks(res.TargetModuleName, res.Summary, res.UpstreamDiff, !canSafelyUpdate, stderr)
 
 	if (enforceExit1 && !canSafelyUpdate) || len(res.PolicyViolations) > 0 {
 		return 1
@@ -1198,6 +1198,13 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 			_, _ = fmt.Fprintf(stderr, "Error writing output: %v\n", err)
 			return 1
 		}
+		breaking := 0
+		for _, step := range pathReport.Steps {
+			if step.Diff != nil {
+				breaking += step.Diff.TotalBreaking
+			}
+		}
+		notifyHazardWebhooks(comparedSource, pathReport.Recommendation, &diff.DiffReport{TotalBreaking: breaking}, !pathReport.CanSafelyUpdateAll, stderr)
 		if (enforceExit1 && !pathReport.CanSafelyUpdateAll) || len(pathReport.PolicyViolations) > 0 {
 			return 1
 		}
@@ -1255,14 +1262,7 @@ func runCompareMode(ctx context.Context, registryTimeout time.Duration, oldPath,
 		return 1
 	}
 
-	if len(activeWebhookURLs) > 0 && (diffReport.TotalBreaking > 0 || !diffReport.CanSafelyUpdate) {
-		payload := webhook.Payload{ModuleName: diffReport.ModuleName, TotalBreaking: diffReport.TotalBreaking, Summary: diffReport.Summary}
-		for _, url := range activeWebhookURLs {
-			if err := webhook.Notify(url, payload); err != nil {
-				_, _ = fmt.Fprintf(stderr, "Webhook notification failed: %v\n", err)
-			}
-		}
-	}
+	notifyHazardWebhooks(diffReport.ModuleName, diffReport.Summary, diffReport, !diffReport.CanSafelyUpdate, stderr)
 
 	if (enforceExit1 && !diffReport.CanSafelyUpdate) || len(diffReport.PolicyViolations) > 0 {
 		return 1
@@ -1620,12 +1620,12 @@ func runDriftCommand(args []string, stdout, stderr io.Writer) int {
 		}
 		baseline, err := drift.LoadSnapshot(*statePath)
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "Error: %v\\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
 		live, err := drift.LoadSnapshot(*livePath)
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "Error: %v\\n", err)
+			_, _ = fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
 		}
 		report := drift.CompareSnapshots(baseline, live)
@@ -1636,6 +1636,11 @@ func runDriftCommand(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
+
+	// This legacy mode compares stored golden baselines with themselves. It is retained for
+	// repository health checks, but it cannot detect state-vs-live drift; point callers at the
+	// --state/--live mode when they need a real comparison.
+	_, _ = fmt.Fprintln(stderr, "Note: golden baseline mode compares stored baselines with themselves; use --state and --live for recorded state-vs-live drift detection")
 
 	var reports []*goldentest.DriftReport
 	for _, spec := range goldentest.MultiCloudCatalog() {
@@ -1726,6 +1731,29 @@ func repoRoot() string {
 	return ""
 }
 
+// notifyHazardWebhooks sends one notification per configured URL whenever an analysis
+// path found hazardous changes. Every path that computes a diff report calls this so a
+// caller cannot miss a notification just because it used --fix, --fix-preview, or
+// --upgrade-path.
+func notifyHazardWebhooks(moduleName, summary string, report *diff.DiffReport, unsafe bool, stderr io.Writer) {
+	if len(activeWebhookURLs) == 0 {
+		return
+	}
+	breaking := 0
+	if report != nil {
+		breaking = report.TotalBreaking
+	}
+	if breaking == 0 && !unsafe {
+		return
+	}
+	payload := webhook.Payload{ModuleName: moduleName, TotalBreaking: breaking, Summary: summary}
+	for _, url := range activeWebhookURLs {
+		if err := webhook.Notify(url, payload); err != nil {
+			_, _ = fmt.Fprintf(stderr, "Webhook notification failed: %v\n", err)
+		}
+	}
+}
+
 func runPostHooks(code int, commands []string, stdout, stderr io.Writer) int {
 	if len(commands) == 0 {
 		return code
@@ -1734,8 +1762,13 @@ func runPostHooks(code int, commands []string, stdout, stderr io.Writer) int {
 	for _, c := range commands {
 		hooksList = append(hooksList, hooks.Hook{Name: c, Command: "sh", Args: []string{"-c", c}, Phase: "post-analysis"})
 	}
-	if err := hooks.RunAll(hooksList, stdout, stderr); err != nil {
+	if err := hooks.RunPhase(hooksList, "post-analysis", stdout, stderr); err != nil {
 		_, _ = fmt.Fprintf(stderr, "Error running post-hook: %v\n", err)
+		// A failing post-hook must not mask the analysis verdict (e.g. turn a breaking
+		// change into a generic hook failure). Only use 1 when analysis itself succeeded.
+		if code != 0 {
+			return code
+		}
 		return 1
 	}
 	return code

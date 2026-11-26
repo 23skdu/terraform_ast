@@ -772,6 +772,16 @@ func TestEnableSparseCheckoutSetError(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestCloneOrOpenWithOptions_SparseError(t *testing.T) {
+	repoDir, _ := createTestRepoWithTags(t)
+	cloneDir := filepath.Join(t.TempDir(), "clone")
+	repo, err := CloneOrOpenWithOptions("file://"+repoDir, cloneDir, CloneConfig{
+		SparsePaths: []string{"../outside"},
+	})
+	assert.Nil(t, repo)
+	assert.ErrorContains(t, err, "enable sparse checkout")
+}
+
 func TestCloneOrOpenWithOptions_Sparse(t *testing.T) {
 	repoDir, _ := createTestRepoWithTags(t)
 	cloneDir := t.TempDir()

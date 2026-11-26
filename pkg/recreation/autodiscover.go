@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
 )
@@ -133,6 +134,7 @@ func CacheProviderSchema(cacheDir, providerSource string, ps *ProviderSchemas) e
 	if err := os.MkdirAll(targetDir, 0o750); err != nil {
 		return fmt.Errorf("create schema cache directory: %w", err)
 	}
+	pruneSchemaCache(targetDir, time.Now())
 
 	data, _ := json.MarshalIndent(ps, "", "  ")
 

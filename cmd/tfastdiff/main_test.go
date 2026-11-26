@@ -2002,6 +2002,7 @@ func TestExecute_DriftCommand(t *testing.T) {
 	code := Execute([]string{"drift"}, &stdout, &stderr)
 	assert.Equal(t, 0, code, stderr.String())
 	assert.Contains(t, stdout.String(), "All Baselines Intact")
+	assert.Contains(t, stderr.String(), "use --state and --live")
 }
 
 func TestRepoRoot(t *testing.T) {
@@ -2130,6 +2131,17 @@ func TestExecute_DriftStateMode(t *testing.T) {
 	code = Execute([]string{"drift", "--state", baselinePath, "--live", filepath.Join(dir, "missing.json")}, &stdout, &stderr)
 	assert.Equal(t, 1, code)
 	assert.Contains(t, stderr.String(), "read snapshot")
+	assert.NotContains(t, stderr.String(), `\n`)
+
+	// A malformed live snapshot is rejected rather than silently reported as IN SYNC.
+	invalid := filepath.Join(dir, "invalid.json")
+	require.NoError(t, os.WriteFile(invalid, []byte(`{}`), 0600))
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"drift", "--state", baselinePath, "--live", invalid}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "missing resources array")
+	assert.NotContains(t, stderr.String(), `\n`)
 }
 
 func TestExecute_TopologicalOrderWriteError(t *testing.T) {
@@ -2284,6 +2296,34 @@ func TestExecute_PostHook(t *testing.T) {
 	stderr.Reset()
 	code = Execute([]string{"--old", dir1, "--new", dir2, "--post-hook", "false"}, &stdout, &stderr)
 	assert.Equal(t, 1, code)
+
+	// A failing post-hook must preserve a non-zero analysis verdict.
+	breakingDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(breakingDir, "main.tf"), []byte(`variable "removed" { type = string }`), 0600))
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", breakingDir, "--new", dir2, "--exit-code", "--post-hook", "false"}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "Error running post-hook")
+}
+
+func TestExecute_HookPhasesRunInOrder(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`variable "a" { type = string }`), 0600))
+
+	logPath := filepath.Join(t.TempDir(), "hooks.log")
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--old", dir1, "--new", dir2,
+		"--hook", "echo pre >> " + logPath,
+		"--post-hook", "echo post >> " + logPath,
+	}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+	data, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	assert.Equal(t, "pre\npost\n", string(data))
 }
 
 func TestExecute_FixPreviewImportBlocks(t *testing.T) {
@@ -2374,6 +2414,119 @@ variable "kept" {
 	assert.Equal(t, 1, code)
 	assert.Contains(t, stderr.String(), "Error writing import blocks")
 	_ = os.Chmod(roPath, 0o600)
+}
+
+// capturedWebhook mirrors the webhook JSON contract so CLI tests can assert that
+// hazardous analyses actually deliver a usable payload, not merely an HTTP request.
+type capturedWebhook struct {
+	ModuleName    string `json:"module_name"`
+	TotalBreaking int    `json:"total_breaking"`
+	Summary       string `json:"summary"`
+}
+
+func newWebhookRecorder(t *testing.T) (string, <-chan capturedWebhook, func()) {
+	t.Helper()
+	received := make(chan capturedWebhook, 16)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload capturedWebhook
+		if err := json.NewDecoder(r.Body).Decode(&payload); err == nil {
+			received <- payload
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	return server.URL, received, server.Close
+}
+
+func TestExecute_WebhookPayloadAndSafeSkip(t *testing.T) {
+	url, received, closeServer := newWebhookRecorder(t)
+	defer closeServer()
+
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "main.tf"), []byte(`variable "x" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "main.tf"), []byte(`variable "x" { type = number }`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir1, "--new", dir2, "--webhook", url, "--webhook-timeout", "2s"}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+
+	select {
+	case payload := <-received:
+		assert.Contains(t, payload.ModuleName, dir2)
+		assert.Greater(t, payload.TotalBreaking, 0)
+		assert.NotEmpty(t, payload.Summary)
+	default:
+		t.Fatal("expected a webhook notification for a breaking diff")
+	}
+
+	// Identical modules are safe, so no notification is sent.
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"--old", dir1, "--new", dir1, "--webhook", url}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+	select {
+	case payload := <-received:
+		t.Fatalf("unexpected webhook for a safe diff: %+v", payload)
+	default:
+	}
+}
+
+func TestExecute_WebhookHazardousFixPaths(t *testing.T) {
+	url, received, closeServer := newWebhookRecorder(t)
+	defer closeServer()
+
+	target := createTestTFRepoWithTags(t, []struct{ tag, content string }{
+		{"v1.0.0", `variable "cluster_name" { type = string }`},
+		{"v2.0.0", `variable "cluster_name" { type = number }`},
+	})
+	wrapperDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(wrapperDir, "main.tf"), []byte(`
+module "gke" {
+  source = "`+target+`"
+  cluster_name = "prod"
+}
+`), 0600))
+
+	for _, mode := range []string{"--fix-preview", "--fix"} {
+		var stdout, stderr bytes.Buffer
+		code := Execute([]string{
+			"--wrapper", wrapperDir, "--upstream", target,
+			"--old-version", "v1.0.0", "--new-version", "v2.0.0",
+			mode, "--webhook", url,
+		}, &stdout, &stderr)
+		require.Equal(t, 0, code, stderr.String())
+		select {
+		case payload := <-received:
+			assert.Greater(t, payload.TotalBreaking, 0)
+		default:
+			t.Fatalf("%s skipped webhook delivery for a breaking diff", mode)
+		}
+	}
+}
+
+func TestExecute_WebhookUpgradePath(t *testing.T) {
+	url, received, closeServer := newWebhookRecorder(t)
+	defer closeServer()
+
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(oldDir, "main.tf"), []byte(`variable "x" { type = string }`), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(newDir, "main.tf"), []byte(`variable "x" { type = number }`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--old", oldDir, "--new", newDir,
+		"--old-version", "v1.0.0", "--new-version", "v2.0.0",
+		"--upgrade-path", "--webhook", url,
+	}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+	select {
+	case payload := <-received:
+		assert.Contains(t, payload.ModuleName, newDir)
+		assert.Greater(t, payload.TotalBreaking, 0)
+	default:
+		t.Fatal("upgrade path skipped webhook delivery for a breaking diff")
+	}
 }
 
 func TestExecute_WebhookCompare(t *testing.T) {
@@ -2486,6 +2639,17 @@ func TestExecute_LockFile(t *testing.T) {
 	code = Execute([]string{"--old", dir1, "--new", dir2, "--lock-file", lockPath + ".2"}, &stdout, &stderr)
 	assert.Equal(t, 2, code)
 	assert.Contains(t, stderr.String(), "Error acquiring lock")
+}
+
+func TestExecute_TransformRequiresFixMode(t *testing.T) {
+	dir := t.TempDir()
+	transformPath := filepath.Join(t.TempDir(), "transforms.json")
+	require.NoError(t, os.WriteFile(transformPath, []byte(`{"transforms":[{"from":"a","to":["b"]}]}`), 0600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"--old", dir, "--new", dir, "--transform", transformPath}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--transform requires --fix or --fix-preview")
 }
 
 func TestExecute_TransformPreview(t *testing.T) {

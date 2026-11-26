@@ -49,6 +49,48 @@ func newSchemaCache(capacity int, ttl time.Duration) *schemaCache {
 
 var schemaCacheInstance = newSchemaCache(64, 30*time.Minute)
 
+const (
+	// persistentSchemaTTL bounds how long an on-disk provider schema is reused.
+	persistentSchemaTTL = 30 * time.Minute
+	// persistentSchemaLimit caps the number of schema files kept on disk.
+	persistentSchemaLimit = 64
+)
+
+// pruneSchemaCache removes expired entries and, when the directory exceeds the
+// configured bound, the oldest files until it fits. Without this a long-lived
+// --cache-dir accumulates provider schemas indefinitely and never refreshes them.
+func pruneSchemaCache(dir string, now time.Time) {
+	entries, _ := os.ReadDir(dir) // #nosec G304 -- cache directory is operator supplied
+	type cachedFile struct {
+		path string
+		mod  time.Time
+	}
+	var files []cachedFile
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		info, err := os.Stat(path)
+		if err != nil {
+			// Broken symlinks and files removed concurrently cannot be aged out.
+			continue
+		}
+		if now.Sub(info.ModTime()) > persistentSchemaTTL {
+			_ = os.Remove(path)
+			continue
+		}
+		files = append(files, cachedFile{path: path, mod: info.ModTime()})
+	}
+	if len(files) <= persistentSchemaLimit {
+		return
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
+	for _, file := range files[:len(files)-persistentSchemaLimit] {
+		_ = os.Remove(file.path)
+	}
+}
+
 func (c *schemaCache) touch(key string) {
 	for i, k := range c.order {
 		if k == key {

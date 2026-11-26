@@ -76,6 +76,43 @@ func TestEqualValue(t *testing.T) {
 	assert.False(t, equalValue(func() {}, 1))
 }
 
+func TestLoadSnapshotRejectsInvalidDocuments(t *testing.T) {
+	dir := t.TempDir()
+	cases := map[string]string{
+		"empty-object.json":   `{}`,
+		"null.json":           `null`,
+		"null-resources.json": `{"resources":null}`,
+		"wrong-shape.json":    `{"resources":{"bad":1}}`,
+		"no-address.json":     `{"resources":[{"attributes":{"v":1}}]}`,
+		"blank-address.json":  `{"resources":[{"address":"  "}]}`,
+		"duplicates.json":     `{"resources":[{"address":"r1"},{"address":"r1"}]}`,
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, name)
+			require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+			_, err := LoadSnapshot(path)
+			assert.Error(t, err)
+		})
+	}
+
+	// An explicitly empty but well-formed snapshot is valid.
+	path := filepath.Join(dir, "empty.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"resources":[]}`), 0o600))
+	snap, err := LoadSnapshot(path)
+	require.NoError(t, err)
+	assert.Empty(t, snap.Resources)
+}
+
+func TestCompareSnapshotsDuplicateAddresses(t *testing.T) {
+	baseline := Snapshot{Resources: []Resource{{Address: "r1"}, {Address: "r1"}}}
+	live := Snapshot{Resources: []Resource{{Address: "r1"}}}
+	report := CompareSnapshots(baseline, live)
+	// Last write wins consistently on both sides, so the summary counts unique addresses only.
+	assert.Contains(t, report.Summary, "baseline=1 live=1")
+	assert.False(t, report.HasDrift)
+}
+
 func TestLoadSaveSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "snap.json")

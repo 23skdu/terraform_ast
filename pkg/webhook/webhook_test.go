@@ -4,8 +4,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNotifySuccess(t *testing.T) {
@@ -61,4 +63,28 @@ func TestNotifyClientHTTPError(t *testing.T) {
 	c := &Client{HTTPClient: &http.Client{}}
 	err := c.Notify("http://127.0.0.1:1", Payload{})
 	assert.Error(t, err)
+}
+
+func TestConfigurableTimeout(t *testing.T) {
+	c := NewClientWithTimeout(3 * time.Second)
+	require.NotNil(t, c.HTTPClient)
+	assert.Equal(t, 3*time.Second, c.HTTPClient.Timeout)
+	assert.Equal(t, 3*time.Second, c.Timeout)
+
+	// Non-positive values fall back to the default instead of disabling the deadline.
+	assert.Equal(t, defaultTimeout, NewClientWithTimeout(0).Timeout)
+
+	// A client with only a Timeout still applies it when no HTTPClient is supplied.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	partial := &Client{Timeout: 2 * time.Second}
+	require.NoError(t, partial.Notify(server.URL, Payload{}))
+	require.NotNil(t, partial.HTTPClient)
+	assert.Equal(t, 2*time.Second, partial.HTTPClient.Timeout)
+
+	SetDefaultTimeout(4 * time.Second)
+	assert.Equal(t, 4*time.Second, defaultClient.Timeout)
+	require.NoError(t, Notify(server.URL, Payload{}))
 }

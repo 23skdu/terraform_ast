@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 )
 
 // Resource is one entry in a recorded state snapshot.
@@ -80,8 +81,10 @@ func CompareSnapshots(baseline, live Snapshot) Report {
 		Changed: changed,
 	}
 	report.HasDrift = len(added) > 0 || len(removed) > 0 || len(changed) > 0
+	// Count unique addresses so a duplicate entry cannot make the summary disagree with the
+	// comparisons above (which are keyed by address).
 	report.Summary = fmt.Sprintf("baseline=%d live=%d added=%d removed=%d changed=%d",
-		len(baseline.Resources), len(live.Resources), len(added), len(removed), len(changed))
+		len(baselineMap), len(liveMap), len(added), len(removed), len(changed))
 	if report.HasDrift {
 		report.Summary += " (DRIFT DETECTED)"
 	} else {
@@ -130,16 +133,40 @@ func equalValue(a, b any) bool {
 	return string(ab) == string(bb)
 }
 
-// LoadSnapshot reads a recorded state snapshot from disk.
+// LoadSnapshot reads a recorded state snapshot from disk. Malformed, empty, and
+// duplicate-address documents are rejected so an unusable "live" snapshot can never be
+// reported as IN SYNC by accident.
 func LoadSnapshot(path string) (Snapshot, error) {
 	// #nosec G304 -- snapshot path is operator-supplied by design.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("read snapshot %s: %w", path, err)
 	}
+
+	var envelope struct {
+		Resources json.RawMessage `json:"resources"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return Snapshot{}, fmt.Errorf("decode snapshot %s: %w", path, err)
+	}
+	if len(envelope.Resources) == 0 || string(envelope.Resources) == "null" {
+		return Snapshot{}, fmt.Errorf("decode snapshot %s: missing resources array", path)
+	}
+
 	var snap Snapshot
 	if err := json.Unmarshal(data, &snap); err != nil {
 		return Snapshot{}, fmt.Errorf("decode snapshot %s: %w", path, err)
+	}
+	seen := make(map[string]struct{}, len(snap.Resources))
+	for _, resource := range snap.Resources {
+		address := strings.TrimSpace(resource.Address)
+		if address == "" {
+			return Snapshot{}, fmt.Errorf("decode snapshot %s: resource with empty address", path)
+		}
+		if _, duplicate := seen[address]; duplicate {
+			return Snapshot{}, fmt.Errorf("decode snapshot %s: duplicate resource address %q", path, address)
+		}
+		seen[address] = struct{}{}
 	}
 	return snap, nil
 }

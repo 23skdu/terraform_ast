@@ -2,9 +2,12 @@ package recreation
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
 	"github.com/stretchr/testify/assert"
@@ -74,6 +77,47 @@ func TestCacheProviderSchema(t *testing.T) {
 	require.NoError(t, os.Mkdir(schemasDir, 0o750))
 	err = CacheProviderSchema(cacheDir, "unwritable", ps)
 	assert.ErrorContains(t, err, "write schema cache file")
+}
+
+func TestCacheProviderSchemaBoundsOnDiskEntries(t *testing.T) {
+	cacheDir := t.TempDir()
+	schemasDir := filepath.Join(cacheDir, "schemas")
+	require.NoError(t, os.MkdirAll(schemasDir, 0o750))
+
+	expired := filepath.Join(schemasDir, "expired.json")
+	require.NoError(t, os.WriteFile(expired, []byte(`{}`), 0o600))
+	staleTime := time.Now().Add(-2 * persistentSchemaTTL)
+	require.NoError(t, os.Chtimes(expired, staleTime, staleTime))
+
+	// A dangling symlink cannot be aged out, but must not break pruning.
+	require.NoError(t, os.Symlink(filepath.Join(schemasDir, "missing.json"), filepath.Join(schemasDir, "broken.json")))
+
+	for i := 0; i < persistentSchemaLimit+2; i++ {
+		path := filepath.Join(schemasDir, fmt.Sprintf("schema-%03d.json", i))
+		require.NoError(t, os.WriteFile(path, []byte(`{}`), 0o600))
+		mod := time.Now().Add(time.Duration(i) * time.Second)
+		require.NoError(t, os.Chtimes(path, mod, mod))
+	}
+
+	ps := GetBuiltinProviderSchema("azurerm")
+	require.NoError(t, CacheProviderSchema(cacheDir, "hashicorp/azurerm", ps))
+	_, err := os.Stat(expired)
+	assert.True(t, os.IsNotExist(err), "expired schema should be removed")
+
+	entries, err := os.ReadDir(schemasDir)
+	require.NoError(t, err)
+	regular := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && !strings.HasSuffix(entry.Name(), "broken.json") {
+			regular++
+		}
+	}
+	assert.Equal(t, persistentSchemaLimit+1, regular)
+
+	_, err = os.Stat(filepath.Join(schemasDir, "schema-000.json"))
+	assert.True(t, os.IsNotExist(err), "oldest schema should be evicted")
+	_, err = os.Stat(filepath.Join(schemasDir, "schema-001.json"))
+	assert.True(t, os.IsNotExist(err), "second oldest schema should be evicted")
 }
 
 func TestDynamicHazardRegistry_RegisterAndMergeNil(t *testing.T) {

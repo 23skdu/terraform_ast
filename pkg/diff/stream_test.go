@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"context"
 	"testing"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
@@ -97,6 +98,66 @@ func TestCompareStream(t *testing.T) {
 	nilEvents, nilReport := CollectDiff(nilCh)
 	assert.NotEmpty(t, nilEvents)
 	assert.NotNil(t, nilReport)
+}
+
+// doneOnlyContext models a context whose Done channel has fired but whose Err
+// has not yet been observed, so the select branch of sendDiffEvent is exercised.
+type doneOnlyContext struct {
+	context.Context
+	done chan struct{}
+}
+
+func (c doneOnlyContext) Done() <-chan struct{} { return c.done }
+func (c doneOnlyContext) Err() error            { return nil }
+
+func TestSendDiffEventStopsOnDoneChannel(t *testing.T) {
+	ctx := doneOnlyContext{Context: context.Background(), done: make(chan struct{})}
+	close(ctx.done)
+	// No receiver on the unbuffered channel: the only ready case is ctx.Done().
+	assert.False(t, sendDiffEvent(ctx, make(chan DiffStreamEvent), DiffStreamEvent{}))
+}
+
+func TestCompareStreamContextCancellation(t *testing.T) {
+	oldMod := &ast.ModuleInfo{Variables: map[string]ast.VariableDef{"x": {Name: "x", Type: "string"}}}
+	newMod := &ast.ModuleInfo{Variables: map[string]ast.VariableDef{"x": {Name: "x", Type: "number"}}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	events, report := CollectDiff(CompareStreamContext(ctx, oldMod, newMod, "1.0.0", "2.0.0"))
+	assert.Empty(t, events)
+	assert.Nil(t, report)
+}
+
+func TestCompareStreamPreservesItemsAndHazardLookup(t *testing.T) {
+	resource := func(cidr string) map[string]ast.ResourceDef {
+		return map[string]ast.ResourceDef{
+			"aws_vpc.main": {Type: "aws_vpc", Name: "main", Attributes: map[string]string{"cidr_block": cidr}},
+		}
+	}
+	oldMod := &ast.ModuleInfo{ManagedResources: resource("10.0.0.0/16")}
+	newMod := &ast.ModuleInfo{ManagedResources: resource("10.1.0.0/16")}
+
+	events, streamed := CollectDiff(CompareStream(oldMod, newMod, "1.0.0", "2.0.0", simpleHazardLookup{}))
+	require.NotNil(t, streamed)
+	direct := Compare(oldMod, newMod, "1.0.0", "2.0.0", simpleHazardLookup{})
+	assert.Equal(t, direct, streamed)
+
+	var breaking, warnings, features []DifferenceItem
+	for _, event := range events {
+		switch event.Kind {
+		case DiffStreamBreaking:
+			breaking = append(breaking, event.Item)
+		case DiffStreamWarning:
+			warnings = append(warnings, event.Item)
+		case DiffStreamFeature:
+			features = append(features, event.Item)
+		case DiffStreamDone:
+			assert.Same(t, streamed, event.Report)
+		}
+	}
+	assert.Equal(t, direct.BreakingChanges, breaking)
+	assert.Equal(t, direct.Warnings, warnings)
+	assert.Equal(t, direct.NewFeatures, features)
 }
 
 func TestDiffIterator(t *testing.T) {

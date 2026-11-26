@@ -150,10 +150,12 @@ go test -v -cover ./test/docker
 
 ## 4.5 Performance Budget Gate (`make perf`)
 
-Benchmark suites across `pkg/ast` (`BenchmarkInspectModule`), `pkg/diff` (`BenchmarkDiffCompare`), `pkg/blastradius` (`BenchmarkScanDirectory`), and `pkg/report` (`BenchmarkRenderReports`) guard against throughput and allocation regressions:
+Benchmark suites across `pkg/ast` (`BenchmarkInspectModule{Small,Medium,Large}`, `BenchmarkInspectSource`), `pkg/diff` (`BenchmarkCompare{Small,Medium,Large}`, `BenchmarkCompareStream`), `pkg/blastradius` (`BenchmarkScanDirectory`), and `pkg/report` (`BenchmarkRenderText{Small,Medium,Large}`, `BenchmarkRenderJSON{Small,Medium,Large}`) provide throughput baselines. Fuzz targets are seeded from inline cases and checked-in real module fixtures under `test/fixtures`; the `FuzzInspect` corpus also contains a real GKE module seed:
 ```bash
 make perf
 ```
+
+The committed baseline in `test/benchmarks/baseline.json` is compared by `make bench-gate`; in CI the comparison is currently advisory (`continue-on-error: true`) and does not block a merge.
 
 ---
 

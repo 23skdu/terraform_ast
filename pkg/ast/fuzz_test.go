@@ -6,6 +6,17 @@ import (
 	"testing"
 )
 
+// addFixtureSeeds seeds a fuzz target with checked-in real module files. Fuzzing
+// must start from representative third-party HCL, not only hand-written snippets.
+func addFixtureSeeds(f *testing.F, paths ...string) {
+	for _, path := range paths {
+		data, _ := os.ReadFile(filepath.Join("..", "..", path)) // #nosec G304 -- checked-in fixtures
+		if len(data) > 0 {
+			f.Add(string(data))
+		}
+	}
+}
+
 // FuzzInspect feeds arbitrary Terraform source into the full module inspection pipeline.
 //
 // Inspect must never panic: the CLI parses untrusted third-party module sources, so a crash on
@@ -32,6 +43,12 @@ output "id" { value = module.child.id }`,
 	for _, seed := range seeds {
 		f.Add(seed)
 	}
+	addFixtureSeeds(f,
+		"test/fixtures/upstream_gke_v2/variables.tf",
+		"test/fixtures/upstream_eks_v20/variables.tf",
+		"test/fixtures/upstream_aks_v1/main.tf",
+		"test/fixtures/modern_constructs/main.tf",
+	)
 
 	f.Fuzz(func(t *testing.T, source string) {
 		dir := t.TempDir()

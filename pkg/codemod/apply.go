@@ -304,6 +304,27 @@ func LoadResourceTransforms(path string) ([]ResourceTransform, error) {
 	if err := json.Unmarshal(data, &spec); err != nil {
 		return nil, fmt.Errorf("decode transform file %s: %w", path, err)
 	}
+	if len(spec.Transforms) == 0 {
+		return nil, fmt.Errorf("transform file %s contains no transforms", path)
+	}
+	for i, transform := range spec.Transforms {
+		if strings.TrimSpace(transform.From) == "" {
+			return nil, fmt.Errorf("transform file %s entry %d has an empty from address", path, i)
+		}
+		if len(transform.To) == 0 {
+			return nil, fmt.Errorf("transform file %s entry %d has no to addresses", path, i)
+		}
+		for _, to := range transform.To {
+			if strings.TrimSpace(to) == "" {
+				return nil, fmt.Errorf("transform file %s entry %d has an empty to address", path, i)
+			}
+		}
+		if len(transform.To) > 1 {
+			// A one-to-many moved{} block is not valid Terraform. Reject the spec instead of
+			// emitting a patch that can never apply; see the roadmap for split support.
+			return nil, fmt.Errorf("transform file %s entry %d is a split transform, which is not supported", path, i)
+		}
+	}
 	return spec.Transforms, nil
 }
 func CoveredMovedAddresses(blocks []ast.MovedBlockDef) map[string]struct{} {
@@ -366,8 +387,40 @@ type ImportBlock struct {
 	Provider string `json:"provider,omitempty"`
 }
 
+// NormalizeImportBlocks trims, de-duplicates, and deterministically orders import
+// blocks. It is shared by preview and apply so the two paths cannot disagree.
+func NormalizeImportBlocks(blocks []ImportBlock) []ImportBlock {
+	seen := make(map[string]struct{}, len(blocks))
+	normalized := make([]ImportBlock, 0, len(blocks))
+	for _, ib := range blocks {
+		ib.To = strings.TrimSpace(ib.To)
+		ib.ID = strings.TrimSpace(ib.ID)
+		ib.Provider = strings.TrimSpace(ib.Provider)
+		if ib.To == "" || ib.ID == "" {
+			continue
+		}
+		key := ib.To + "\x00" + ib.ID + "\x00" + ib.Provider
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, ib)
+	}
+	sort.Slice(normalized, func(i, j int) bool {
+		if normalized[i].To != normalized[j].To {
+			return normalized[i].To < normalized[j].To
+		}
+		if normalized[i].ID != normalized[j].ID {
+			return normalized[i].ID < normalized[j].ID
+		}
+		return normalized[i].Provider < normalized[j].Provider
+	})
+	return normalized
+}
+
 // FormatImportBlocks synthesizes Terraform 1.5+ import blocks.
 func FormatImportBlocks(blocks []ImportBlock) string {
+	blocks = NormalizeImportBlocks(blocks)
 	if len(blocks) == 0 {
 		return ""
 	}
@@ -375,9 +428,7 @@ func FormatImportBlocks(blocks []ImportBlock) string {
 	body := file.Body()
 
 	for _, ib := range blocks {
-		if strings.TrimSpace(ib.To) == "" || strings.TrimSpace(ib.ID) == "" {
-			continue
-		}
+		// NormalizeImportBlocks has already dropped incomplete entries.
 		block := body.AppendNewBlock("import", nil)
 		blockBody := block.Body()
 		blockBody.SetAttributeTraversal("to", parseAddressTraversal(ib.To))
@@ -392,36 +443,39 @@ func FormatImportBlocks(blocks []ImportBlock) string {
 
 // WriteImportBlocks writes or appends formatted import blocks to targetPath idempotently.
 func WriteImportBlocks(targetPath string, blocks []ImportBlock) error {
+	_, err := WriteImportBlocksIfChanged(targetPath, blocks)
+	return err
+}
+
+// WriteImportBlocksIfChanged behaves like WriteImportBlocks and additionally reports
+// whether the file was actually modified, so callers do not list an untouched file as fixed.
+func WriteImportBlocksIfChanged(targetPath string, blocks []ImportBlock) (bool, error) {
+	blocks = NormalizeImportBlocks(blocks)
 	if len(blocks) == 0 {
-		return nil
+		return false, nil
 	}
 	cleanPath := filepath.Clean(targetPath)
 	dir := filepath.Dir(cleanPath)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return fmt.Errorf("create directory for import blocks %s: %w", dir, err)
+		return false, fmt.Errorf("create directory for import blocks %s: %w", dir, err)
 	}
 
 	// #nosec G304 -- operator specified target file
 	existing, err := os.ReadFile(cleanPath)
 	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read existing import blocks file %s: %w", cleanPath, err)
+		return false, fmt.Errorf("read existing import blocks file %s: %w", cleanPath, err)
 	}
 
 	existingStr := string(existing)
 	var newBlocks []ImportBlock
 	for _, ib := range blocks {
-		if strings.TrimSpace(ib.To) == "" || strings.TrimSpace(ib.ID) == "" {
-			continue
-		}
-		toPattern := ib.To
-		idPattern := ib.ID
-		if strings.Contains(existingStr, toPattern) && strings.Contains(existingStr, idPattern) {
+		if strings.Contains(existingStr, ib.To) && strings.Contains(existingStr, ib.ID) {
 			continue
 		}
 		newBlocks = append(newBlocks, ib)
 	}
 	if len(newBlocks) == 0 {
-		return nil
+		return false, nil
 	}
 
 	formatted := FormatImportBlocks(newBlocks)
@@ -435,7 +489,7 @@ func WriteImportBlocks(targetPath string, blocks []ImportBlock) error {
 
 	// #nosec G703 -- operator specified target file
 	if err := os.WriteFile(cleanPath, content, 0o600); err != nil {
-		return fmt.Errorf("write import blocks file %s: %w", cleanPath, err)
+		return false, fmt.Errorf("write import blocks file %s: %w", cleanPath, err)
 	}
-	return nil
+	return true, nil
 }

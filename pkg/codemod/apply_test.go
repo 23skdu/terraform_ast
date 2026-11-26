@@ -319,6 +319,40 @@ func TestFormatImportBlocks(t *testing.T) {
 	assert.Contains(t, out, "aws.west")
 }
 
+func TestNormalizeImportBlocks(t *testing.T) {
+	normalized := NormalizeImportBlocks([]ImportBlock{
+		{To: "  aws_s3_bucket.b ", ID: " b-id ", Provider: " aws.west "},
+		{To: "aws_s3_bucket.b", ID: "b-id", Provider: "aws.west"}, // duplicate after trimming
+		{To: "aws_s3_bucket.b", ID: "a-id"},
+		{To: "aws_s3_bucket.b", ID: "a-id", Provider: "aws.east"},
+		{To: "aws_s3_bucket.a", ID: "z-id"},
+		{To: "", ID: "ignored"},
+	})
+	assert.Len(t, normalized, 4)
+	assert.Equal(t, "aws_s3_bucket.a", normalized[0].To)
+	assert.Equal(t, "a-id", normalized[1].ID)
+	assert.Equal(t, "aws.east", normalized[2].Provider)
+	assert.Equal(t, "aws.west", normalized[3].Provider)
+}
+
+func TestWriteImportBlocksIfChanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "imports.tf")
+	blocks := []ImportBlock{{To: "aws_s3_bucket.b", ID: "b-id"}}
+
+	changed, err := WriteImportBlocksIfChanged(path, blocks)
+	require.NoError(t, err)
+	assert.True(t, changed)
+
+	changed, err = WriteImportBlocksIfChanged(path, blocks)
+	require.NoError(t, err)
+	assert.False(t, changed)
+
+	changed, err = WriteImportBlocksIfChanged(filepath.Join(dir, "empty.tf"), []ImportBlock{{To: "", ID: ""}})
+	require.NoError(t, err)
+	assert.False(t, changed)
+}
+
 func TestWriteImportBlocks(t *testing.T) {
 	dir := t.TempDir()
 	blocker := filepath.Join(dir, "blocker")
@@ -419,4 +453,23 @@ func TestResourceTransforms(t *testing.T) {
 	require.NoError(t, os.WriteFile(bad, []byte("{"), 0o600))
 	_, err = LoadResourceTransforms(bad)
 	assert.Error(t, err)
+}
+
+func TestLoadResourceTransformsValidation(t *testing.T) {
+	dir := t.TempDir()
+	cases := map[string]string{
+		"empty.json":    `{}`,
+		"no-from.json":  `{"transforms":[{"from":"","to":["b"]}]}`,
+		"no-to.json":    `{"transforms":[{"from":"a","to":[]}]}`,
+		"empty-to.json": `{"transforms":[{"from":"a","to":[""]}]}`,
+		"split.json":    `{"transforms":[{"from":"a","to":["b","c"]}]}`,
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, name)
+			require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+			_, err := LoadResourceTransforms(path)
+			assert.Error(t, err)
+		})
+	}
 }

@@ -191,7 +191,11 @@ func CloneOrOpenWithOptions(repoURLOrPath, targetDir string, cfg CloneConfig) (*
 	}
 
 	if len(cfg.SparsePaths) > 0 {
-		_ = EnableSparseCheckout(targetDir, cfg.SparsePaths)
+		// A sparse checkout that silently fails leaves the full tree on disk, defeating
+		// the caller's attempt to limit materialised paths. Surface it instead.
+		if err := EnableSparseCheckout(targetDir, cfg.SparsePaths); err != nil {
+			return nil, fmt.Errorf("enable sparse checkout for %s: %w", targetDir, err)
+		}
 	}
 
 	return repo, nil

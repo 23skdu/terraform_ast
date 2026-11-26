@@ -15,10 +15,30 @@ func BenchmarkCompare(b *testing.B) {
 	}
 }
 
+func BenchmarkCompareStream(b *testing.B) {
+	oldMod := &ast.ModuleInfo{Variables: map[string]ast.VariableDef{"x": {Name: "x", Type: "string"}}}
+	newMod := &ast.ModuleInfo{Variables: map[string]ast.VariableDef{"x": {Name: "x", Type: "number"}}}
+	for b.Loop() {
+		CollectDiff(CompareStream(oldMod, newMod, "1.0.0", "2.0.0"))
+	}
+}
+
+func BenchmarkCompareSmall(b *testing.B) {
+	benchmarkCompareVars(b, 5)
+}
+
+func BenchmarkCompareMedium(b *testing.B) {
+	benchmarkCompareVars(b, 100)
+}
+
 func BenchmarkCompareLarge(b *testing.B) {
-	oldVars := make(map[string]ast.VariableDef, 1000)
-	newVars := make(map[string]ast.VariableDef, 1001)
-	for i := 0; i < 1000; i++ {
+	benchmarkCompareVars(b, 1000)
+}
+
+func benchmarkCompareVars(b *testing.B, n int) {
+	oldVars := make(map[string]ast.VariableDef, n)
+	newVars := make(map[string]ast.VariableDef, n+1)
+	for i := 0; i < n; i++ {
 		name := "var" + strconv.Itoa(i)
 		oldVars[name] = ast.VariableDef{Name: name, Type: "string"}
 		newVars[name] = ast.VariableDef{Name: name, Type: "string"}
