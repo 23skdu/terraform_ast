@@ -358,6 +358,45 @@ func (c *Client) GetLatestVersion(ctx context.Context, source string) (string, e
 	return versions[len(versions)-1], nil
 }
 
+// MaxProviderSchemaBytes bounds a fetched provider schema document so a hostile or broken
+// endpoint cannot make the analysis process accumulate an unbounded response body.
+const MaxProviderSchemaBytes = 32 << 20
+
+// FetchProviderSchema fetches a `terraform providers schema -json` document from an HTTP(S) URL.
+// The public Terraform Registry publishes provider versions and binaries but not schema JSON, so
+// the URL is expected to point at a registry-like endpoint or artifact store that publishes the
+// document. Requests go through the same SSRF guard, retry, and cancellation logic as module
+// registry requests.
+func (c *Client) FetchProviderSchema(ctx context.Context, rawURL string) ([]byte, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid provider schema URL %q: %w", rawURL, err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("provider schema URL must be an absolute http(s) URL, got %q", rawURL)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create provider schema request: %w", err)
+	}
+	resp, err := c.doRequestWithBackoff(req)
+	if err != nil {
+		return nil, fmt.Errorf("request provider schema %s: %w", rawURL, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("fetch provider schema %s: unexpected status %d", rawURL, resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxProviderSchemaBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read provider schema %s: %w", rawURL, err)
+	}
+	if len(data) > MaxProviderSchemaBytes {
+		return nil, fmt.Errorf("provider schema %s exceeds %d bytes", rawURL, MaxProviderSchemaBytes)
+	}
+	return data, nil
+}
+
 // DownloadModule downloads and extracts a module version archive into destDir.
 // If the source specifies a submodule via '//', the archive is extracted into destDir
 // and the submodule directory is confirmed to exist.

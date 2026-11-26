@@ -17,6 +17,7 @@ GOIMPORTS     ?= $(shell which goimports 2>/dev/null || echo $(GOBIN)/goimports)
 MARKDOWNLINT  ?= $(shell which markdownlint 2>/dev/null || echo /home/linuxbrew/.linuxbrew/bin/markdownlint)
 PYTHON        ?= $(shell which python3 2>/dev/null || echo /home/linuxbrew/.linuxbrew/bin/python3)
 DOCKER        ?= $(shell which docker 2>/dev/null || echo docker)
+LEAN          ?= $(shell which lean 2>/dev/null || echo $(HOME)/.elan/bin/lean)
 
 BIN := bin/tfastdiff
 FUZZ_TIME ?= 10
@@ -32,7 +33,7 @@ BENCH_THRESHOLD ?= 10
 	deps deps-upgrade lint lint-fast lint-fix vet staticcheck deadcode fmt fmt-check \
 	security secure sec-gosec sec-vulncheck sec-audit \
 	perf bench bench-check bench-gate bench-baseline bench-race memprofile cpuprofile test test-short test-all race test-coverage coverage-gate coverage-html test-fuzz \
-	accuracy-gate oracle venv docker markdown-lint verify pre-commit makehooks install-hooks fuzz
+	accuracy-gate oracle venv docker markdown-lint verify lean-verify pre-commit makehooks install-hooks fuzz
 
 # Default target
 all: verify
@@ -90,6 +91,7 @@ help:
 	@echo "  test-fuzz            Run fuzz test harnesses"
 	@echo "  fuzz                 Run extended fuzz smoke suite (verify.sh)"
 	@echo "  verify               Run scripts/verify.sh quality gate"
+	@echo "  lean-verify          Type-check the formal proofs in lean/ (requires Lean 4)"
 	@echo "  pre-commit           Alias for verify"
 	@echo ""
 	@echo "Terraform AST Specific:"
@@ -332,6 +334,12 @@ fuzz:
 
 verify:
 	bash scripts/verify.sh $(FUZZ_TIME)
+
+# Lean proofs are opt-in: the Go quality gate must stay runnable without a Lean toolchain.
+lean-verify:
+	@command -v $(LEAN) >/dev/null 2>&1 || { echo "Lean not found; install elan and run 'elan default \$$(cat lean/lean-toolchain)'"; exit 1; }
+	$(LEAN) lean/DiffVerdict.lean
+	@echo "Lean proofs verified"
 
 pre-commit: verify
 

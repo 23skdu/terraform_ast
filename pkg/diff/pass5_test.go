@@ -323,13 +323,13 @@ func TestPass5_CompareResourcesConsumedNewInTypeReassign(t *testing.T) {
 
 func TestPass5_CompareModernBlocksNil(t *testing.T) {
 	report := &DiffReport{}
-	compareModernBlocks(nil, nil, report)
+	compareModernBlocks(nil, nil, &diffSink{report: report})
 	require.NotNil(t, report)
 }
 
 func TestPass5_CompareResourcesNilDirect(t *testing.T) {
 	report := &DiffReport{}
-	compareResources(nil, nil, report)
+	compareResources(nil, nil, &diffSink{report: report})
 	require.NotNil(t, report)
 }
 
@@ -462,7 +462,7 @@ func TestPass5_DestructiveToggles(t *testing.T) {
 
 func TestPass5_DestructiveTogglesNilAndBackendAttrs(t *testing.T) {
 	report := &DiffReport{}
-	compareDestructiveToggles(nil, nil, report, nil)
+	compareDestructiveToggles(nil, nil, &diffSink{report: report}, nil)
 	require.NotNil(t, report)
 
 	// backend attribute removed + added

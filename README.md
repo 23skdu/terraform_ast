@@ -167,7 +167,8 @@ Full architectural and technical specifications are available under [`docs/`](do
 - [Compatibility Rules](docs/compatibility_rules.md): Detailed classification taxonomy for breaking changes, warnings, downgrades, and new features.
 - [Testing Methodology](docs/testing_methodology.md): Unit, fuzz, and Terratest validation, golden file verification, and the 100% coverage gate.
 - [Quality & Accuracy Gates](docs/gates.md): Upgrade path accuracy validation, invariant assertions, independent oracle verification, and the pre-commit quality gate.
-- [Strategic Roadmap](docs/roadmap.md): Completed engineering milestones across Passes 1–9.
+- [Formal Proof](docs/formalproof.md): Lean 4 model and machine-checked invariants of the safety verdict (`make lean-verify`).
+- [Strategic Roadmap](docs/roadmap.md): Current gaps and completed engineering milestones across Passes 1–11.
 
 ---
 

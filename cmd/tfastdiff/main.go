@@ -220,6 +220,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		fixMode            bool
 		upgradePath        bool
 		providerSchemaPath string
+		providerSchemaURL  string
 		cacheDir           string
 		clearCache         bool
 		lspDaemon          bool
@@ -273,6 +274,7 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&fixMode, "fix", false, "Apply fixes in-place to remove wrapper arguments no longer accepted upstream")
 	fs.BoolVar(&upgradePath, "upgrade-path", false, "Analyze each intermediate semantic version between --old-version and --new-version")
 	fs.StringVar(&providerSchemaPath, "provider-schema", "", "Optional path to terraform providers schema -json file for dynamic ForceNew recreation detection")
+	fs.StringVar(&providerSchemaURL, "provider-schema-url", "", "Optional HTTP(S) URL to a terraform providers schema -json document for dynamic ForceNew recreation detection")
 	fs.StringVar(&cacheDir, "cache-dir", "", "Optional path to directory for persistent L2 AST caching")
 	fs.BoolVar(&clearCache, "clear-cache", false, "Remove cached module inspections from --cache-dir and exit")
 	fs.BoolVar(&lspDaemon, "lsp", false, "Start Language Server Protocol (LSP) daemon for IDE integration")
@@ -353,6 +355,10 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stderr, "Error: --provider-schema is not supported with --fix or --fix-preview; run the audit separately")
 			return 2
 		}
+		if providerSchemaURL != "" {
+			_, _ = fmt.Fprintln(stderr, "Error: --provider-schema-url is not supported with --fix or --fix-preview; run the audit separately")
+			return 2
+		}
 		if supplied["check-recreation"] {
 			_, _ = fmt.Fprintln(stderr, "Error: --check-recreation is not supported with --fix or --fix-preview; run the audit separately")
 			return 2
@@ -366,6 +372,11 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintf(stderr, "Error: --format %s is not supported with --fix or --fix-preview, which always emits a plain patch\n", format)
 			return 2
 		}
+	}
+
+	if providerSchemaPath != "" && providerSchemaURL != "" {
+		_, _ = fmt.Fprintln(stderr, "Error: Cannot specify both --provider-schema and --provider-schema-url")
+		return 2
 	}
 
 	if activeTransformFile != "" && !fixMode && !fixPreview {
@@ -395,6 +406,16 @@ func Execute(args []string, stdout, stderr io.Writer) int {
 		ps, err := recreation.LoadProviderSchema(providerSchemaPath)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Error loading provider schema %s: %v\n", providerSchemaPath, err)
+			return 2
+		}
+		dynamicRegistry = recreation.NewDynamicHazardRegistry(ps)
+	}
+	if providerSchemaURL != "" {
+		fetchCtx, cancel := registryContext(ctx, registryTimeout)
+		ps, err := recreation.LoadRemoteProviderSchema(fetchCtx, registryClient(registryTimeout).FetchProviderSchema, providerSchemaURL, cacheDir)
+		cancel()
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Error loading provider schema from %s: %v\n", providerSchemaURL, err)
 			return 2
 		}
 		dynamicRegistry = recreation.NewDynamicHazardRegistry(ps)

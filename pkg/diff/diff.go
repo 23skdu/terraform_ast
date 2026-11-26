@@ -18,6 +18,68 @@ import (
 // Compare analyzes the syntactic and semantic differences between oldMod and newMod.
 // An optional ast.HazardLookup enables schema-driven ForceNew attribute detection (#133).
 func Compare(oldMod, newMod *ast.ModuleInfo, oldVer, newVer string, hazardLookups ...ast.HazardLookup) *DiffReport {
+	oldMod, newMod = normalizeModules(oldMod, newMod)
+
+	bump := semverutil.DetermineBumpType(oldVer, newVer)
+	isDowngrade := (bump == semverutil.BumpDowngrade)
+
+	var hazardLookup ast.HazardLookup
+	if len(hazardLookups) > 0 {
+		hazardLookup = hazardLookups[0]
+	}
+
+	report := &DiffReport{
+		ModuleName:  moduleDisplayName(newMod, oldMod),
+		OldVersion:  oldVer,
+		NewVersion:  newVer,
+		BumpType:    bump,
+		IsDowngrade: isDowngrade,
+	}
+
+	sink := &diffSink{report: report}
+
+	// 1. Compare Input Variables
+	compareVariables(oldMod, newMod, sink)
+
+	// 2. Compare Outputs
+	compareOutputs(oldMod, newMod, sink)
+
+	// 3. Compare Providers and Core Requirements
+	compareRequirements(oldMod, newMod, sink)
+
+	// 4. Compare Modern HCL & OpenTofu Blocks
+	compareModernBlocks(oldMod, newMod, sink)
+
+	// 5. Compare Managed and Data Resources
+	compareResources(oldMod, newMod, sink)
+
+	// 6. Compare Nested Module Calls
+	compareModuleCalls(oldMod, newMod, sink)
+
+	// 7. Compare destructive toggles (lifecycle, backend, cloud, provider, provisioners, triggers, count/for_each, locals)
+	compareDestructiveToggles(oldMod, newMod, sink, hazardLookup)
+	scoreConfidence(report)
+
+	// Sort slices deterministically for stable reporting and golden testing
+	sortDifferences(report.BreakingChanges)
+	sortDifferences(report.NewFeatures)
+	sortDifferences(report.Warnings)
+
+	report.TotalBreaking = len(report.BreakingChanges)
+	report.TotalNewFeatures = len(report.NewFeatures)
+	report.TotalWarnings = len(report.Warnings)
+
+	// Compute safety verdict
+	computeVerdict(report)
+	recommendSafePin(report)
+
+	return report
+}
+
+// normalizeModules returns modules whose lookup maps are safe to read. Callers may pass nil or
+// partially initialised modules; both the buffered Compare path and the bounded streaming path
+// use the same normalisation so they see identical inputs.
+func normalizeModules(oldMod, newMod *ast.ModuleInfo) (*ast.ModuleInfo, *ast.ModuleInfo) {
 	if oldMod == nil {
 		oldMod = &ast.ModuleInfo{
 			Variables:         make(map[string]ast.VariableDef),
@@ -48,59 +110,7 @@ func Compare(oldMod, newMod *ast.ModuleInfo, oldVer, newVer string, hazardLookup
 	if newMod.DataResources == nil {
 		newMod.DataResources = make(map[string]ast.ResourceDef)
 	}
-
-	bump := semverutil.DetermineBumpType(oldVer, newVer)
-	isDowngrade := (bump == semverutil.BumpDowngrade)
-
-	var hazardLookup ast.HazardLookup
-	if len(hazardLookups) > 0 {
-		hazardLookup = hazardLookups[0]
-	}
-
-	report := &DiffReport{
-		ModuleName:  moduleDisplayName(newMod, oldMod),
-		OldVersion:  oldVer,
-		NewVersion:  newVer,
-		BumpType:    bump,
-		IsDowngrade: isDowngrade,
-	}
-
-	// 1. Compare Input Variables
-	compareVariables(oldMod, newMod, report)
-
-	// 2. Compare Outputs
-	compareOutputs(oldMod, newMod, report)
-
-	// 3. Compare Providers and Core Requirements
-	compareRequirements(oldMod, newMod, report)
-
-	// 4. Compare Modern HCL & OpenTofu Blocks
-	compareModernBlocks(oldMod, newMod, report)
-
-	// 5. Compare Managed and Data Resources
-	compareResources(oldMod, newMod, report)
-
-	// 6. Compare Nested Module Calls
-	compareModuleCalls(oldMod, newMod, report)
-
-	// 7. Compare destructive toggles (lifecycle, backend, cloud, provider, provisioners, triggers, count/for_each, locals)
-	compareDestructiveToggles(oldMod, newMod, report, hazardLookup)
-	scoreConfidence(report)
-
-	// Sort slices deterministically for stable reporting and golden testing
-	sortDifferences(report.BreakingChanges)
-	sortDifferences(report.NewFeatures)
-	sortDifferences(report.Warnings)
-
-	report.TotalBreaking = len(report.BreakingChanges)
-	report.TotalNewFeatures = len(report.NewFeatures)
-	report.TotalWarnings = len(report.Warnings)
-
-	// Compute safety verdict
-	computeVerdict(report)
-	recommendSafePin(report)
-
-	return report
+	return oldMod, newMod
 }
 
 // moduleDisplayName derives a human readable identifier for the compared module so that reports
@@ -134,36 +144,13 @@ func recommendSafePin(report *DiffReport) {
 
 func scoreConfidence(report *DiffReport) {
 	for i := range report.BreakingChanges {
-		ev := report.BreakingChanges[i].Evidence
-		if ev < 1 {
-			ev = 1
-		}
-		score := 8 + (ev - 1)
-		report.BreakingChanges[i].ConfidenceScore = score
+		scoreDifference(DiffStreamBreaking, &report.BreakingChanges[i])
 	}
 	for i := range report.NewFeatures {
-		ev := report.NewFeatures[i].Evidence
-		if ev < 1 {
-			ev = 1
-		}
-		score := 8 + (ev - 1)
-		report.NewFeatures[i].ConfidenceScore = score
+		scoreDifference(DiffStreamFeature, &report.NewFeatures[i])
 	}
 	for i := range report.Warnings {
-		ev := report.Warnings[i].Evidence
-		var base int
-		switch report.Warnings[i].Category {
-		case "TerraformCore", "ProviderRequirement":
-			base = 7
-		case "VariableValidation":
-			base = 6
-		case "VariableType", "OutputType":
-			base = 8
-		default:
-			base = 9
-		}
-		score := base + ev
-		report.Warnings[i].ConfidenceScore = score
+		scoreDifference(DiffStreamWarning, &report.Warnings[i])
 	}
 }
 
@@ -202,7 +189,7 @@ func sameStrings(left, right []string) bool {
 	return true
 }
 
-func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
+func compareVariables(oldMod, newMod *ast.ModuleInfo, sink *diffSink) {
 	// Check removed variables & modified variables
 	for name, oldVar := range oldMod.Variables {
 		newVar, exists := newMod.Variables[name]
@@ -215,7 +202,7 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				}
 			}
 			if isSoftRemoved {
-				report.Warnings = append(report.Warnings, DifferenceItem{
+				sink.warning(DifferenceItem{
 					Category:    "Variable",
 					Name:        name,
 					Severity:    SeverityWarning,
@@ -223,10 +210,10 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					OldValue:    fmt.Sprintf("type=%s, required=%t", oldVar.Type, oldVar.Required),
 					Remediation: fmt.Sprintf("Variable '%s' is gracefully retired without destroying infrastructure", name),
 				})
+
 				continue
 			}
-
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:    "Variable",
 				Name:        name,
 				Severity:    SeverityBreaking,
@@ -235,13 +222,14 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Remediation: fmt.Sprintf("Remove variable '%s' from wrapper or module callers before upgrading", name),
 				Pos:         oldVar.Pos,
 			})
+
 			continue
 		}
 
 		// Type constraint comparison
 		typeCompat := ast.CheckTypeCompatibility(oldVar.Type, newVar.Type)
 		if typeCompat.IsBreaking {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:    "VariableType",
 				Name:        name,
 				Severity:    SeverityBreaking,
@@ -251,8 +239,9 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Remediation: fmt.Sprintf("Update variable type definition in wrapper to '%s'", newVar.Type),
 				Pos:         oldVar.Pos,
 			})
+
 		} else if oldVar.Type != newVar.Type {
-			report.Warnings = append(report.Warnings, DifferenceItem{
+			sink.warning(DifferenceItem{
 				Category:    "VariableType",
 				Name:        name,
 				Severity:    SeverityWarning,
@@ -261,10 +250,11 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				NewValue:    newVar.Type,
 				Remediation: "Verify variable values remain valid under widened type",
 			})
+
 		}
 
 		if !sameStrings(oldVar.ValidationRules, newVar.ValidationRules) {
-			report.Warnings = append(report.Warnings, DifferenceItem{
+			sink.warning(DifferenceItem{
 				Category:    "VariableValidation",
 				Name:        name,
 				Severity:    SeverityWarning,
@@ -273,11 +263,12 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				NewValue:    strings.Join(newVar.ValidationRules, "; "),
 				Remediation: "Review accepted values and validation behavior before upgrading",
 			})
+
 		}
 
 		// Default value change (silent behaviour change for callers that omit the input).
 		if oldVar.HasDefault && newVar.HasDefault && !reflect.DeepEqual(oldVar.Default, newVar.Default) {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:    "VariableDefault",
 				Name:        name,
 				Severity:    SeverityBreaking,
@@ -288,11 +279,12 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Pos:         oldVar.Pos,
 				Evidence:    2,
 			})
+
 		}
 
 		// Check if previously optional input became required
 		if oldVar.HasDefault && (!newVar.HasDefault && newVar.Required) {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:    "VariableRequirement",
 				Name:        name,
 				Severity:    SeverityBreaking,
@@ -301,12 +293,13 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				NewValue:    "required without default",
 				Remediation: fmt.Sprintf("Explicitly supply a value for '%s' in the wrapper module call", name),
 			})
+
 		}
 
 		oldNullable := oldVar.Nullable == nil || *oldVar.Nullable
 		newNullable := newVar.Nullable == nil || *newVar.Nullable
 		if oldNullable && !newNullable {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:    "VariableNullability",
 				Name:        name,
 				Severity:    SeverityBreaking,
@@ -315,8 +308,9 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				NewValue:    "nullable=false",
 				Remediation: fmt.Sprintf("Ensure callers provide a non-null value for '%s'", name),
 			})
+
 		} else if !oldNullable && newNullable {
-			report.Warnings = append(report.Warnings, DifferenceItem{
+			sink.warning(DifferenceItem{
 				Category:    "VariableNullability",
 				Name:        name,
 				Severity:    SeverityWarning,
@@ -325,11 +319,12 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				NewValue:    "nullable=true",
 				Remediation: "Verify null values are handled safely by the module",
 			})
+
 		}
 
 		// Check sensitivity transition
 		if !oldVar.Sensitive && newVar.Sensitive {
-			report.Warnings = append(report.Warnings, DifferenceItem{
+			sink.warning(DifferenceItem{
 				Category:    "VariableSensitivity",
 				Name:        name,
 				Severity:    SeverityWarning,
@@ -338,11 +333,12 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				NewValue:    "sensitive=true",
 				Remediation: "Ensure sensitive variable is not exposed in plaintext logs or outputs",
 			})
+
 		}
 
 		// Check deprecation
 		if oldVar.Deprecated == "" && newVar.Deprecated != "" {
-			report.Warnings = append(report.Warnings, DifferenceItem{
+			sink.warning(DifferenceItem{
 				Category:    "VariableDeprecation",
 				Name:        name,
 				Severity:    SeverityWarning,
@@ -350,6 +346,7 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				NewValue:    newVar.Deprecated,
 				Remediation: "Migrate away from deprecated variable",
 			})
+
 		}
 	}
 
@@ -357,37 +354,41 @@ func compareVariables(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 	for name, newVar := range newMod.Variables {
 		if _, exists := oldMod.Variables[name]; !exists {
 			if newVar.Required && !newVar.HasDefault {
-				// Newly required variable without default is BREAKING
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
-					Category:    "Variable",
-					Name:        name,
-					Severity:    SeverityBreaking,
-					Description: fmt.Sprintf("Newly introduced variable '%s' is required and has no default value", name),
-					NewValue:    fmt.Sprintf("type=%s (required)", newVar.Type),
-					Remediation: fmt.Sprintf("Provide a required value for '%s' in wrapper module call", name),
-					Pos:         newVar.Pos,
-				})
+				sink.
+					// Newly required variable without default is BREAKING
+					breaking(DifferenceItem{
+						Category:    "Variable",
+						Name:        name,
+						Severity:    SeverityBreaking,
+						Description: fmt.Sprintf("Newly introduced variable '%s' is required and has no default value", name),
+						NewValue:    fmt.Sprintf("type=%s (required)", newVar.Type),
+						Remediation: fmt.Sprintf("Provide a required value for '%s' in wrapper module call", name),
+						Pos:         newVar.Pos,
+					})
+
 			} else {
-				// New optional variable is a NEW FEATURE
-				report.NewFeatures = append(report.NewFeatures, DifferenceItem{
-					Category:    "Variable",
-					Name:        name,
-					Severity:    SeverityNewFeature,
-					Description: fmt.Sprintf("New optional variable '%s' available in upstream", name),
-					NewValue:    fmt.Sprintf("type=%s", newVar.Type),
-					Remediation: "Consider exposing this new parameter in wrapper if needed",
-				})
+				sink.
+					// New optional variable is a NEW FEATURE
+					feature(DifferenceItem{
+						Category:    "Variable",
+						Name:        name,
+						Severity:    SeverityNewFeature,
+						Description: fmt.Sprintf("New optional variable '%s' available in upstream", name),
+						NewValue:    fmt.Sprintf("type=%s", newVar.Type),
+						Remediation: "Consider exposing this new parameter in wrapper if needed",
+					})
+
 			}
 		}
 	}
 }
 
-func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
+func compareOutputs(oldMod, newMod *ast.ModuleInfo, sink *diffSink) {
 	// Check removed outputs & modified outputs
 	for name, oldOut := range oldMod.Outputs {
 		newOut, exists := newMod.Outputs[name]
 		if !exists {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:    "Output",
 				Name:        name,
 				Severity:    SeverityBreaking,
@@ -395,6 +396,7 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Remediation: fmt.Sprintf("Remove or replace references to output '%s' in wrapper or downstream modules", name),
 				Pos:         oldOut.Pos,
 			})
+
 			continue
 		}
 
@@ -402,7 +404,7 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 		if oldOut.Type != "" && newOut.Type != "" && oldOut.Type != newOut.Type {
 			typeCompat := ast.CheckTypeCompatibility(oldOut.Type, newOut.Type)
 			if typeCompat.IsBreaking {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:    "OutputType",
 					Name:        name,
 					Severity:    SeverityBreaking,
@@ -412,8 +414,9 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					Remediation: fmt.Sprintf("Update downstream references to output '%s' to expect '%s'", name, newOut.Type),
 					Pos:         oldOut.Pos,
 				})
+
 			} else {
-				report.Warnings = append(report.Warnings, DifferenceItem{
+				sink.warning(DifferenceItem{
 					Category:    "OutputType",
 					Name:        name,
 					Severity:    SeverityWarning,
@@ -422,12 +425,13 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					NewValue:    newOut.Type,
 					Remediation: "Verify downstream consumers remain compatible with the changed output type",
 				})
+
 			}
 		}
 
 		// Sensitivity changes
 		if !oldOut.Sensitive && newOut.Sensitive {
-			report.Warnings = append(report.Warnings, DifferenceItem{
+			sink.warning(DifferenceItem{
 				Category:    "OutputSensitivity",
 				Name:        name,
 				Severity:    SeverityWarning,
@@ -436,11 +440,12 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				NewValue:    "sensitive=true",
 				Remediation: "Downstream modules reading this output may require nonsensitive() or will be masked in CLI",
 			})
+
 		}
 
 		// Precondition / postcondition changes (#140)
 		if !sameStrings(oldOut.Preconditions, newOut.Preconditions) {
-			report.Warnings = append(report.Warnings, DifferenceItem{
+			sink.warning(DifferenceItem{
 				Category:    "PreconditionModified",
 				Name:        name,
 				Severity:    SeverityWarning,
@@ -449,9 +454,10 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				NewValue:    strings.Join(newOut.Preconditions, "; "),
 				Remediation: "Verify output preconditions remain valid",
 			})
+
 		}
 		if !sameStrings(oldOut.Postconditions, newOut.Postconditions) {
-			report.Warnings = append(report.Warnings, DifferenceItem{
+			sink.warning(DifferenceItem{
 				Category:    "PostconditionModified",
 				Name:        name,
 				Severity:    SeverityWarning,
@@ -460,10 +466,11 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				NewValue:    strings.Join(newOut.Postconditions, "; "),
 				Remediation: "Verify output postconditions remain valid",
 			})
+
 		}
 		// Deprecation
 		if oldOut.Deprecated == "" && newOut.Deprecated != "" {
-			report.Warnings = append(report.Warnings, DifferenceItem{
+			sink.warning(DifferenceItem{
 				Category:    "OutputDeprecation",
 				Name:        name,
 				Severity:    SeverityWarning,
@@ -471,6 +478,7 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				NewValue:    newOut.Deprecated,
 				Remediation: "Migrate downstream usage to recommended successor output",
 			})
+
 		}
 
 		// Output value expression change (silent behaviour change).
@@ -478,7 +486,7 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 		newVal := normalizeCondition(newOut.Value)
 		if oldVal != "" && newVal != "" && oldVal != newVal {
 			if oldOut.Type != newOut.Type || oldOut.Sensitive != newOut.Sensitive {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:    "OutputValue",
 					Name:        name,
 					Severity:    SeverityBreaking,
@@ -488,8 +496,9 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					Remediation: "Update downstream consumers of this output",
 					Pos:         oldOut.Pos,
 				})
+
 			} else {
-				report.Warnings = append(report.Warnings, DifferenceItem{
+				sink.warning(DifferenceItem{
 					Category:    "OutputValue",
 					Name:        name,
 					Severity:    SeverityWarning,
@@ -498,6 +507,7 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					NewValue:    newOut.Value,
 					Remediation: "Verify downstream consumers remain compatible",
 				})
+
 			}
 		}
 	}
@@ -505,7 +515,7 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 	// Check new outputs
 	for name, newOut := range newMod.Outputs {
 		if _, exists := oldMod.Outputs[name]; !exists {
-			report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+			sink.feature(DifferenceItem{
 				Category:    "Output",
 				Name:        name,
 				Severity:    SeverityNewFeature,
@@ -514,11 +524,12 @@ func compareOutputs(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Remediation: "Consider re-exporting this output in wrapper if useful for downstream consumers",
 				Pos:         newOut.Pos,
 			})
+
 		}
 	}
 }
 
-func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
+func compareRequirements(oldMod, newMod *ast.ModuleInfo, sink *diffSink) {
 	// Core version constraints. Normalise whitespace and ordering so a reordering of a
 	// multi-constraint list does not surface as a change; a removal is still reported.
 	normalizeCore := func(values []string) string {
@@ -539,7 +550,7 @@ func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 		if newCore == "" {
 			desc = fmt.Sprintf("Terraform Core version constraint removed (was '%s')", oldCore)
 		}
-		report.Warnings = append(report.Warnings, DifferenceItem{
+		sink.warning(DifferenceItem{
 			Category:    "TerraformCore",
 			Name:        "required_version",
 			Severity:    SeverityWarning,
@@ -548,13 +559,15 @@ func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			NewValue:    newCore,
 			Remediation: "Ensure execution environment meets new Terraform Core requirement",
 		})
+
+		// Required providers
+
 	}
 
-	// Required providers
 	for name, oldReq := range oldMod.RequiredProviders {
 		newReq, exists := newMod.RequiredProviders[name]
 		if !exists {
-			report.Warnings = append(report.Warnings, DifferenceItem{
+			sink.warning(DifferenceItem{
 				Category:    "ProviderRequirement",
 				Name:        name,
 				Severity:    SeverityWarning,
@@ -562,34 +575,37 @@ func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				OldValue:    strings.Join(oldReq.VersionConstraints, ", "),
 				Remediation: "Verify wrapper still satisfies provider dependencies",
 			})
+
 		} else {
 			oldAliases := makeStringSet(oldReq.ConfigurationAliases)
 			newAliases := makeStringSet(newReq.ConfigurationAliases)
 			for alias := range newAliases {
 				if _, exists := oldAliases[alias]; !exists {
-					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					sink.breaking(DifferenceItem{
 						Category:    "ProviderConfigurationAlias",
 						Name:        alias,
 						Severity:    SeverityBreaking,
 						Description: fmt.Sprintf("Provider configuration alias '%s' is newly required by upstream", alias),
 						Remediation: fmt.Sprintf("Pass a provider configuration for alias '%s' to the module call", alias),
 					})
+
 				}
 			}
 			for alias := range oldAliases {
 				if _, exists := newAliases[alias]; !exists {
-					report.Warnings = append(report.Warnings, DifferenceItem{
+					sink.warning(DifferenceItem{
 						Category:    "ProviderConfigurationAlias",
 						Name:        alias,
 						Severity:    SeverityWarning,
 						Description: fmt.Sprintf("Provider configuration alias '%s' is no longer declared by upstream", alias),
 						Remediation: "Verify provider mappings in parent modules remain valid",
 					})
+
 				}
 			}
 
 			if oldReq.Source != "" && newReq.Source != "" && oldReq.Source != newReq.Source {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:    "ProviderSource",
 					Name:        name,
 					Severity:    SeverityBreaking,
@@ -598,6 +614,7 @@ func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					NewValue:    newReq.Source,
 					Remediation: "Verify provider configuration and state compatibility for the new provider source",
 				})
+
 			}
 
 			normalizeConstraints := func(values []string) string {
@@ -616,7 +633,7 @@ func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			if oldC == newC {
 				// constraint-only noise (whitespace/ordering) produces nothing
 			} else if isMajorProviderBump(oldReq.VersionConstraints, newReq.VersionConstraints) || isBreakingConstraintChange(oldReq.VersionConstraints, newReq.VersionConstraints) {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:    "ProviderMajorUpgrade",
 					Name:        name,
 					Severity:    SeverityBreaking,
@@ -626,8 +643,9 @@ func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					Remediation: "Review provider migration guide and update resource schemas before upgrading",
 					Evidence:    2,
 				})
+
 			} else {
-				report.Warnings = append(report.Warnings, DifferenceItem{
+				sink.warning(DifferenceItem{
 					Category:    "ProviderRequirement",
 					Name:        name,
 					Severity:    SeverityWarning,
@@ -636,6 +654,7 @@ func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					NewValue:    newC,
 					Remediation: "Ensure provider versions in root modules satisfy updated constraint",
 				})
+
 			}
 		}
 	}
@@ -650,7 +669,7 @@ func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 	sort.Strings(newProviderNames)
 	for _, name := range newProviderNames {
 		newReq := newMod.RequiredProviders[name]
-		report.Warnings = append(report.Warnings, DifferenceItem{
+		sink.warning(DifferenceItem{
 			Category:    "ProviderRequirement",
 			Name:        name,
 			Severity:    SeverityWarning,
@@ -658,14 +677,16 @@ func compareRequirements(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			NewValue:    strings.Join(newReq.VersionConstraints, ", "),
 			Remediation: fmt.Sprintf("Ensure root module supplies provider '%s' matching constraints '%s'", name, strings.Join(newReq.VersionConstraints, ", ")),
 		})
+
 		for _, alias := range newReq.ConfigurationAliases {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:    "ProviderConfigurationAlias",
 				Name:        alias,
 				Severity:    SeverityBreaking,
 				Description: fmt.Sprintf("Provider configuration alias '%s' is newly required by upstream", alias),
 				Remediation: fmt.Sprintf("Pass a provider configuration for alias '%s' to the module call", alias),
 			})
+
 		}
 	}
 }
@@ -706,7 +727,7 @@ func sortDifferences(items []DifferenceItem) {
 	})
 }
 
-func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
+func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, sink *diffSink) {
 	if oldMod == nil {
 		oldMod = &ast.ModuleInfo{}
 	}
@@ -724,7 +745,7 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			if _, existed := oldRemoved[rb.From]; existed {
 				continue
 			}
-			report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+			sink.feature(DifferenceItem{
 				Category:        "SoftRemovedBlock",
 				Name:            rb.From,
 				Severity:        SeverityNewFeature,
@@ -732,11 +753,12 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Description:     fmt.Sprintf("Resource or block '%s' declared in removed block with lifecycle.destroy = false (soft migration)", rb.From),
 				Pos:             rb.Pos,
 			})
+
 		} else {
 			if _, existed := oldRemoved[rb.From]; existed {
 				continue
 			}
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:        "RemovedDestroy",
 				Name:            rb.From,
 				Severity:        SeverityBreaking,
@@ -744,6 +766,7 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Description:     fmt.Sprintf("Resource or block '%s' declared in removed block with lifecycle.destroy = true (upstream declares this address will be destroyed)", rb.From),
 				Pos:             rb.Pos,
 			})
+
 		}
 	}
 	// A removed block that disappears -> destruction path no longer declared.
@@ -756,13 +779,14 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			}
 		}
 		if !found {
-			report.Warnings = append(report.Warnings, DifferenceItem{
+			sink.warning(DifferenceItem{
 				Category:        "RemovedBlockRemoved",
 				Name:            rb.From,
 				Severity:        SeverityWarning,
 				ConfidenceScore: 9,
 				Description:     fmt.Sprintf("removed block for '%s' no longer declared (destruction path undeclared again)", rb.From),
 			})
+
 		}
 	}
 
@@ -770,15 +794,16 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 	for name, cb := range newMod.CheckBlocks {
 		oldCB, existed := oldMod.CheckBlocks[name]
 		if !existed {
-			report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+			sink.feature(DifferenceItem{
 				Category:        "CheckBlockAdded",
 				Name:            name,
 				Severity:        SeverityNewFeature,
 				ConfidenceScore: 9,
 				Description:     fmt.Sprintf("Check assertion block '%s' declared with %d rules", name, len(cb.AssertRules)),
 			})
+
 		} else if !sameStrings(oldCB.AssertRules, cb.AssertRules) {
-			report.Warnings = append(report.Warnings, DifferenceItem{
+			sink.warning(DifferenceItem{
 				Category:        "CheckBlockModified",
 				Name:            name,
 				Severity:        SeverityWarning,
@@ -787,17 +812,19 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				OldValue:        strings.Join(oldCB.AssertRules, "; "),
 				NewValue:        strings.Join(cb.AssertRules, "; "),
 			})
+
 		}
 	}
 	for name := range oldMod.CheckBlocks {
 		if _, exists := newMod.CheckBlocks[name]; !exists {
-			report.Warnings = append(report.Warnings, DifferenceItem{
+			sink.warning(DifferenceItem{
 				Category:        "CheckBlockRemoved",
 				Name:            name,
 				Severity:        SeverityWarning,
 				ConfidenceScore: 9,
 				Description:     fmt.Sprintf("Check assertion block '%s' removed (validation regression)", name),
 			})
+
 		}
 	}
 
@@ -809,7 +836,7 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 	for _, ib := range newMod.ImportBlocks {
 		if oldIB, existed := oldImportMap[ib.To]; existed {
 			if oldIB.ID != ib.ID {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:        "ImportBlockModified",
 					Name:            ib.To,
 					Severity:        SeverityBreaking,
@@ -819,9 +846,10 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					NewValue:        ib.ID,
 					Evidence:        2,
 				})
+
 			}
 			if oldIB.Provider != "" && ib.Provider != "" && oldIB.Provider != ib.Provider {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:        "ImportBlockProvider",
 					Name:            ib.To,
 					Severity:        SeverityBreaking,
@@ -831,51 +859,56 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					NewValue:        ib.Provider,
 					Evidence:        2,
 				})
+
 			}
 			continue
 		}
-		report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+		sink.feature(DifferenceItem{
 			Category:        "ImportBlockAdded",
 			Name:            ib.To,
 			Severity:        SeverityNewFeature,
 			ConfidenceScore: 9,
 			Description:     fmt.Sprintf("Programmatic import declared for '%s' (id=%s)", ib.To, ib.ID),
 		})
+
 	}
 	newImports := makeStringSet(importAddresses(newMod.ImportBlocks))
 	for _, ib := range oldMod.ImportBlocks {
 		if _, existed := newImports[ib.To]; !existed {
-			report.Warnings = append(report.Warnings, DifferenceItem{
+			sink.warning(DifferenceItem{
 				Category:        "ImportBlockRemoved",
 				Name:            ib.To,
 				Severity:        SeverityWarning,
 				ConfidenceScore: 9,
 				Description:     fmt.Sprintf("Import block for '%s' removed (re-import required)", ib.To),
 			})
+
 		}
 	}
 
 	// 4. Custom Functions (Terraform 1.8+).
 	for name, fn := range newMod.Functions {
 		if _, existed := oldMod.Functions[name]; !existed {
-			report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+			sink.feature(DifferenceItem{
 				Category:        "FunctionAdded",
 				Name:            name,
 				Severity:        SeverityNewFeature,
 				ConfidenceScore: 9,
 				Description:     fmt.Sprintf("Custom function '%s' declared (returns %s)", name, fn.ReturnType),
 			})
+
 		}
 	}
 	for name := range oldMod.Functions {
 		if _, exists := newMod.Functions[name]; !exists {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:        "FunctionRemoved",
 				Name:            name,
 				Severity:        SeverityBreaking,
 				ConfidenceScore: 9,
 				Description:     fmt.Sprintf("Custom function '%s' removed (callers fail at plan)", name),
 			})
+
 		}
 	}
 
@@ -885,24 +918,26 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 		if _, existed := oldEncryption[eb.KeyProvider]; existed {
 			continue
 		}
-		report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+		sink.feature(DifferenceItem{
 			Category:        "EncryptionConfigured",
 			Name:            eb.KeyProvider,
 			Severity:        SeverityNewFeature,
 			ConfidenceScore: 9,
 			Description:     fmt.Sprintf("State encryption configured with key provider '%s'", eb.KeyProvider),
 		})
+
 	}
 	newEncryption := makeStringSet(encryptionProviders(newMod.EncryptionBlocks))
 	for _, eb := range oldMod.EncryptionBlocks {
 		if _, existed := newEncryption[eb.KeyProvider]; !existed {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:        "EncryptionRemoved",
 				Name:            eb.KeyProvider,
 				Severity:        SeverityBreaking,
 				ConfidenceScore: 9,
 				Description:     fmt.Sprintf("State encryption with key provider '%s' removed (encryption stops applying)", eb.KeyProvider),
 			})
+
 		}
 	}
 
@@ -917,13 +952,14 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 		if _, existed := oldMoved[key]; existed {
 			continue
 		}
-		report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+		sink.feature(DifferenceItem{
 			Category:        "MovedBlockAdded",
 			Name:            mb.To,
 			Severity:        SeverityNewFeature,
 			ConfidenceScore: 9,
 			Description:     fmt.Sprintf("State migration declared: moved %s to %s", mb.From, mb.To),
 		})
+
 	}
 	newMoved := make(map[string]ast.MovedBlockDef)
 	for _, mb := range newMod.MovedBlocks {
@@ -932,13 +968,14 @@ func compareModernBlocks(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 	for _, mb := range oldMod.MovedBlocks {
 		key := mb.From + "->" + mb.To
 		if _, existed := newMoved[key]; !existed {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:        "StateMigrationRemoved",
 				Name:            mb.From,
 				Severity:        SeverityBreaking,
 				ConfidenceScore: 9,
 				Description:     fmt.Sprintf("State migration removed: %s -> %s no longer declared", mb.From, mb.To),
 			})
+
 		}
 	}
 }
@@ -1053,7 +1090,7 @@ func isMajorProviderBump(oldConstraints, newConstraints []string) bool {
 	return oldMajor != newMajor && newMajor > oldMajor
 }
 
-func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffReport, hazardLookup ast.HazardLookup) {
+func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, sink *diffSink, hazardLookup ast.HazardLookup) {
 	if oldMod == nil {
 		oldMod = &ast.ModuleInfo{}
 	}
@@ -1074,7 +1111,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 
 	// backend <-> cloud transition
 	if (oldMod.Backend != nil && newMod.Cloud != nil) || (oldMod.Cloud != nil && newMod.Backend != nil) {
-		report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+		sink.breaking(DifferenceItem{
 			Category:    "StateBackendChange",
 			Name:        "backend",
 			Severity:    SeverityBreaking,
@@ -1093,13 +1130,15 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 			}(),
 			Remediation: "Migrate state to the new backend before upgrading",
 		})
+
+		// backend type change
+
 	}
 
-	// backend type change
 	if oldBackendType != newBackendType && (oldBackendType != "" || newBackendType != "") && !(oldMod.Backend == nil && newMod.Backend == nil) {
 		// only report when both sides use backend (not a backend<->cloud transition already reported)
 		if !(oldMod.Backend != nil && newMod.Cloud != nil) && !(oldMod.Cloud != nil && newMod.Backend != nil) {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:    "StateBackendChange",
 				Name:        "backend",
 				Severity:    SeverityBreaking,
@@ -1108,6 +1147,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 				NewValue:    newBackendType,
 				Remediation: "Migrate state to the new backend before upgrading",
 			})
+
 		}
 	}
 	// cloud organization/workspace/attributes change
@@ -1126,7 +1166,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 		for k, v := range oldAttrs {
 			if nv, ok := newAttrs[k]; ok {
 				if v != nv {
-					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					sink.breaking(DifferenceItem{
 						Category:    "StateBackendChange",
 						Name:        label + "." + k,
 						Severity:    SeverityBreaking,
@@ -1135,9 +1175,10 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 						NewValue:    nv,
 						Remediation: "Migrate state to the new backend before upgrading",
 					})
+
 				}
 			} else {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:    "StateBackendChange",
 					Name:        label + "." + k,
 					Severity:    SeverityBreaking,
@@ -1145,11 +1186,12 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					OldValue:    v,
 					Remediation: "Migrate state to the new backend before upgrading",
 				})
+
 			}
 		}
 		for k, v := range newAttrs {
 			if _, ok := oldAttrs[k]; !ok {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:    "StateBackendChange",
 					Name:        label + "." + k,
 					Severity:    SeverityBreaking,
@@ -1157,6 +1199,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					NewValue:    v,
 					Remediation: "Migrate state to the new backend before upgrading",
 				})
+
 			}
 		}
 	}
@@ -1165,16 +1208,18 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 
 	// cloud added/removed
 	if (oldMod.Cloud == nil) != (newMod.Cloud == nil) && !(oldMod.Cloud == nil && newMod.Cloud == nil) {
-		report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+		sink.breaking(DifferenceItem{
 			Category:    "StateBackendChange",
 			Name:        "cloud",
 			Severity:    SeverityBreaking,
 			Description: "terraform { cloud {} } configuration added or removed",
 			Remediation: "Migrate state to the new backend before upgrading",
 		})
+
+		// Resource-level lifecycle/provisioner comparison
+
 	}
 
-	// Resource-level lifecycle/provisioner comparison
 	sets := []struct {
 		old    map[string]ast.ResourceDef
 		new    map[string]ast.ResourceDef
@@ -1193,7 +1238,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 			}
 			// prevent_destroy removed
 			if oldRes.Lifecycle.PreventDestroy && !newRes.Lifecycle.PreventDestroy {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:    "LifecycleDestroy",
 					Name:        key,
 					Severity:    SeverityBreaking,
@@ -1202,10 +1247,11 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					NewValue:    "false",
 					Remediation: "Re-enable prevent_destroy or accept destruction risk",
 				})
+
 			}
 			// create_before_destroy removed
 			if oldRes.Lifecycle.CreateBeforeDestroy && !newRes.Lifecycle.CreateBeforeDestroy {
-				report.Warnings = append(report.Warnings, DifferenceItem{
+				sink.warning(DifferenceItem{
 					Category:    "LifecycleCreateBeforeDestroy",
 					Name:        key,
 					Severity:    SeverityWarning,
@@ -1214,10 +1260,11 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					NewValue:    "false",
 					Remediation: "Verify downtime tolerance for in-place replacements",
 				})
+
 			}
 			// replace_triggered_by added or modified
 			if len(newRes.Lifecycle.ReplaceTriggeredBy) > 0 && !sameStrings(oldRes.Lifecycle.ReplaceTriggeredBy, newRes.Lifecycle.ReplaceTriggeredBy) {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:    "LifecycleReplaceTriggered",
 					Name:        key,
 					Severity:    SeverityBreaking,
@@ -1227,10 +1274,11 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					Remediation: "Review replacement triggers before upgrading",
 					Evidence:    2,
 				})
+
 			}
 			// ignore_changes: narrowing (old has more than new) -> warning
 			if len(oldRes.Lifecycle.IgnoreChanges) > len(newRes.Lifecycle.IgnoreChanges) {
-				report.Warnings = append(report.Warnings, DifferenceItem{
+				sink.warning(DifferenceItem{
 					Category:    "LifecycleIgnoreChanges",
 					Name:        key,
 					Severity:    SeverityWarning,
@@ -1239,13 +1287,14 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					NewValue:    strings.Join(newRes.Lifecycle.IgnoreChanges, ", "),
 					Remediation: "Verify previously ignored attributes are now applied",
 				})
+
 			}
 			// count / for_each cardinality changes (#113)
 			if oldRes.Count != "" && newRes.Count != "" && oldRes.Count != newRes.Count {
 				oldN, errOld := strconv.Atoi(oldRes.Count)
 				newN, errNew := strconv.Atoi(newRes.Count)
 				if (errOld == nil && errNew == nil && newN < oldN) || newRes.Count == "0" {
-					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					sink.breaking(DifferenceItem{
 						Category:    "ResourceCount",
 						Name:        key,
 						Severity:    SeverityBreaking,
@@ -1255,8 +1304,9 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 						Remediation: "Verify state instance removal before reducing count",
 						Evidence:    2,
 					})
+
 				} else {
-					report.Warnings = append(report.Warnings, DifferenceItem{
+					sink.warning(DifferenceItem{
 						Category:    "ResourceCount",
 						Name:        key,
 						Severity:    SeverityWarning,
@@ -1265,11 +1315,12 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 						NewValue:    newRes.Count,
 						Remediation: "Verify instance count change does not drop active state instances",
 					})
+
 				}
 			}
 			if oldRes.ForEach != "" && newRes.ForEach != "" && oldRes.ForEach != newRes.ForEach {
 				if isForEachShrinkage(oldRes.ForEach, newRes.ForEach) {
-					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					sink.breaking(DifferenceItem{
 						Category:    "ResourceForEach",
 						Name:        key,
 						Severity:    SeverityBreaking,
@@ -1279,8 +1330,9 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 						Remediation: "Add moved {} blocks or verify for_each key set preservation",
 						Evidence:    2,
 					})
+
 				} else {
-					report.Warnings = append(report.Warnings, DifferenceItem{
+					sink.warning(DifferenceItem{
 						Category:    "ResourceForEach",
 						Name:        key,
 						Severity:    SeverityWarning,
@@ -1289,11 +1341,12 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 						NewValue:    newRes.ForEach,
 						Remediation: "Verify for_each key set preservation",
 					})
+
 				}
 			}
 			// triggers / triggers_replace / keepers (#114)
 			if (len(oldRes.Triggers) > 0 || len(newRes.Triggers) > 0) && !reflect.DeepEqual(oldRes.Triggers, newRes.Triggers) {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:    "ResourceTriggers",
 					Name:        key,
 					Severity:    SeverityBreaking,
@@ -1301,11 +1354,12 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					Remediation: "Review trigger changes that force resource replacement",
 					Evidence:    2,
 				})
+
 			}
 			// destructive protection attributes (#114) and ForceNew resource attributes (#115)
 			for _, protAttr := range []string{"deletion_protection", "purge_protection_enabled"} {
 				if oldRes.Attributes[protAttr] == "true" && newRes.Attributes[protAttr] != "true" {
-					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					sink.breaking(DifferenceItem{
 						Category:    "DestructiveAttribute",
 						Name:        key + "." + protAttr,
 						Severity:    SeverityBreaking,
@@ -1315,11 +1369,12 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 						Remediation: fmt.Sprintf("Keep %s = true to prevent accidental resource deletion", protAttr),
 						Evidence:    2,
 					})
+
 				}
 			}
 			for _, forceAttr := range []string{"force_destroy", "skip_final_snapshot"} {
 				if oldRes.Attributes[forceAttr] != "true" && newRes.Attributes[forceAttr] == "true" {
-					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					sink.breaking(DifferenceItem{
 						Category:    "DestructiveAttribute",
 						Name:        key + "." + forceAttr,
 						Severity:    SeverityBreaking,
@@ -1329,6 +1384,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 						Remediation: fmt.Sprintf("Disable %s in production to prevent unrecoverable data loss", forceAttr),
 						Evidence:    2,
 					})
+
 				}
 			}
 			hardcodedForceAttrs := map[string]bool{"cidr_block": true, "vpc_id": true, "availability_zone": true, "subnet_id": true, "ami": true, "engine": true, "location": true, "region": true, "project": true, "resource_group_name": true}
@@ -1336,7 +1392,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 				oldV, okO := oldRes.Attributes[fnAttr]
 				newV, okN := newRes.Attributes[fnAttr]
 				if okO && okN && oldV != newV {
-					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					sink.breaking(DifferenceItem{
 						Category:    "ResourceForceNew",
 						Name:        key + "." + fnAttr,
 						Severity:    SeverityBreaking,
@@ -1346,6 +1402,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 						Remediation: "Avoid changing immutable resource attributes in-place",
 						Evidence:    2,
 					})
+
 				}
 			}
 			// schema-driven ForceNew detection (#133)
@@ -1369,7 +1426,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 						if impact == "" {
 							impact = fmt.Sprintf("Immutable ForceNew attribute '%s' on resource '%s' changed from '%s' to '%s'", attrName, key, oldV, newV)
 						}
-						report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+						sink.breaking(DifferenceItem{
 							Category:    "ResourceForceNew",
 							Name:        key + "." + attrName,
 							Severity:    SeverityBreaking,
@@ -1379,6 +1436,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 							Remediation: remediation,
 							Evidence:    2,
 						})
+
 					}
 				}
 			}
@@ -1396,7 +1454,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 				}
 			}
 			if oldDestroyProv != newDestroyProv {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:    "LifecycleProvisioner",
 					Name:        key,
 					Severity:    SeverityBreaking,
@@ -1405,6 +1463,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					NewValue:    fmt.Sprintf("%d", newDestroyProv),
 					Remediation: "Review provisioner side effects before upgrading",
 				})
+
 			}
 			// precondition / postcondition changes (#140, #158)
 			hasForceNew := referencesForceAttr(oldRes.Preconditions, hardcodedForceAttrs) ||
@@ -1432,9 +1491,11 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					Remediation: "Verify resource preconditions remain valid",
 				}
 				if sev == SeverityBreaking {
-					report.BreakingChanges = append(report.BreakingChanges, item)
+					sink.breaking(item)
+
 				} else {
-					report.Warnings = append(report.Warnings, item)
+					sink.warning(item)
+
 				}
 			}
 			if !sameStrings(oldRes.Postconditions, newRes.Postconditions) {
@@ -1452,9 +1513,11 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					Remediation: "Verify resource postconditions remain valid",
 				}
 				if sev == SeverityBreaking {
-					report.BreakingChanges = append(report.BreakingChanges, item)
+					sink.breaking(item)
+
 				} else {
-					report.Warnings = append(report.Warnings, item)
+					sink.warning(item)
+
 				}
 			}
 			// data-source selector/filter drift (#138, #159, #167)
@@ -1486,9 +1549,11 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 						di.OldValue = oldV
 					}
 					if promote {
-						report.BreakingChanges = append(report.BreakingChanges, di)
+						sink.breaking(di)
+
 					} else {
-						report.Warnings = append(report.Warnings, di)
+						sink.warning(di)
+
 					}
 				}
 			}
@@ -1501,7 +1566,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 		if exists {
 			for k, oldV := range oldP {
 				if newV, ok := newP[k]; ok && oldV != newV {
-					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					sink.breaking(DifferenceItem{
 						Category:    "ProviderConfig",
 						Name:        pName + "." + k,
 						Severity:    SeverityBreaking,
@@ -1511,8 +1576,9 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 						Remediation: "Verify provider target region/account before applying",
 						Evidence:    2,
 					})
+
 				} else if !ok {
-					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					sink.breaking(DifferenceItem{
 						Category:    "ProviderConfig",
 						Name:        pName + "." + k,
 						Severity:    SeverityBreaking,
@@ -1521,11 +1587,12 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 						Remediation: "Verify provider target region/account before applying",
 						Evidence:    2,
 					})
+
 				}
 			}
 			for k, newV := range newP {
 				if _, ok := oldP[k]; !ok {
-					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					sink.breaking(DifferenceItem{
 						Category:    "ProviderConfig",
 						Name:        pName + "." + k,
 						Severity:    SeverityBreaking,
@@ -1534,21 +1601,23 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 						Remediation: "Verify provider target region/account before applying",
 						Evidence:    2,
 					})
+
 				}
 			}
 		} else {
-			report.Warnings = append(report.Warnings, DifferenceItem{
+			sink.warning(DifferenceItem{
 				Category:    "ProviderConfigRemoved",
 				Name:        pName,
 				Severity:    SeverityWarning,
 				Description: fmt.Sprintf("Provider configuration block '%s' removed in upstream", pName),
 				Remediation: "Verify provider configuration before applying",
 			})
+
 		}
 	}
 	for pName, newP := range newMod.ProviderConfigs {
 		if _, exists := oldMod.ProviderConfigs[pName]; !exists {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:    "ProviderConfigAdded",
 				Name:        pName,
 				Severity:    SeverityBreaking,
@@ -1557,6 +1626,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 				Remediation: "Verify provider configuration before applying",
 				Evidence:    2,
 			})
+
 		}
 	}
 
@@ -1564,7 +1634,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 	for lName, oldVal := range oldMod.Locals {
 		if newVal, exists := newMod.Locals[lName]; exists && normalizeCondition(oldVal) != normalizeCondition(newVal) {
 			if localForceRefs[lName] {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:    "LocalValue",
 					Name:        "local." + lName,
 					Severity:    SeverityBreaking,
@@ -1573,8 +1643,9 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					NewValue:    newVal,
 					Remediation: "Verify resources and outputs referencing local." + lName,
 				})
+
 			} else {
-				report.Warnings = append(report.Warnings, DifferenceItem{
+				sink.warning(DifferenceItem{
 					Category:    "LocalValue",
 					Name:        "local." + lName,
 					Severity:    SeverityWarning,
@@ -1583,6 +1654,7 @@ func compareDestructiveToggles(oldMod, newMod *ast.ModuleInfo, report *DiffRepor
 					NewValue:    newVal,
 					Remediation: "Verify resources and outputs referencing local." + lName,
 				})
+
 			}
 		}
 	}
@@ -1714,7 +1786,8 @@ func modeLabel(mode string) string {
 // type/provider reassignment becomes a breaking change. Resources that are already
 // reported as address shifts by ast.DetectAddressShifts are suppressed so a renamed
 // resource is reported once.
-func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
+func compareResources(oldMod, newMod *ast.ModuleInfo, sink *diffSink) {
+	report := sink.report
 	if oldMod == nil {
 		oldMod = &ast.ModuleInfo{}
 	}
@@ -1746,7 +1819,7 @@ func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			shiftedOld[sh.OldAddress.FullAddress()] = struct{}{}
 			shiftedNew[sh.NewAddress.FullAddress()] = struct{}{}
 			if sh.IsRecreation {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:    "AddressShift",
 					Name:        sh.OldAddress.FullAddress(),
 					Severity:    SeverityBreaking,
@@ -1756,6 +1829,7 @@ func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					Remediation: fmt.Sprintf("Add a moved { from = %s to = %s } block to migrate state without recreation", sh.OldAddress.FullAddress(), sh.NewAddress.FullAddress()),
 					Evidence:    2,
 				})
+
 			}
 		}
 	}
@@ -1783,7 +1857,7 @@ func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			// Exact key match
 			if newRes, ok := rs.new[key]; ok {
 				if oldRes.Provider != "" && newRes.Provider != "" && oldRes.Provider != newRes.Provider {
-					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					sink.breaking(DifferenceItem{
 						Category:    "ResourceProvider",
 						Name:        key,
 						Severity:    SeverityBreaking,
@@ -1793,6 +1867,7 @@ func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 						Remediation: "Update provider configuration for this resource",
 						Pos:         oldRes.Pos,
 					})
+
 				}
 				consumedNew[key] = true
 				continue
@@ -1805,7 +1880,7 @@ func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					continue
 				}
 				if newRes.Name != "" && newRes.Name == oldRes.Name && newRes.Type != oldRes.Type {
-					report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+					sink.breaking(DifferenceItem{
 						Category:    "ResourceProvider",
 						Name:        key,
 						Severity:    SeverityBreaking,
@@ -1815,6 +1890,7 @@ func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 						Remediation: "Update resource type and migrate state before upgrading",
 						Pos:         oldRes.Pos,
 					})
+
 					consumedNew[nKey] = true
 					reassigned = true
 					break
@@ -1823,17 +1899,19 @@ func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			if reassigned {
 				continue
 			}
+			sink.
 
-			// Removed
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
-				Category:    "Resource",
-				Name:        key,
-				Severity:    SeverityBreaking,
-				Description: fmt.Sprintf("%s resource '%s' was removed in upstream version", modeLabel(rs.mode), key),
-				OldValue:    fmt.Sprintf("type=%s, provider=%s", oldRes.Type, oldRes.Provider),
-				Remediation: "Remove resource or migrate state before upgrading",
-				Pos:         oldRes.Pos,
-			})
+				// Removed
+				breaking(DifferenceItem{
+					Category:    "Resource",
+					Name:        key,
+					Severity:    SeverityBreaking,
+					Description: fmt.Sprintf("%s resource '%s' was removed in upstream version", modeLabel(rs.mode), key),
+					OldValue:    fmt.Sprintf("type=%s, provider=%s", oldRes.Type, oldRes.Provider),
+					Remediation: "Remove resource or migrate state before upgrading",
+					Pos:         oldRes.Pos,
+				})
+
 		}
 
 		// Added resources
@@ -1845,26 +1923,28 @@ func compareResources(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 			if _, shifted := shiftedNew[fullNew]; shifted {
 				continue
 			}
-			// skip if it was a type-reassignment target (consumed already handled above via consumedNew)
-			report.NewFeatures = append(report.NewFeatures, DifferenceItem{
-				Category:    "Resource",
-				Name:        key,
-				Severity:    SeverityNewFeature,
-				Description: fmt.Sprintf("New %s resource '%s' available in upstream", modeLabel(rs.mode), key),
-				NewValue:    fmt.Sprintf("type=%s, provider=%s", newRes.Type, newRes.Provider),
-				Remediation: "Consider exposing this resource in wrapper if needed",
-				Pos:         newRes.Pos,
-			})
+			sink.
+				// skip if it was a type-reassignment target (consumed already handled above via consumedNew)
+				feature(DifferenceItem{
+					Category:    "Resource",
+					Name:        key,
+					Severity:    SeverityNewFeature,
+					Description: fmt.Sprintf("New %s resource '%s' available in upstream", modeLabel(rs.mode), key),
+					NewValue:    fmt.Sprintf("type=%s, provider=%s", newRes.Type, newRes.Provider),
+					Remediation: "Consider exposing this resource in wrapper if needed",
+					Pos:         newRes.Pos,
+				})
+
 		}
 	}
 }
 
 // compareModuleCalls diffs nested module {} blocks declared inside oldMod and newMod (#112).
-func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
+func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, sink *diffSink) {
 	for name, oldCall := range oldMod.ModuleCalls {
 		newCall, exists := newMod.ModuleCalls[name]
 		if !exists {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:    "ModuleCall",
 				Name:        "module." + name,
 				Severity:    SeverityBreaking,
@@ -1874,10 +1954,11 @@ func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Pos:         oldCall.Pos,
 				Evidence:    2,
 			})
+
 			continue
 		}
 		if oldCall.Source != "" && newCall.Source != "" && oldCall.Source != newCall.Source {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:    "ModuleCallSource",
 				Name:        "module." + name,
 				Severity:    SeverityBreaking,
@@ -1888,6 +1969,7 @@ func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Pos:         newCall.Pos,
 				Evidence:    2,
 			})
+
 		}
 		// version constraint bump (#134)
 		if oldCall.Version != "" && newCall.Version != "" && oldCall.Version != newCall.Version {
@@ -1909,7 +1991,7 @@ func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				breaking = true
 			}
 			if breaking {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:    "ModuleCallVersion",
 					Name:        "module." + name,
 					Severity:    SeverityBreaking,
@@ -1920,8 +2002,9 @@ func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					Pos:         newCall.Pos,
 					Evidence:    2,
 				})
+
 			} else {
-				report.Warnings = append(report.Warnings, DifferenceItem{
+				sink.warning(DifferenceItem{
 					Category:    "ModuleCallVersion",
 					Name:        "module." + name,
 					Severity:    SeverityWarning,
@@ -1931,10 +2014,11 @@ func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					Remediation: fmt.Sprintf("Verify child module compatibility for 'module.%s'", name),
 					Pos:         newCall.Pos,
 				})
+
 			}
 		}
 		if (oldCall.Count != "") != (newCall.Count != "") || (oldCall.ForEach != "") != (newCall.ForEach != "") {
-			report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+			sink.breaking(DifferenceItem{
 				Category:    "ModuleCallIndex",
 				Name:        "module." + name,
 				Severity:    SeverityBreaking,
@@ -1943,13 +2027,14 @@ func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				Pos:         newCall.Pos,
 				Evidence:    2,
 			})
+
 		}
 		// cardinality expression changes (#137)
 		if oldCall.Count != "" && newCall.Count != "" && oldCall.Count != newCall.Count {
 			oldN, errOld := strconv.Atoi(oldCall.Count)
 			newN, errNew := strconv.Atoi(newCall.Count)
 			if (errOld == nil && errNew == nil && newN < oldN) || newCall.Count == "0" {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:    "ModuleCallCount",
 					Name:        "module." + name,
 					Severity:    SeverityBreaking,
@@ -1959,8 +2044,9 @@ func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					Remediation: fmt.Sprintf("Verify child module instance removal for 'module.%s'", name),
 					Evidence:    2,
 				})
+
 			} else {
-				report.Warnings = append(report.Warnings, DifferenceItem{
+				sink.warning(DifferenceItem{
 					Category:    "ModuleCallCount",
 					Name:        "module." + name,
 					Severity:    SeverityWarning,
@@ -1969,11 +2055,12 @@ func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					NewValue:    newCall.Count,
 					Remediation: fmt.Sprintf("Verify child module instance count for 'module.%s'", name),
 				})
+
 			}
 		}
 		if oldCall.ForEach != "" && newCall.ForEach != "" && oldCall.ForEach != newCall.ForEach {
 			if isForEachShrinkage(oldCall.ForEach, newCall.ForEach) {
-				report.BreakingChanges = append(report.BreakingChanges, DifferenceItem{
+				sink.breaking(DifferenceItem{
 					Category:    "ModuleCallForEach",
 					Name:        "module." + name,
 					Severity:    SeverityBreaking,
@@ -1983,8 +2070,9 @@ func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					Remediation: fmt.Sprintf("Verify child module instance keys for 'module.%s'", name),
 					Evidence:    2,
 				})
+
 			} else {
-				report.Warnings = append(report.Warnings, DifferenceItem{
+				sink.warning(DifferenceItem{
 					Category:    "ModuleCallForEach",
 					Name:        "module." + name,
 					Severity:    SeverityWarning,
@@ -1993,12 +2081,13 @@ func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 					NewValue:    newCall.ForEach,
 					Remediation: fmt.Sprintf("Verify child module instance keys for 'module.%s'", name),
 				})
+
 			}
 		}
 	}
 	for name, newCall := range newMod.ModuleCalls {
 		if _, exists := oldMod.ModuleCalls[name]; !exists {
-			report.NewFeatures = append(report.NewFeatures, DifferenceItem{
+			sink.feature(DifferenceItem{
 				Category:    "ModuleCall",
 				Name:        "module." + name,
 				Severity:    SeverityNewFeature,
@@ -2006,6 +2095,7 @@ func compareModuleCalls(oldMod, newMod *ast.ModuleInfo, report *DiffReport) {
 				NewValue:    newCall.Source,
 				Pos:         newCall.Pos,
 			})
+
 		}
 	}
 }

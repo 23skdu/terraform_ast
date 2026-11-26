@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -792,4 +794,69 @@ func TestDownloadModule_SubmoduleExtraction(t *testing.T) {
 	badTarClient.BaseURL = badTarServer.URL
 	err = badTarClient.DownloadModule(context.Background(), "hashicorp/vault/aws", "1.0.0", t.TempDir())
 	require.Error(t, err)
+}
+
+type errorBody struct{}
+
+func (errorBody) Read([]byte) (int, error) { return 0, errors.New("body read failed") }
+func (errorBody) Close() error             { return nil }
+
+type errorBodyTransport struct{}
+
+func (errorBodyTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Body: errorBody{}, Header: make(http.Header)}, nil
+}
+
+func TestRegistryClient_FetchProviderSchema(t *testing.T) {
+	const schemaJSON = `{"format_version":"1.0","provider_schemas":{}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/schema.json", r.URL.Path)
+		_, _ = io.WriteString(w, schemaJSON)
+	}))
+	defer server.Close()
+
+	client := NewClient(nil)
+	data, err := client.FetchProviderSchema(context.Background(), server.URL+"/schema.json")
+	require.NoError(t, err)
+	assert.JSONEq(t, schemaJSON, string(data))
+}
+
+func TestRegistryClient_FetchProviderSchemaErrors(t *testing.T) {
+	client := NewClient(nil)
+
+	_, err := client.FetchProviderSchema(context.Background(), "http://[::1")
+	assert.ErrorContains(t, err, "invalid provider schema URL")
+
+	_, err = client.FetchProviderSchema(context.Background(), "ftp://example.com/schema.json")
+	assert.ErrorContains(t, err, "absolute http(s) URL")
+
+	_, err = client.FetchProviderSchema(context.Background(), "https:///schema.json")
+	assert.ErrorContains(t, err, "absolute http(s) URL")
+
+	// net/http rejects a nil context before any request is made.
+	var nilContext context.Context
+	_, err = client.FetchProviderSchema(nilContext, "https://example.com/schema.json")
+	assert.ErrorContains(t, err, "create provider schema request")
+
+	notFound := httptest.NewServer(http.NotFoundHandler())
+	defer notFound.Close()
+	_, err = client.FetchProviderSchema(context.Background(), notFound.URL+"/schema.json")
+	assert.ErrorContains(t, err, "unexpected status 404")
+
+	oversize := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("x"), MaxProviderSchemaBytes+1))
+	}))
+	defer oversize.Close()
+	_, err = client.FetchProviderSchema(context.Background(), oversize.URL+"/schema.json")
+	assert.ErrorContains(t, err, "exceeds")
+
+	brokenBody := &Client{HTTPClient: &http.Client{Transport: errorBodyTransport{}}}
+	_, err = brokenBody.FetchProviderSchema(context.Background(), "https://example.com/schema.json")
+	assert.ErrorContains(t, err, "body read failed")
+
+	// A refused connection is a request error, not an HTTP status. A short retry budget keeps the
+	// test fast while still exercising that branch.
+	refused := &Client{HTTPClient: &http.Client{Timeout: time.Second}, RetryMaxElapsedTime: 10 * time.Millisecond}
+	_, err = refused.FetchProviderSchema(context.Background(), "http://127.0.0.1:1/schema.json")
+	assert.ErrorContains(t, err, "request provider schema")
 }

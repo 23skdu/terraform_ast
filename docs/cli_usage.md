@@ -59,6 +59,7 @@ Audits a local wrapper module (such as a Google GKE or AWS EKS wrapper) against 
 - `--fix`: Apply fixes in-place to remove obsolete wrapper arguments, inject missing required upstream inputs with safe primitive placeholders (`string` `""`, `bool` `false`, `number` `0`; exits with code 2 if a complex required input has no safe placeholder), and synthesize `moved.tf` for unmigrated address shifts. Mutually exclusive with `--fix-preview`.
 - `--golden-plan <file>`: Optional path to a Terraform plan JSON file (`terraform show -json <planfile>`). Correlates planned resource changes against detected `ForceNew` recreation hazards, address shifts, and replacement actions (`["delete", "create"]`). If omitted, automatically discovers candidate plans (`golden-plan.json`, `golden_plan.json`, `tfplan.json`, `plan.json`, `.terraform/tfplan.json`) in the wrapper directory.
 - `--provider-schema <file>`: Optional path to a provider schema JSON file (`terraform providers schema -json`). Dynamically extracts `requires_replace` metadata across resources and nested blocks to detect ForceNew recreation hazards across any cloud provider.
+- `--provider-schema-url <url>`: Optional absolute HTTP(S) URL to a document published in the same `terraform providers schema -json` format. Fetched through the registry client's SSRF guard, retry logic, and `--registry-timeout`, bounded to 32 MiB; only the `provider_schemas` block is used. Fresh responses are cached in `--cache-dir` with a 30-minute TTL. Mutually exclusive with `--provider-schema`. The public Terraform Registry does not publish schema JSON, so the URL must point at an endpoint or artifact store that does; a Terraform-generated file remains authoritative.
 - `--cache-dir <dir>`: Optional path to an on-disk directory for persistent L2 AST caching, accelerating monorepo traversals and pre-commit checks.
 - `--clear-cache`: Clears only cache files matching `<sha256>.json` in the `--cache-dir`.
 - `--registry-timeout <duration>`: Timeout for Terraform Registry operations (default: `2m`).
@@ -176,6 +177,7 @@ Compares two versions of an upstream module directly:
 - `--policy <file>`: Applies the same JSON policy gates as wrapper audit mode.
 - `--rego-policy <file>`: Optional path to an Open Policy Agent / Rego policy document (`.rego`) evaluated against comparison findings.
 - `--provider-schema <file>`: Supply a provider schema JSON file (`terraform providers schema -json`) for dynamic ForceNew recreation detection across all providers.
+- `--provider-schema-url <url>`: Fetch the same schema document from an HTTP(S) endpoint with the credential-free registry request path, retry budget, and bounded cache. Mutually exclusive with `--provider-schema`.
 - `--cache-dir <dir>`: Optional path to an on-disk directory for persistent L2 AST caching.
 - `--clear-cache`: Clears only cache files matching `<sha256>.json` in the `--cache-dir`.
 - `--registry-timeout <duration>`: Timeout for Terraform Registry operations (default: `2m`).
@@ -284,8 +286,11 @@ selection/secret wiring changes, and added, removed, or changed `spec.parameters
   (dependencies first). The order is deterministic and cycle detection is reported as an error.
 
 For library callers, `diff.CompareStream` exposes difference items on a channel and
-`diff.CompareStreamContext` adds cancellation. The report is still assembled before items are
-emitted; a genuinely incremental, bounded-memory diff path is tracked in `docs/roadmap.md` (R1).
+`diff.CompareStreamContext` adds cancellation. Findings are emitted through a shared sink as soon
+as their comparison phase produces them, so no item slices are accumulated: memory stays bounded
+regardless of the number of differences. The terminal `Done` event carries a summary report
+(totals, verdict, safe pin, and address shifts) with empty item slices; callers that need the
+complete `DiffReport` should use `diff.Compare`.
 
 ---
 
@@ -516,6 +521,11 @@ tfastdiff \
   --provider-schema provider-schema.json \
   --format markdown
 ```
+
+If your platform publishes the exported document over HTTP(S), replace
+`--provider-schema provider-schema.json` with
+`--provider-schema-url https://artifacts.example.com/schemas/google-18.0.0.json`.
+
 **Outcome**:
 - Ingests `requires_replace` metadata across resource attributes.
 - Alerts if attributes like database instance name or storage type trigger complete resource rebuilds and data destruction.

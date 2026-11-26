@@ -2,6 +2,7 @@ package diff
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/23skdu/terraform_ast/pkg/ast"
@@ -33,6 +34,7 @@ func TestCompareStream(t *testing.T) {
 	events, report := CollectDiff(ch)
 	require.NotNil(t, report)
 	assert.Equal(t, "1.0", report.OldVersion)
+	direct := Compare(oldMod, newMod, "1.0", "2.0")
 
 	breaking, warnings, features := 0, 0, 0
 	for _, e := range events {
@@ -47,9 +49,14 @@ func TestCompareStream(t *testing.T) {
 			assert.Same(t, report, e.Report)
 		}
 	}
-	assert.Equal(t, len(report.BreakingChanges), breaking)
-	assert.Equal(t, len(report.Warnings), warnings)
-	assert.Equal(t, len(report.NewFeatures), features)
+	// The terminal report is a summary: items were already streamed, so only the
+	// counters are retained. They must match a full buffered Compare.
+	assert.Equal(t, direct.TotalBreaking, breaking)
+	assert.Equal(t, direct.TotalWarnings, warnings)
+	assert.Equal(t, direct.TotalNewFeatures, features)
+	assert.Equal(t, breaking, report.TotalBreaking)
+	assert.Equal(t, warnings, report.TotalWarnings)
+	assert.Equal(t, features, report.TotalNewFeatures)
 
 	// Exercise the breaking-change streaming path with a type change.
 	breakingModOld := &ast.ModuleInfo{
@@ -70,9 +77,9 @@ func TestCompareStream(t *testing.T) {
 	assert.NotNil(t, bReport)
 	assert.NotEmpty(t, bEvents)
 
-	// The streamed report must match a direct Compare.
-	direct := Compare(oldMod, newMod, "1.0", "2.0")
-	assert.Equal(t, direct.TotalBreaking, report.TotalBreaking)
+	// The breaking-change summary must match a direct Compare.
+	directBreaking := Compare(breakingModOld, breakingModNew, "1.0", "2.0")
+	assert.Equal(t, directBreaking.TotalBreaking, bReport.TotalBreaking)
 
 	// Exercise the new-feature streaming path.
 	featureOld := &ast.ModuleInfo{
@@ -128,6 +135,41 @@ func TestCompareStreamContextCancellation(t *testing.T) {
 	assert.Nil(t, report)
 }
 
+func TestCompareStreamContextStopsOnMidStreamCancellation(t *testing.T) {
+	oldMod := &ast.ModuleInfo{Variables: map[string]ast.VariableDef{}}
+	newMod := &ast.ModuleInfo{Variables: make(map[string]ast.VariableDef)}
+	// More findings than the channel buffer forces the producer to observe cancellation
+	// while the phase is still emitting, not merely at a phase boundary.
+	for i := 0; i < 200; i++ {
+		name := fmt.Sprintf("new_var_%d", i)
+		newMod.Variables[name] = ast.VariableDef{Name: name, Type: "string", HasDefault: true}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := CompareStreamContext(ctx, oldMod, newMod, "1.0.0", "2.0.0")
+	first, ok := <-ch
+	require.True(t, ok)
+	assert.Equal(t, DiffStreamFeature, first.Kind)
+	cancel()
+
+	var received, done int
+	for event := range ch {
+		received++
+		if event.Kind == DiffStreamDone {
+			done++
+		}
+	}
+	assert.Less(t, received, 200)
+	assert.Zero(t, done, "a cancelled stream must not emit a terminal report")
+}
+
+func TestSendDiffEventStopsOnCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	assert.False(t, sendDiffEvent(ctx, make(chan DiffStreamEvent, 1), DiffStreamEvent{}))
+}
+
 func TestCompareStreamPreservesItemsAndHazardLookup(t *testing.T) {
 	resource := func(cidr string) map[string]ast.ResourceDef {
 		return map[string]ast.ResourceDef{
@@ -140,7 +182,13 @@ func TestCompareStreamPreservesItemsAndHazardLookup(t *testing.T) {
 	events, streamed := CollectDiff(CompareStream(oldMod, newMod, "1.0.0", "2.0.0", simpleHazardLookup{}))
 	require.NotNil(t, streamed)
 	direct := Compare(oldMod, newMod, "1.0.0", "2.0.0", simpleHazardLookup{})
-	assert.Equal(t, direct, streamed)
+	// The streamed terminal event carries only summary state; the items were emitted
+	// earlier and are deliberately not retained.
+	expectedSummary := *direct
+	expectedSummary.BreakingChanges = nil
+	expectedSummary.Warnings = nil
+	expectedSummary.NewFeatures = nil
+	assert.Equal(t, &expectedSummary, streamed)
 
 	var breaking, warnings, features []DifferenceItem
 	for _, event := range events {
@@ -155,9 +203,11 @@ func TestCompareStreamPreservesItemsAndHazardLookup(t *testing.T) {
 			assert.Same(t, streamed, event.Report)
 		}
 	}
-	assert.Equal(t, direct.BreakingChanges, breaking)
-	assert.Equal(t, direct.Warnings, warnings)
-	assert.Equal(t, direct.NewFeatures, features)
+	// Items are emitted per phase, so their order can differ from the globally sorted
+	// buffered report; every item must still be present exactly once.
+	assert.ElementsMatch(t, direct.BreakingChanges, breaking)
+	assert.ElementsMatch(t, direct.Warnings, warnings)
+	assert.ElementsMatch(t, direct.NewFeatures, features)
 }
 
 func TestDiffIterator(t *testing.T) {

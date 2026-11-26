@@ -4025,3 +4025,100 @@ module "gke" {
 	assert.Contains(t, stderr.String(), "Autodiscovered golden plan")
 	assert.Contains(t, stdout.String(), "(autodiscovered)")
 }
+
+func TestExecute_ProviderSchemaURL(t *testing.T) {
+	const schemaJSON = `{
+  "format_version": "1.0",
+  "provider_schemas": {
+    "registry.terraform.io/hashicorp/aws": {
+      "resource_schemas": {
+        "aws_vpc": {
+          "block": {
+            "attributes": {
+              "cidr_block": {
+                "type": "string",
+                "requires_replace": true
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		assert.Equal(t, "/schema.json", r.URL.Path)
+		_, _ = io.WriteString(w, schemaJSON)
+	}))
+	defer server.Close()
+
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
+	resource := func(cidr string) string {
+		return fmt.Sprintf("resource \"aws_vpc\" \"main\" {\n  cidr_block = %q\n}\n", cidr)
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(oldDir, "main.tf"), []byte(resource("10.0.0.0/16")), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(newDir, "main.tf"), []byte(resource("10.1.0.0/16")), 0o600))
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{
+		"--old", oldDir, "--new", newDir, "--format", "json",
+		"--provider-schema-url", server.URL + "/schema.json",
+	}, &stdout, &stderr)
+	require.Equal(t, 0, code, stderr.String())
+	assert.Contains(t, stdout.String(), "ResourceForceNew")
+	assert.Equal(t, 1, requests)
+
+	// A malformed document is rejected before any analysis runs.
+	badServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "not json")
+	}))
+	defer badServer.Close()
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", oldDir, "--new", newDir,
+		"--provider-schema-url", badServer.URL + "/schema.json",
+	}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "decode provider schema JSON")
+}
+
+func TestExecute_ProviderSchemaURLErrors(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+
+	code := Execute([]string{
+		"--old", t.TempDir(), "--new", t.TempDir(),
+		"--provider-schema", "schema.json", "--provider-schema-url", "https://example.com/schema.json",
+	}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "Cannot specify both")
+
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", t.TempDir(), "--new", t.TempDir(),
+		"--provider-schema-url", "ftp://example.com/schema.json",
+	}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "absolute http(s) URL")
+
+	notFound := httptest.NewServer(http.NotFoundHandler())
+	defer notFound.Close()
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", t.TempDir(), "--new", t.TempDir(),
+		"--provider-schema-url", notFound.URL + "/schema.json",
+	}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "unexpected status 404")
+
+	stderr.Reset()
+	code = Execute([]string{
+		"--old", t.TempDir(), "--new", t.TempDir(), "--fix-preview",
+		"--provider-schema-url", "https://example.com/schema.json",
+	}, &stdout, &stderr)
+	assert.Equal(t, 2, code)
+	assert.Contains(t, stderr.String(), "--provider-schema-url is not supported with --fix or --fix-preview")
+}

@@ -3,10 +3,10 @@
 **Scope:** Remaining memory/performance hardening and feature-gap closure for
 `terraform_ast` (`tfastdiff`).
 
-**Status:** Active. A gap analysis against the original Pass 11 acceptance criteria found that the
-previous "all items implemented" claim was inaccurate. Bounded fixes (validation, wiring, tests,
-and documentation) have landed for every item; the large, genuinely unimplemented features are
-re-opened below with their acceptance criteria.
+**Status:** Active. A gap analysis found that the earlier "all items implemented" claim was
+inaccurate. Bounded fixes and both large Pass 11 gaps (R1 incremental streaming and R6 remote
+schema retrieval) are now implemented and verified. The remaining items are the CI wiring and
+proof-surface extensions for the formal Lean model, tracked in sections 1 and 3.
 
 ---
 
@@ -29,8 +29,13 @@ This roadmap does not re-track it.
 
 | ID | Pri | Remaining item | Why it remains / acceptance criteria |
 | :--- | :---: | :--- | :--- |
-| **R1** | P1 | Genuinely incremental diff accumulation | `diff.CompareStreamContext` now streams items with cancellation, but the full `DiffReport` is still built before emission. Done when large modules are diffed incrementally with bounded memory and no whole-report accumulation. |
-| **R6** | P2 | Registry provider-schema retrieval | The in-memory and on-disk caches are now bounded by TTL/count, but the registry client still does not fetch provider schemas. The public registry publishes provider versions and binaries, not `terraform providers schema -json` output (`/v1/providers/.../schema` returns 404), so the original fetch endpoint does not exist. Done when schemas are obtained from an endpoint or plugin handshake that actually publishes them, scoped to the `provider_schemas` block, and served by the bounded expiring cache. Until then, `--provider-schema` with a Terraform-generated JSON file remains authoritative. |
+| **L3** | P2 | Run the Lean gate in CI | `make lean-verify` type-checks the proof locally and the toolchain is pinned in `lean/lean-toolchain`, but CI does not yet install Lean. Done when the CI workflow runs `make lean-verify` as a required check. |
+| **L4** | P3 | Extend the formal proof surface | The decision procedure is proved; pin fallback for empty version strings, address-shift suppression, and wrapper-mode count equivalence are still covered only by Go tests. Done when those invariants have Lean theorems and `docs/formalproof.md` records them. |
+
+The two large Pass 11 gaps (R1 and R6) are now closed; their implementation notes are
+in section 2. The public registry still does not publish provider schemas, so R6 is
+closed against an operator-supplied endpoint rather than a registry API that does not
+exist.
 
 ---
 
@@ -38,8 +43,10 @@ This roadmap does not re-track it.
 
 The following gaps were closed and verified with 100% statement coverage:
 
-- **R1:** `diff.CompareStreamContext` adds cancellation and deterministic early stop; the streaming
-  iterator is benchmarked.
+- **R1:** `diff.CompareStreamContext` now emits each finding as it is produced through a shared
+  `diffSink`; no item slices are accumulated. The terminal `Done` event carries only counters,
+  verdict, safe pin, and address shifts, and cancellation stops the next send without leaking a
+  producer goroutine. The streaming iterator is benchmarked.
 - **R2:** `drift --state --live` rejects empty/null/duplicate-address snapshots, error messages use
   real newlines, and the legacy golden mode announces that it self-compares.
 - **R3:** topological order is documented and covered for cycles, duplicate edges, unknown endpoints,
@@ -72,6 +79,33 @@ The following gaps were closed and verified with 100% statement coverage:
 - **R8:** the benchmark gate is now blocking in CI and normalises each run against
   `BenchmarkGateCalibration`, so a faster or slower runner does not create a false regression. The
   committed baseline was regenerated with the calibration benchmark included.
+- **R6:** `registry.Client.FetchProviderSchema` retrieves a `terraform providers schema -json`
+  document from an operator-supplied HTTP(S) endpoint through the existing SSRF guard, retry, and
+  cancellation logic, bounded to 32 MiB. `recreation.LoadRemoteProviderSchema` rejects documents
+  without a `provider_schemas` block and stores them in the bounded, expiring on-disk schema cache.
+  The CLI exposes this via `--provider-schema-url`; `--provider-schema` with a Terraform-generated
+  file remains authoritative.
+
+---
+
+## 3. Formal verification steps (Lean)
+
+The safety verdict is now also covered by a machine-checked model. The steps below are
+tracked here so the proof cannot silently drift from the Go implementation.
+
+1. **L1 — Model the decision procedure (done).** All Lean files live under `lean/`.
+   `lean/DiffVerdict.lean` mirrors `computeVerdict`, `CanSafelyUpdate`, and the pin source
+   in `recommendSafePin`; the toolchain is pinned in `lean/lean-toolchain` (Lean 4.36.0).
+2. **L2 — Prove the invariants (done).** Six theorems are checked with core Lean only:
+   the exact safety condition, the four-way verdict partition, agreement between
+   verdict and exit-code safety, downgrade pin selection, and monotonicity of breaking
+   findings. See `docs/formalproof.md` for statements and scope.
+3. **L3 — Verify (done locally, CI open).** `make lean-verify` type-checks the proof and
+   fails on any unsolved goal. It is intentionally opt-in so `make verify` stays usable
+   without Lean; the remaining work is to install Lean in CI and require the target.
+4. **L4 — Extend the surface (open).** Add theorems for empty-version pin fallbacks,
+   address-shift suppression, and wrapper-mode count equivalence, then update
+   `docs/formalproof.md` in the same commit.
 
 The authoritative flag reference is `docs/cli_usage.md`; stale feature claims in `README.md` were
 corrected to match the implemented CLI.
